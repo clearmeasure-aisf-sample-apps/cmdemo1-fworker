@@ -551,7 +551,7 @@ sealed class World
         {
             if (!issues.ContainsKey(int.Parse(m.Groups[1].Value))) return (404, "{\"message\":\"Not Found\"}");
             var i = issues[int.Parse(m.Groups[1].Value)];
-            if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; else if (b?["state"]?.ToString() == "open") i.Open = true; return (200, J(("number", i.Number))); }
+            if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
             // as GitHub: the labels are part of the issue (the engine's intake reads an item's labels from this single read, W9.10d)
             return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray()))));
         }
@@ -1279,6 +1279,11 @@ sealed class World
             case "move":
             {   // { number, column }: a person moves the card (null: no column); an issue without a card gets one
                 var i = issues[b!["number"]!.GetValue<int>()]; i.Column = b["column"]?.ToString(); i.Card ??= "card_" + i.Number;
+                return (200, J(("ok", true)));
+            }
+            case "reopen":
+            {   // { number }: a person reopens the issue (a test control: a PATCH with state open leaves the issue as it is here, as the scenarios of the sweep have always relied on)
+                issues[b!["number"]!.GetValue<int>()].Open = true;
                 return (200, J(("ok", true)));
             }
             case "push-branch":

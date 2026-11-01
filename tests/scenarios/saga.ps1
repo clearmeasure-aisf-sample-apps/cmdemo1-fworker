@@ -554,7 +554,7 @@ $SagaScenarios['saga: admission: an item whose issue a person closed and then re
         $done = Wait-Until -Seconds 150 { $v = Saga-View $r; ($null -eq $v) -or ("$($v.status)" -eq 'completed') -or ('completed' -in (Saga-Actions $r)) }
         Check "the saga of #$r ends when its issue is closed" $done "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4); $((Saga-Actions $r) -join ',')"
         Start-Sleep -Seconds 35   # (the board reconciler sees the card closed in one pass, and open in a later one)
-        & $setState $r 'open'
+        [void](Fake 'reopen' @{ number = $r })
         [void](Fake 'move' @{ number = $r; column = 'Development' })
         $fi = Get-FakeIssue $r
         Check "the person's reopening and move took (issue open, card in Development)" ($fi.open -eq $true -and "$($fi.column)" -eq 'Development') "issue: column $($fi.column), open $($fi.open)"
