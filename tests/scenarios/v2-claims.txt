@@ -38,9 +38,8 @@ saga | ^saga: slots: | profile=saga-feature
 saga | ^saga: intake: a Todo item | profile=saga-feature
 saga | ^saga: intake: a worker: pin | profile=saga-feature
 # W9.9b (#361): the adoption at a start with v1 items in flight (two items with v1's state comments, adopted at the start; the next start adopts nothing again; the report in the v2 status). Passed on v2 on 2026-10-31.
-saga | ^saga: adoption: a start | profile=saga-feature
+saga | ^saga: (adoption: a start|admission:) | profile=saga-feature
 # V1.1: the admission. Replenish starts the saga of the item it creates; a card a person moves into a step column gets a saga that begins at that step (started by the admission, or adopted when v1 wrote a state comment first).
-saga | ^saga: admission: | profile=saga-feature
 
 # ---- whole suites ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
