@@ -222,10 +222,27 @@ public sealed class DocsMergePortTests
         var first = (await port.Run(Request(1), default)).Result;
         Assert.True(first.Transient);
         Assert.NotEqual(MergeResultKind.Merged, first.Kind);
-        Assert.Null(ledger.TryGet(MergePullRequest.KeyFor(Repo, 11, Head)));
+        Assert.Null(ledger.TryGet(MergePullRequest.KeyFor(Repo, 11, Head, 0, "1.4")));
         http.Routes.Clear();
         http.On("GET " + PrPath, HttpStatusCode.OK, Pr()).On("PUT " + PrPath + "/merge", HttpStatusCode.OK, $$"""{"sha":"{{MergeSha}}","merged":true}""");
         Assert.Equal(MergeResultKind.Merged, (await port.Run(Request(2), default)).Result.Kind);
+    }
+
+    [Fact]
+    public async Task AResumeAfterAFailedMerge_IsANewArm_SoAStoredAnswerOfTheParkedArmNeverComesBack()
+    {
+        var http = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(mergeable: "false")).On("GET " + PrPath, HttpStatusCode.OK, Pr())
+            .On("PUT " + PrPath + "/merge", HttpStatusCode.OK, $$"""{"sha":"{{MergeSha}}","merged":true}""");
+        var (port, _, ledger) = Port(new Facts(["Auto Merge"]), http);
+        var failed = (await port.Run(Request(1), default)).Result;
+        Assert.Equal((MergeResultKind.Failed, "not-mergeable"), (failed.Kind, failed.Reason));
+        Assert.NotNull(ledger.TryGet(MergePullRequest.KeyFor(Repo, 11, Head, 0, "1.4")));
+        var gets = http.Requests.Count;
+        Assert.Equal("not-mergeable", (await port.Run(Request(1), default)).Result.Reason);   // the same arm: the ledger answers, no call
+        Assert.Equal(gets, http.Requests.Count);
+        // the operator resumes: the step is entered anew (ArmId 1.5) and the merge is asked of GitHub again
+        var resumed = (await port.Run(new MergeRequested(Item, 1, "1.5", 1, 11, Head, 0, ""), default)).Result;
+        Assert.Equal(MergeResultKind.Merged, resumed.Kind);
     }
 
     [Fact]

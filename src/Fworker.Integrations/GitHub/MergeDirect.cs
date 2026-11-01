@@ -250,6 +250,8 @@ public sealed class MergeDirect
         {
             ErrorAction.Retry => throw new HttpRequestException($"{what}: {c.Reason}"),
             ErrorAction.Reschedule => MergeOutcome.Failed("rate-limited", $"{what}: {c.Reason}", FailureKind.RateLimited, c.RetryAfter),
+            // a 403 that is no rate limit is the credential's or the permission's fault on a read too (the outage's first call was the GET of the pull request), and the ledger must not keep it
+            _ when a.Status == 403 => MergeOutcome.Failed("github-forbidden", $"GitHub refused {what} (403): {a.Message}"),
             _ => MergeOutcome.Failed("merge-refused", $"{what}: HTTP {a.Status} {a.Message}".TrimEnd()),
         };
     }

@@ -685,6 +685,29 @@ public sealed class JournalLedgerTests
         Assert.False(replay.Message!.Posted); Assert.Single(r.Plant(70));
     }
 
+    // the outage of the User-Agent: GitHub answered 403 to the post. The key is not remembered, and the retry after the fault clears posts the line exactly once.
+    [Fact]
+    public async Task TheCommand_A403OnThePost_IsNotRemembered_AndTheRetryAfterTheFaultPostsOnce()
+    {
+        var r = new Rig();
+        var forbidden = true;
+        r.Api.Intercept = req => forbidden && req.Method == HttpMethod.Post
+            ? new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("""{"message":"Request forbidden by administrative rules."}""") } : null;
+        var ledger = new InMemoryIdempotencyLedger();
+        var h = new WriteJournalLineHandler(ledger, r.Ledger);
+        var c = Cmd(75, "offered", "off|f1|w1", new JsonObject { ["worker"] = "w1", ["type"] = "persistent-local", ["ackSeconds"] = 120.0 });
+        var first = await h.Process(c);
+        Assert.False(first.Result.Ok); Assert.Equal(FailureKind.Permanent, first.Result.Failure);
+        Assert.Contains("GitHub 403", first.Result.Error);
+        Assert.Null(ledger.TryGet(c.IdempotencyKey));
+        Assert.Empty(r.Plant(75));
+        forbidden = false;
+        var retry = await h.Process(c);
+        Assert.True(retry.Message!.Posted);
+        Assert.Single(r.Plant(75));
+        Assert.True((await h.Process(c)).Message!.Posted); Assert.Single(r.Plant(75));   // and now it is remembered
+    }
+
     // W9.10c: two concurrent handlings of one line post one comment; the second waits (Transient) while the first is writing
     [Fact]
     public async Task TheCommand_TwoConcurrentHandlings_PostOneComment_TheSecondWaits()
