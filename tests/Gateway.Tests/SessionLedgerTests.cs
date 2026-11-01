@@ -281,6 +281,41 @@ public sealed class SessionLedgerTests
         Assert.Single(planned);
     }
 
+    // V1.3: a worker: label pins the offer of the saga's item to that worker, in the offer the slot's grant makes outside a sweep
+    [Fact]
+    public async Task APinnedItem_IsOfferedToItsWorkerOnly_WhetherTheCardsLabelsOrTheIssueNameIt()
+    {
+        var store = new InMemoryWorkItemStore();
+        var svc = new WorkItemService(store, new WorkItemSaga(new DocsPort(), WorkItemPolicy.Default with { FeatureRules = new FeaturePlanRules(true) }));
+        var item = new ItemId(Home, 7);
+        await svc.Handle(new StartWorkItem(item, "intake"));
+        var arm = (await store.Load(item.ToString(), default))!.State.ArmId;
+        await svc.Handle(new SlotAssigned(item, 1, "slot|s1", "s1", "octopus", "host-a", "design", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(4)));
+        var request = new SessionStartRequested(item, 1, arm, "start|x|s1", "s1", "octopus", "host-a", "design");
+
+        // the pin is in the labels of the card
+        var own = new V2Ownership(store, Home, Column) { PinOf = n => n == 7 ? "alice" : null };
+        var planned = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var port = new SessionStartPort(own.RefreshAsync, only => own.OfferNodes(_ => false, only), (nodes, items) => planned.Add((nodes, items)));
+        Assert.Equal("offered", await port.Run(request, default));
+        Assert.Equal("alice", Assert.IsType<JsonObject>(Assert.Single(planned).Nodes[0])["pin"]!.ToString());
+
+        // the card does not know it yet: the issue does
+        var plain = new V2Ownership(store, Home, Column);
+        var fromIssue = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var reads = 0;
+        var asIssue = new SessionStartPort(plain.RefreshAsync, only => plain.OfferNodes(_ => false, only), (nodes, items) => fromIssue.Add((nodes, items)), (i, _) => { reads++; return Task.FromResult<string?>("bob"); });
+        Assert.Equal("offered", await asIssue.Run(request, default));
+        Assert.Equal("bob", Assert.IsType<JsonObject>(Assert.Single(fromIssue).Nodes[0])["pin"]!.ToString());
+        Assert.Equal(1, reads);
+
+        // an unpinned item carries none, and a read of the issue that fails offers the item without the pin
+        var none = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var unpinned = new SessionStartPort(plain.RefreshAsync, only => plain.OfferNodes(_ => false, only), (nodes, items) => none.Add((nodes, items)), (_, _) => throw new HttpRequestException("GitHub does not answer"));
+        Assert.Equal("offered", await unpinned.Run(request, default));
+        Assert.Null(Assert.IsType<JsonObject>(Assert.Single(none).Nodes[0])["pin"]);
+    }
+
     [Fact]
     public async Task AfterABreak_TheSagasOffer_IsNotMadeForAnItemTheAdoptionHasNotExamined_UntilItIs()
     {

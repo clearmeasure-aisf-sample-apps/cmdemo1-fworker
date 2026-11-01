@@ -907,14 +907,72 @@ public sealed class DocsIntakeJobTests
         public DocsIntakeJob Job;
         public Items Facts;
 
-        public Rig(Boards boards, Items facts, IntakeSettings? settings = null, Func<BoardRef?>? board = null, IItemIssueReader? issues = null)
+        public Rig(Boards boards, Items facts, IntakeSettings? settings = null, Func<BoardRef?>? board = null, IItemIssueReader? issues = null, Func<CancellationToken, Task<int>>? capacity = null, JsonNode? source = null)
         {
             Svc = new WorkItemService(Store, new WorkItemSaga(new DocsPort()));
             Facts = facts;
             settings ??= new IntakeSettings(true, 6, "Todo", [], new Dictionary<string, int>(), ["docs"], "engine:v2", "factory worker", "", "");
             var intake = new WorkItemIntake(Store, settings, async (m, ct) => { Started.Add(m); await Svc.Handle(m, ct); });
-            Job = new DocsIntakeJob(boards, facts, intake, board ?? (() => Board), Home, DocsPlanSettingsReader.From(DocsSource), Ai, () => Slots, () => DesignWaiting, () => Leader, () => Low, issues);
+            Job = new DocsIntakeJob(boards, facts, intake, board ?? (() => Board), Home, DocsPlanSettingsReader.From(source ?? DocsSource), Ai, () => Slots, () => DesignWaiting, () => Leader, () => Low, issues, capacity);
         }
+    }
+
+    // V1.2: where no owner session exists (tdd) the free slots are the scheduler's free capacity of the runtime
+    [Fact]
+    public async Task WithNoOwnerSession_TheSchedulersFreeCapacity_IsTheIntakesSlots()
+    {
+        var cards = new Boards(Card(5, "Todo")); var items = Todo((5, Marker));
+        var noCapacity = new Rig(cards, new Items(items)) { Slots = 0 };
+        Assert.Equal("no-free-slot", await noCapacity.Job.Run(default));
+        var zero = new Rig(cards, new Items(items), capacity: _ => Task.FromResult(0)) { Slots = 0 };
+        Assert.Equal("no-free-slot", await zero.Job.Run(default));
+        var room = new Rig(cards, new Items(items), capacity: _ => Task.FromResult(2)) { Slots = 0 };
+        Assert.Equal("started acme/orders#5", await room.Job.Run(default));
+        // the owner sessions' slots and the capacity add up
+        var both = new Rig(cards, new Items(items), capacity: _ => Task.FromResult(1)) { Slots = 1 };
+
+        Assert.Equal("started acme/orders#5", await both.Job.Run(default));
+    }
+
+    [Fact]
+    public async Task ALedgerThatCannotBeRead_CountsNoCapacity_AndLeavesTheOwnerSessionsSlots()
+    {
+        var cards = new Boards(Card(5, "Todo")); var items = Todo((5, Marker));
+        var down = new Rig(cards, new Items(items), capacity: _ => throw new TimeoutException("the database does not answer")) { Slots = 0 };
+        Assert.Equal("no-free-slot", await down.Job.Run(default));
+        var owner = new Rig(cards, new Items(items), capacity: _ => throw new TimeoutException("the database does not answer")) { Slots = 1 };
+        Assert.Equal("started acme/orders#5", await owner.Job.Run(default));
+    }
+
+    // V1.3 (D3): a person's hotfix label starts the hotfix plan where the engine carries it
+    static readonly JsonNode HotfixSource = JsonNode.Parse("""{"columns":{"ai":["Technical Design","Development","Functional Testing"],"development":"Development","validation":"Functional Testing","hold":["Release Queue"],"done":"Done"},"intake":{"v2Plans":["docs","feature","hotfix"]}}""")!;
+
+    [Fact]
+    public async Task AHotfixLabel_StartsTheHotfixPlan_AtTheTopRankWithoutADesignStep()
+    {
+        var hotfixSettings = new IntakeSettings(true, 6, "Todo", [], new Dictionary<string, int>(), ["docs", "feature", "hotfix"], "engine:v2", "factory worker", "", "");
+        var facts = new Items(new Dictionary<int, (string, string[])> { [5] = ("fix it", new[] { "factory worker", "Hotfix" }), [6] = ("plain", new[] { "factory worker" }) });
+        var rig = new Rig(new Boards(Card(5, "Todo"), Card(6, "Todo")), facts, hotfixSettings, source: HotfixSource);
+        Assert.Equal("started acme/orders#5", await rig.Job.Run(default));
+        var start = Assert.Single(rig.Started);
+        Assert.Equal((new ItemId(Home, 5), "intake", "hotfix"), (start.Item, start.Source, start.Plan));
+        var state = rig.Store.States["acme/orders#5"];
+        Assert.Equal(("hotfix", StepKind.Develop), (state.Plan, state.Step));
+        // an item without the label goes the feature way
+        var plain = new Rig(new Boards(Card(6, "Todo")), facts, hotfixSettings, source: HotfixSource);
+        Assert.Equal("started acme/orders#6", await plain.Job.Run(default));
+        Assert.Equal("feature", plain.Started.Single().Plan);
+    }
+
+    [Fact]
+    public async Task AHotfixLabel_IsNothingSpecial_WhereTheEngineDoesNotCarryTheHotfixPlan()
+    {
+        var featureOnly = new IntakeSettings(true, 6, "Todo", [], new Dictionary<string, int>(), ["docs", "feature"], "engine:v2", "factory worker", "", "");
+        var source = JsonNode.Parse("""{"columns":{"ai":["Technical Design","Development","Functional Testing"],"development":"Development","validation":"Functional Testing","done":"Done"},"intake":{"v2Plans":["docs","feature"]}}""")!;
+        var facts = new Items(new Dictionary<int, (string, string[])> { [5] = ("fix it", new[] { "factory worker", "hotfix" }) });
+        var rig = new Rig(new Boards(Card(5, "Todo")), facts, featureOnly, source: source);
+        Assert.Equal("started acme/orders#5", await rig.Job.Run(default));
+        Assert.Equal("feature", rig.Started.Single().Plan);
     }
 
     static Dictionary<int, (string, string[])> Todo(params (int, string)[] items) => items.ToDictionary(i => i.Item1, i => (i.Item2, new[] { "factory worker" }));

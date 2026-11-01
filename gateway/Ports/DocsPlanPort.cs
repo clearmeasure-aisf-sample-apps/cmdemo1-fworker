@@ -49,6 +49,12 @@ public sealed record DocsPlanSettings(
 
     /// <summary>Whether the engine carries the feature plan: its steps run, its items are pulled by the intake and its checks are watched.</summary>
     public bool CarriesFeature => CarriedPlans.Contains(WorkPlans.Feature, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>V1.3: whether the engine carries the hotfix plan (intake.v2Plans names it): a person's <c>hotfix</c> label then starts that plan at the intake (D3).</summary>
+    public bool CarriesHotfix => CarriesFeature && CarriedPlans.Contains(WorkPlans.Hotfix, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The label a person puts on an item to start the hotfix plan (the incident saga writes it on its own hotfix item).</summary>
+    public const string HotfixLabel = "hotfix";
 }
 
 public static class DocsPlanSettingsReader
@@ -307,7 +313,7 @@ public static class DocsProjectionHandler
 /// the body only chooses the plan the item starts on; the design still decides (a design without the marker switches the item to the feature plan, which hands it to v1). Off unless intake is enabled and names the docs plan.
 /// </summary>
 public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, WorkItemIntake intake, Func<BoardRef?> board, RepoId home, DocsPlanSettings settings, IReadOnlyList<string> aiColumns,
-    Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, IItemIssueReader? issues = null)
+    Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, IItemIssueReader? issues = null, Func<CancellationToken, Task<int>>? capacitySlots = null)
 {
     const int Looked = 10;
 
@@ -332,12 +338,27 @@ public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, 
             // the item's own body decides the plan it starts on
             var body = facts.Body ?? "";
             // (an item that names no marker is known to be a code change only when the engine carries the feature plan; otherwise v1's own intake takes it)
-            var plan = body.Contains(settings.DocsMarker, StringComparison.Ordinal) ? WorkPlans.Docs : settings.CarriesFeature ? WorkPlans.Feature : null;
+            // V1.3 (D3): a person's hotfix label starts the hotfix plan (top rank, no design step) where the engine carries it
+            var plan = body.Contains(settings.DocsMarker, StringComparison.Ordinal) ? WorkPlans.Docs
+                : settings.CarriesHotfix && facts.Labels.Contains(DocsPlanSettings.HotfixLabel, StringComparer.OrdinalIgnoreCase) ? WorkPlans.Hotfix
+                : settings.CarriesFeature ? WorkPlans.Feature : null;
             // W9.10h (D1): the items it depends on are met, or the intake passes the item over ("depends-on"), as v1's does (W9.10e left the items that name a dependency to v1; v1's intake now skips every item of the plans the engine takes)
             candidates.Add(new IntakeCandidate(id, true, true, facts.Labels, await DependenciesMet(id, body, homeCards, met, ct), plan));
         }
-        var d = await intake.Run(candidates, freeSlots(), designWaiting(), inFlight, ct);
+        var d = await intake.Run(candidates, await Slots(ct), designWaiting(), inFlight, ct);
         return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason;
+    }
+
+    /// <summary>
+    /// V1.2: the free slots of the intake: the connected owner sessions' (the plant) plus the scheduler's free capacity of the runtime it would grant (concurrency less what runs and waits, bounded by the day's budget and the host room).
+    /// Where no owner session exists (tdd: its sessions are runtime sessions the plant starts) the second term is the only one. A ledger that cannot be read counts none: the intake then waits for the next run.
+    /// </summary>
+    async Task<int> Slots(CancellationToken ct)
+    {
+        var owners = Math.Max(0, freeSlots());
+        if (capacitySlots is null) return owners;
+        try { return owners + Math.Max(0, await capacitySlots(ct)); }
+        catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"intake: the scheduler's free capacity could not be read ({e.GetType().Name})"); return owners; }
     }
 
     /// <summary>

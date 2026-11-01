@@ -179,7 +179,9 @@ static class SagaPlantWiring
             }
             return hit.ByNumber.TryGetValue(item, out var l) ? l : null;
         }
-        var feed = new SagaPlantFeed(sp.GetRequiredService<V2Ownership>(), plant.OwnerNameOf, LabelsOf, SagaLabelRules.From(c.Instance.Root), sp.GetService<V2ItemViews>());
+        var rules = SagaLabelRules.From(c.Instance.Root);
+        sp.GetRequiredService<V2Ownership>().PinOf = n => LabelsOf(n) is { } labels ? rules.Pin(labels) : null;   // V1.3: the offers of the saga's items carry the pin of the label
+        var feed = new SagaPlantFeed(sp.GetRequiredService<V2Ownership>(), plant.OwnerNameOf, LabelsOf, rules, sp.GetService<V2ItemViews>());
         plant.SagaAttentionSource = feed.Attention; plant.SagaFlightSource = feed.InFlight;
         return feed;
     }

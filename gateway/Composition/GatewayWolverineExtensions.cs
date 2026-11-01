@@ -115,7 +115,9 @@ static class GatewayWolverineExtensions
                         var intake = new Fworker.Workflows.Intake.WorkItemIntake(workItems.Store, workItems.Intake, async (m, _) => { if (!await host.PublishAsync(m)) throw new InvalidOperationException("the Wolverine host is not up"); });
                         var docsIntake = workItems.Docs.IntakeJob(intake, home, workItems.Docs.Settings.Columns.Values.ToList(), () => sp.GetRequiredService<Plant>().IntakeSlots(),
                             () => workItems.Ownership?.Offers.Any(o => o.Column == workItems.Docs.Settings.ColumnOf(Fworker.Workflows.WorkItem.StepKind.Design) && !sp.GetRequiredService<Plant>().HasOwner(o.Item)) == true,
-                            () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
+                            () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low,
+                            // V1.2: the sessions the plant starts per item (runtime sessions: tdd has no owner session) count too, as the scheduler's free capacity of the runtime a new item's first slot would ask for
+                            ct => capacityParts.Service.FreeSlots(workItems.Feature.SlotSettings.RuntimeFor([], Fworker.Workflows.Capacity.CapacityPhases.Design), ct));
                         if (docsIntake is not null)
                             jobs.Add(RecurringJobSlots.DocsIntake, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = await docsIntake.Run(ct) }.ToJsonString()));
                     }
@@ -134,7 +136,8 @@ static class GatewayWolverineExtensions
                     jobs.Add(RecurringJobSlots.ItemSteps, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["itemSteps"] = await itemSteps.Run(ct) }.ToJsonString()));
                     // W9.10j: the saga starts the session of the slot the scheduler granted (the offer is made from the saga's state, on the slot's runtime), and the reaper tells the scheduler which items are in flight so that
                     // what it keeps of an item whose saga never cleared it is dropped
-                    if (workItems.Ownership is { } sessionOwnership) SessionStartWiring.Attach(host, new SessionStartPort(sessionOwnership, () => sp.GetService<Plant>()));
+                    if (workItems.Ownership is { } sessionOwnership) SessionStartWiring.Attach(host, new SessionStartPort(sessionOwnership, () => sp.GetService<Plant>(),
+                        workItems.Docs.Facts is { } facts ? async (item, ct) => SagaLabelRules.From(c.Instance.Root).Pin((await facts.ReadItem(item, ct))?.Labels ?? []) : null));
                     var reaper = new CapacityReaper(workItems.Store, m => host.PublishAsync(m), () => c.Leader.MayAct);
                     jobs.Add(RecurringJobSlots.CapacityReap, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["capacityReap"] = await reaper.Run(ct) }.ToJsonString()));
                     ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
