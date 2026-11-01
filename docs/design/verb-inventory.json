@@ -38,7 +38,6 @@
     { "verb": "copilot-settle", "script": "Verbs.Pr.ps1", "owner": "DeliveryTrainSaga", "destination": "saga", "callers": [], "noLock": false, "useEndpoint": true },
     { "verb": "copilot-owner", "script": "Verbs.Pr.ps1", "owner": "DeliveryTrainSaga", "destination": "saga", "callers": [], "noLock": false, "useEndpoint": true },
     { "verb": "private-build", "script": "Verbs.Pr.ps1", "owner": "DeliveryTrainSaga", "destination": "saga", "callers": ["owner"], "noLock": false, "useEndpoint": false },
-    { "verb": "auto-promote", "script": "Verbs.Promote.ps1", "owner": "DeliveryTrainSaga", "destination": "saga", "callers": [], "noLock": true, "useEndpoint": false },
     { "verb": "sync-board", "script": "Verbs.Sweep.ps1", "owner": "BoardReconciler", "destination": "coordinator", "callers": [], "noLock": true, "useEndpoint": false },
     { "verb": "ingest-event", "script": "Verbs.Sweep.ps1", "owner": "S3EventIngress", "destination": "coordinator", "callers": [], "noLock": true, "useEndpoint": false },
     { "verb": "journal", "script": "Journal.ps1", "owner": "HistoryProjection", "destination": "handler", "callers": [], "noLock": false, "useEndpoint": false },

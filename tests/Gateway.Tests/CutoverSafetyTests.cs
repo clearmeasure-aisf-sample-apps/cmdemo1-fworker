@@ -224,7 +224,7 @@ public sealed class CutoverSafetyTests
     }
 
     [Theory]
-    [InlineData("leader-lease")] [InlineData("plant-snapshot-save")] [InlineData("plant-snapshot-load")] [InlineData("revocations")] [InlineData("revoke-worker")] [InlineData("operator-release")] [InlineData("auto-promote")] [InlineData("operator-releases")] [InlineData("transcript-save")] [InlineData("get-item")]
+    [InlineData("leader-lease")] [InlineData("plant-snapshot-save")] [InlineData("plant-snapshot-load")] [InlineData("revocations")] [InlineData("revoke-worker")] [InlineData("operator-release")] [InlineData("operator-releases")] [InlineData("transcript-save")] [InlineData("get-item")]
     public async Task TheRunner_OfAnInertGateway_StillRunsTheHousekeepingAndTheReadingVerbs(string verb)
     {
         // (the script is not there: the call gets as far as starting it, and the refusal "database" is not what comes back)

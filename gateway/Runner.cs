@@ -19,7 +19,7 @@ sealed class Runner(string entry) : IRuleScriptCalls
     // depend on; a verb that is only read, and the lease's and the snapshot's own, are not fenced (the final snapshot of a superseded gateway must land).
     public Func<(long Epoch, string Holder)?>? Lease { get; set; }
     public static readonly IReadOnlySet<string> FencedVerbs = new HashSet<string>(StringComparer.Ordinal)
-    { "sync-board", "auto-promote", "merge", "settle", "resettle-item", "copilot-settle", "base-update-branch", "base-watch", "qc-sync", "ci-release" };
+    { "sync-board", "merge", "settle", "resettle-item", "copilot-settle", "base-update-branch", "base-watch", "qc-sync", "ci-release" };
     int fencedInFlight;
     public int FencedInFlight => Volatile.Read(ref fencedInFlight);
 
@@ -67,7 +67,7 @@ sealed class Runner(string entry) : IRuleScriptCalls
     public GitHubBudget? Budget { get; set; }
     // W9.9a: where the engine acts, the verbs that have a v2 route are answered there, whoever asks: a session (the verb endpoint reaches the same routes first) or the gateway itself (the plant's hooks, the
     // sweep, the endpoints, the runtimes, QcHub, BaseWatch, the journal lines of the ticker). Set once when the table is built (V2VerbRoutes.Build); null where the engine does not act (tdd today, uat,
-    // prod), so there every call is the rule script, as before. A verb with no route (auto-promote, the leader lease, the plant snapshot) is the script's in both cases.
+    // prod), so there every call is the rule script, as before. A verb with no route (the leader lease, the plant snapshot) is the script's in both cases.
     public V2VerbRoutes? Routes { get; set; }
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
     {

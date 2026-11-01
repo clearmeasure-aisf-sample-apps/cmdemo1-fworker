@@ -375,8 +375,8 @@ public sealed class ReadModelsPortTests : IDisposable
     {
         var routes = V2VerbRoutes.Build(Engine(dir, "prod", "\"prod\""), Gateway());
         // (the merge verbs register without the configuration: they find their parts at the first call, W9.3; the other groups need credentials this table does not have)
-        // (and the delivery verbs, W9.4: the host is built lazily; auto-promote is the train's executor, not a route)
-        Assert.Equal(ReadModelRoutes.Verbs.Concat(MergeRoutes.Verbs).Concat(DeliveryRoutes.Verbs.Where(v => v != "auto-promote")).Order(), routes.Verbs.Order());
+        // (and the delivery verbs, W9.4: the host is built lazily)
+        Assert.Equal(ReadModelRoutes.Verbs.Concat(MergeRoutes.Verbs).Concat(DeliveryRoutes.Verbs).Order(), routes.Verbs.Order());
         var below = new Below();
         var router = new V2VerbRouter(below, routes);
         // check-secrets answers from v2 (the probes fail without an identity); get-item is not v2's

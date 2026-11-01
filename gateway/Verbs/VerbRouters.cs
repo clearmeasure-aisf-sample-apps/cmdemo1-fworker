@@ -38,7 +38,7 @@ static class InertVerbs
     /// <summary>The gateway's own housekeeping, which keeps the process and its lease alive and writes nothing about an item: the leader lease, the plant snapshot, the revocations (reading and revoking a worker: a credential action that writes no item), the operator's release record, the automatic promotion of uat and prod, the transcripts.</summary>
     public static readonly IReadOnlySet<string> Housekeeping = new HashSet<string>(StringComparer.Ordinal)
     {
-        "leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-await", "plant-snapshot-clear", "revocations", "revoke-worker", "auto-promote", "operator-releases", "operator-release", "transcript-save", "transcript-load", "transcript-prune",
+        "leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-await", "plant-snapshot-clear", "revocations", "revoke-worker", "operator-releases", "operator-release", "transcript-save", "transcript-load", "transcript-prune",
     };
 
     public static bool RunnerMayRun(string verb) => ReadOnly.Contains(verb) || Housekeeping.Contains(verb);
