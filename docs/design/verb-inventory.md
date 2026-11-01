@@ -165,6 +165,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | Entry | Kind | File | Sites | Owner | Leaves | What it is |
 |---|---|---|---|---|---|---|
 | merge-peer-approved | merge-script | `src/Fworker.Workflows/Merge/MergeVerbService.cs` | 2 | W9.11b | W9.11b | A merge policy other than auto: the inspector's approval of the current head and the QC gate. **exception until W9.11b.** |
+| merge-hybrid-script | merge-script | `gateway/Verbs/MergeVerbs.cs` | 5 | W9.9b | W9.11b | The hybrid composition: the script answers merge, approve-pr, clear-hold and base-watch for an item the saga does not own. **exception until W9.11b.** |
 
 ### Exceptions
 
@@ -172,3 +173,4 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 - **transcripts** (until W9.11b): The ref store of the sessions written before the move to the database. Where the engine acts the `DatabaseTranscriptBackend` reads it as the fallback of a load and prunes it with the database; both go through the rule script (`Runner.RunScriptAsync`), because the board routes answer `transcript-load` and `transcript-prune` from `factory.Transcripts` and would never reach the refs. It goes with v1 at W9.11b, after the 14 days the refs are kept.
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.
 - **merge-peer-approved** (until W9.11b): The peer-approved merge policy is dropped (decision 4 of 2026-10-30), not ported; its suites go with v1 (W9.11a). Every environment runs mergePolicy auto.
+- **merge-hybrid-script** (until W9.11b): The adoption (W9.9b) gives the saga every open item, and W9.11b deletes the branch with the router of v1.

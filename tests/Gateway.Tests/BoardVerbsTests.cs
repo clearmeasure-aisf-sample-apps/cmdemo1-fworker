@@ -200,18 +200,20 @@ public sealed class BoardVerbsTests
     }
 
     [Fact]
-    public async Task Journal_AndIngestEvent_WithoutWhatV2NeedsHere_AreRefusedWithTheReason()
+    public async Task Journal_AndIngestEvent_WithoutWhatV2NeedsHere_AreTheRuleScripts()
     {
         var seen = new List<string>();
-        var parts = new BoardVerbParts { RuleScript = (verb, stdin, _) => { seen.Add(verb + " " + stdin); return Task.FromResult((0, "{\"ok\":true,\"by\":\"script\"}")); } };   // no ledger, no translator: no rule script answers for them any more
+        var parts = new BoardVerbParts { RuleScript = (verb, stdin, _) => { seen.Add(verb + " " + stdin); return Task.FromResult((0, "{\"ok\":true,\"by\":\"script\"}")); } };   // no ledger, no translator
         var verbs = new BoardVerbs(parts);
-        var journal = await verbs.Journal("""{"item":7,"event":"tier","fields":{}}""", Time);
-        Assert.Equal((30, "config-missing"), (journal.Code, Parse(journal)["code"]!.ToString()));
-        var ingest = await verbs.IngestEvent("""{"event":"push","payload":{}}""", Time);
-        Assert.Equal((30, "config-missing"), (ingest.Code, Parse(ingest)["code"]!.ToString()));
-        Assert.Empty(seen);
-        // the usage refusals of a malformed call come first
+        Assert.Equal("script", Parse(await verbs.Journal("""{"item":7,"event":"tier","fields":{}}""", Time))["by"]!.ToString());
+        Assert.Equal("script", Parse(await verbs.IngestEvent("""{"event":"push","payload":{}}""", Time))["by"]!.ToString());
+        Assert.Equal(["journal {\"item\":7,\"event\":\"tier\",\"fields\":{}}", "ingest-event {\"event\":\"push\",\"payload\":{}}"], seen);
+        // the refusals of the script are v2's too, so a malformed call never reaches it
         Assert.Equal(2, (await verbs.Journal("""{"item":7,"event":"no-such"}""", Time)).Code);
+        Assert.Equal(2, seen.Count(x => x.StartsWith("journal ") || x.StartsWith("ingest-event ")));
+        // and with no script either, the refusal says why
+        var bare = await new BoardVerbs(new BoardVerbParts()).Journal("""{"item":7,"event":"tier","fields":{}}""", Time);
+        Assert.Equal((30, "config-missing"), (bare.Code, Parse(bare)["code"]!.ToString()));
     }
 
     // ---- transcripts ----

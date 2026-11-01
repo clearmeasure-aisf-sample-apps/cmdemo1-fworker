@@ -89,8 +89,13 @@ sealed class BoardVerbs(BoardVerbParts p)
         _ => n.ToJsonString(),
     };
 
-    // A verb that v2 cannot answer here (the ledger is made when the Wolverine host is built, the translator needs the instance file's owner and repository) is refused with the reason: there is no rule script behind it any more
-    static VerbAnswer Unavailable(string verb, string why) => BoardVerbAnswer.Rejected(verb, 30, "config-missing", why);
+    // A verb that v2 cannot answer here (the ledger is made when the Wolverine host is built, the translator needs the instance file's owner and repository) is the rule script's, as it was; with no script either, the refusal says why
+    async Task<VerbAnswer> RuleScript(string verb, string stdin, TimeSpan timeout, string why)
+    {
+        if (p.RuleScript is null) return BoardVerbAnswer.Rejected(verb, 30, "config-missing", why);
+        var (code, output) = await p.RuleScript(verb, stdin, timeout);
+        return new VerbAnswer(code, output);
+    }
 
     // ---- ingest-event ----------------------------------------------------------------------------------------------------------------------------
     public async Task<VerbAnswer> IngestEvent(string stdin, TimeSpan timeout)
@@ -98,7 +103,7 @@ sealed class BoardVerbs(BoardVerbParts p)
         const string verb = "ingest-event";
         if (!TryBody(verb, stdin, out var a, out var bad)) return bad;
         if (!Need(verb, a, "event", out var ev, out var refusal)) return refusal;
-        if (p.Translator is null) return Unavailable(verb, "the instance configuration names no owner and repository");
+        if (p.Translator is null) return await RuleScript(verb, stdin, timeout, "the instance configuration names no owner and repository");
         var delivery = a.TryGetPropertyValue("delivery", out var d) && d is not null ? Text(d) : "";
         try
         {
@@ -121,7 +126,7 @@ sealed class BoardVerbs(BoardVerbParts p)
         if (!int.TryParse(itemText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var item)) return BoardVerbAnswer.Internal(verb, $"item is not a number: {itemText}");
         if (!Need(verb, a, "event", out var ev, out refusal)) return refusal;
         if (!JournalEvents.Supported.Contains(ev)) return BoardVerbAnswer.Usage(verb, $"unknown journal event '{ev}'");
-        if (p.Ledger() is not { } ledger) return Unavailable(verb, "GH_TOKEN is not set on the gateway");
+        if (p.Ledger() is not { } ledger) return await RuleScript(verb, stdin, timeout, "GH_TOKEN is not set on the gateway");
         var fields = JournalLedger.FieldsOf(a["fields"] as JsonObject);
         // a line without a key takes the ticks of the write, as the script does (a waiting line always does, in the ledger)
         var key = a.TryGetPropertyValue("key", out var k) && k is not null ? Text(k) : "";
