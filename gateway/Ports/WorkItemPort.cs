@@ -359,7 +359,7 @@ static class WorkItemWiring
         var claimNode = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
         var ledger = new SqlCommandStores(connectionString, owner: () => new Fworker.Integrations.Commands.ClaimOwner(claimNode, c.Leader?.ClaimEpoch ?? 0)).Ledger;
         var merge = new MergePullRequestHandler(ledger, new MergeDirect(clients));
-        var close = new CloseIssueHandler(ledger, clients);   // (the close of a finished item's issue: the same ledger, its own keys)
+        var close = new CloseIssueHandler(ledger, clients, new SagaIssueCloseGuard(store));   // (the close of a finished item's issue: the same ledger, its own keys)
         var facts = new HttpMergeFactsReader(http, creds, Str("name", "factory-worker"), Str("videoLabel", "video"), observe);
         BoardColumnProjection? card = null;
         BoardColumnProjection? Card() => card ??= boardRef() is { } board ? new BoardColumnProjection(http, creds, board, versions, echo) : null;

@@ -313,7 +313,7 @@ public sealed class DeliverStep : WorkStep
         if (c.State.SettleHeld)
         {
             // the end is not silent: a decision of its own (the history, the status and the digest show it; the gateway logs a warning), then the completion
-            var why = $"the settle cap of {c.Policy.SettleCap.TotalDays:0.##} days ended with the release not in prod";
+            var why = $"{WorkItemIssueClose.SettleCapReasonPrefix}{c.Policy.SettleCap.TotalDays:0.##} days ended with the release not in prod";
             c.State.Delivered.TryGetValue(c.Policy.FinalEnvironment.ToLowerInvariant(), out var release);
             c.Decide(WorkItemActions.SettleCapExpired, why, release ?? "");
             c.Complete(why);

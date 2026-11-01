@@ -57,22 +57,54 @@ public class IssueCloseTests
     }
 
     [Fact]
-    public async Task AFaultOfGitHub_OrAGatewayWithoutACredential_ThrowsSoThatTheMessageIsScheduledAgain()
+    public async Task AFaultOfGitHub_OrA403_ThrowsSoThatTheMessageIsScheduledAgain()
     {
         var c = new CloseWorkItemIssue(CloseWorkItemIssue.KeyFor(Item, 1), Item, 1);
-        await Assert.ThrowsAsync<IssueCloseRetryException>(() => new IssueCloseService(null).Run(c, default));
         var down = new Fake(_ => (HttpStatusCode.ServiceUnavailable, """{"message":"down"}"""));
         await Assert.ThrowsAsync<IssueCloseRetryException>(() => new IssueCloseService(Handler(down)).Run(c, default));
         Assert.Equal(0, down.Patches);
+        // a 403 is the credential's or its permission's: a fix clears it, so the close is tried again, not left
+        var forbidden = new Fake(r => r.Method == HttpMethod.Patch ? (HttpStatusCode.Forbidden, """{"message":"no"}""") : (HttpStatusCode.OK, """{"state":"open"}"""));
+        var service = new IssueCloseService(Handler(forbidden));
+        await Assert.ThrowsAsync<IssueCloseRetryException>(() => service.Run(c, default));
+        await Assert.ThrowsAsync<IssueCloseRetryException>(() => service.Run(c, default));
+        Assert.Equal(2, forbidden.Patches);   // (the second try called GitHub again)
     }
 
     [Fact]
     public async Task ARefusalForGood_IsLoggedAndLeft()
     {
         var log = new List<string>();
-        var refused = new Fake(r => r.Method == HttpMethod.Patch ? (HttpStatusCode.Forbidden, """{"message":"no"}""") : (HttpStatusCode.OK, """{"state":"open"}"""));
+        var refused = new Fake(r => r.Method == HttpMethod.Patch ? (HttpStatusCode.UnprocessableEntity, """{"message":"no"}""") : (HttpStatusCode.OK, """{"state":"open"}"""));
         await new IssueCloseService(Handler(refused), log.Add).Run(new CloseWorkItemIssue(CloseWorkItemIssue.KeyFor(Item, 1), Item, 1), default);
         Assert.Contains("not closed", Assert.Single(log));
+    }
+
+    [Fact]
+    public async Task AGatewayWithoutACredential_SaysSoOncePerItem_AndDoesNotRetry()
+    {
+        var log = new List<string>();
+        var service = new IssueCloseService(null, log.Add);
+        var c = new CloseWorkItemIssue(CloseWorkItemIssue.KeyFor(Item, 1), Item, 1);
+        await service.Run(c, default);
+        await service.Run(c, default);
+        await service.Run(new CloseWorkItemIssue(CloseWorkItemIssue.KeyFor(Item, 2), Item, 2), default);
+        Assert.Contains("no GitHub credential", Assert.Single(log));
+    }
+
+    [Fact]
+    public async Task TheGuard_AnswersFromTheSagasRow_OnlyForTheCompletedGeneration()
+    {
+        var store = new InMemoryWorkItemStore();
+        var guard = new SagaIssueCloseGuard(store);
+        Assert.False(await guard.StillCompleted(Item, 1, default));   // no row
+        await store.Save(Item.ToString(), new WorkItemState { Item = Item.ToString(), Generation = 1, Plan = "docs", Status = WorkItemStatus.Completed }, 0, default);
+        Assert.True(await guard.StillCompleted(Item, 1, default));
+        Assert.False(await guard.StillCompleted(Item, 2, default));
+        // the issue was reopened: the saga starts generation 2, which is open, and the delayed close of generation 1 is no longer wanted
+        await store.Save(Item.ToString(), new WorkItemState { Item = Item.ToString(), Generation = 2, Plan = "docs", Status = WorkItemStatus.Open }, 1, default);
+        Assert.False(await guard.StillCompleted(Item, 1, default));
+        Assert.False(await guard.StillCompleted(Item, 2, default));
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using Fworker.Contracts.Commands;
+using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Workflows.WorkItem;
 using Wolverine;
@@ -10,25 +11,39 @@ using Wolverine.Runtime.Handlers;
 // (the saga's own merge, a merge by a person, the settle window), so the close follows it: the decision becomes a CloseWorkItemIssue on a queue of its own, run through the integration-command handler (ledger key per
 // item and generation, an issue that is closed already is left as it is), and a fault that a later try gets past is scheduled again, never given up.
 
-/// <summary>The close could not be made now (GitHub down or limited, the gateway without a credential): the command is tried again later by the handler's policy.</summary>
+/// <summary>The close could not be made now (GitHub down, limited or refusing the credential): the command is tried again later by the handler's policy.</summary>
 public sealed class IssueCloseRetryException(CloseWorkItemIssue command, string why)
     : Exception($"the issue of {command.Item} was not closed: {why}");
 
-/// <summary>What closes the issue. Without a credential (<c>handler</c> null) nothing can be closed: the command is retried until the gateway has one, as every other write of the saga's projections is not lost.</summary>
+/// <summary>
+/// What closes the issue. Without a credential (<c>handler</c> null) nothing can be written, as with the card and the state comment: that is said once per item in the log and the command ends (a retry
+/// every hour for ever would say nothing new). A fault of GitHub, and a 401 or 403 (the credential or its permission, which a fix clears: <see cref="AuthFaults"/>), are tried again; a refusal for good is logged and left.
+/// </summary>
 public sealed class IssueCloseService(CloseIssueHandler? handler, Action<string>? log = null)
 {
     readonly Action<string> log = log ?? (m => Console.Error.WriteLine(m));
+    readonly HashSet<string> told = [];
 
     public async Task Run(CloseWorkItemIssue c, CancellationToken ct)
     {
-        if (handler is null) throw new IssueCloseRetryException(c, "the gateway has no GitHub credential");
-        CommandResult r;
-        try { r = await handler.Process(c, ct); }
-        catch (NoInstallationException e) { log($"issue of {c.Item}: {e.Message}; not closed"); return; }   // for good: the owner has no installation
+        if (handler is null)
+        {
+            bool first; lock (told) first = told.Add(c.Item.ToString());
+            if (first) log($"issue of {c.Item}: the gateway has no GitHub credential; the issue is not closed");
+            return;
+        }
+        var r = await handler.Process(c, ct);   // (a missing installation is a permanent result of the handler, not an exception)
         if (r.Ok) return;
-        if (r.Failure is FailureKind.Transient or FailureKind.RateLimited) throw new IssueCloseRetryException(c, r.Error);
+        if (r.Failure is FailureKind.Transient or FailureKind.RateLimited || AuthFaults.Is(r)) throw new IssueCloseRetryException(c, r.Error);
         log($"issue of {c.Item} not closed: {r.Error}");   // refused for good (the ledger keeps the answer): a retry says the same
     }
+}
+
+/// <summary>Answers from the saga's row whether the generation a close was decided for is the item's current one and completed (a reopened issue is on the next generation and is left open).</summary>
+public sealed class SagaIssueCloseGuard(IWorkItemStore store) : IIssueCloseGuard
+{
+    public async Task<bool> StillCompleted(Fworker.Contracts.Ids.ItemId item, int generation, CancellationToken ct) =>
+        (await store.Load(item.ToString(), ct))?.State is { } s && s.Generation == generation && s.Status == WorkItemStatus.Completed;
 }
 
 /// <summary>The handlers of the close. Public because Wolverine's generated code refers to them.</summary>

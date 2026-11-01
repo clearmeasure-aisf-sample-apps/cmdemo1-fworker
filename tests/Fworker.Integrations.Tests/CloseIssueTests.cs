@@ -103,12 +103,74 @@ public class CloseIssueTests
     [Fact]
     public async Task ARefusalForGood_IsPermanent_AndRecorded()
     {
-        var fake = new Fake(r => r.Method == HttpMethod.Patch ? (HttpStatusCode.Forbidden, """{"message":"Resource not accessible by integration"}""") : (HttpStatusCode.OK, """{"state":"open"}"""));
+        var fake = new Fake(r => r.Method == HttpMethod.Patch ? (HttpStatusCode.UnprocessableEntity, """{"message":"Validation Failed"}""") : (HttpStatusCode.OK, """{"state":"open"}"""));
         var (handler, _) = Make(fake);
         var r = await handler.Process(Cmd());
         Assert.False(r.Ok); Assert.Equal(FailureKind.Permanent, r.Failure);
+        Assert.False(AuthFaults.Is(r));
         var calls = fake.Requests.Count;
         Assert.False((await handler.Process(Cmd())).Ok);   // (the ledger holds the refusal: a retry says the same)
         Assert.Equal(calls, fake.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A403_IsACredentialFault_NotRememberedForGood_AndTheNextTryCallsGitHubAgain()
+    {
+        var forbidden = true;
+        var state = "open";
+        var fake = new Fake(r =>
+        {
+            if (r.Method == HttpMethod.Patch) { if (forbidden) return (HttpStatusCode.Forbidden, """{"message":"Resource not accessible by integration"}"""); state = "closed"; return (HttpStatusCode.OK, """{"state":"closed"}"""); }
+            return (HttpStatusCode.OK, $$"""{"state":"{{state}}"}""");
+        });
+        var (handler, ledger) = Make(fake);
+        var first = await handler.Process(Cmd());
+        Assert.False(first.Ok);
+        Assert.True(AuthFaults.Is(first), first.Error);
+        Assert.Equal("CloseWorkItemIssue: GitHub 403 on PATCH issues/556", first.Error);
+        Assert.Null(ledger.TryGet(Cmd().IdempotencyKey));   // not recorded
+        var patches = fake.Requests.Count(q => q.Method == "PATCH");
+        forbidden = false;   // (the permission was fixed)
+        var second = await handler.Process(Cmd());
+        Assert.True(second.Ok); Assert.Equal("closed", second.Execution);
+        Assert.Equal(patches + 1, fake.Requests.Count(q => q.Method == "PATCH"));
+    }
+
+    [Fact]
+    public async Task A403OnTheRead_HasTheSameForm_AndARowOfAnEarlierOutageIsPurged()
+    {
+        var fake = new Fake(_ => (HttpStatusCode.Forbidden, """{"message":"Forbidden"}"""));
+        var (handler, ledger) = Make(fake);
+        var r = await handler.Process(Cmd());
+        Assert.Equal("CloseWorkItemIssue: GitHub 403 on GET issues/556", r.Error);
+        Assert.True(AuthFaults.Is(r));
+        ledger.Record(Cmd().IdempotencyKey, r);   // a row as an earlier process stored it
+        Assert.Equal(1, ledger.PurgeAuthFaults());
+        Assert.Null(ledger.TryGet(Cmd().IdempotencyKey));
+    }
+
+    sealed class Guard(Func<bool> completed) : IIssueCloseGuard
+    {
+        public readonly List<(ItemId, int)> Asked = [];
+        public Task<bool> StillCompleted(ItemId item, int generation, CancellationToken ct) { Asked.Add((item, generation)); return Task.FromResult(completed()); }
+    }
+
+    [Fact]
+    public async Task ACloseOfAnOldGeneration_LeavesAReopenedIssueOpen()
+    {
+        var fake = OpenIssue();
+        var current = false;   // the issue was reopened after generation 1 completed: the saga is on generation 2
+        var guard = new Guard(() => current);
+        var factory = new GitHubClientFactory(new HttpClient(fake) { BaseAddress = new Uri("https://api.example/") }, new StaticCredentialSource([], new GitHubCredential("acme-app", "x")), new GitHubBudget());
+        var handler = new CloseIssueHandler(new InMemoryIdempotencyLedger(), factory, guard);
+        var r = await handler.Process(Cmd());
+        Assert.True(r.Ok); Assert.Equal("superseded", r.Execution);
+        Assert.Equal([(Item, 1)], guard.Asked);
+        Assert.DoesNotContain(fake.Requests, q => q.Method == "PATCH");
+        // the generation that is completed now is closed
+        current = true;
+        var next = await handler.Process(new CloseWorkItemIssue(CloseWorkItemIssue.KeyFor(Item, 2), Item, 2));
+        Assert.Equal("closed", next.Execution);
+        Assert.Single(fake.Requests, q => q.Method == "PATCH");
     }
 }
