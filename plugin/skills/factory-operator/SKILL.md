@@ -99,7 +99,7 @@ b. **Deploy only when the plant is quiet, announced, and verified.** A merge to 
    4. Run `factory.ps1 operator release-check` once more, then merge at once (squash, at the exact head commit that was checked).
    5. Wait for the release (about four minutes). Confirm all three:
       - `/_build` shows a new `version` and a later `started`;
-      - `/ready` answers 200 (a 503 `waitingFor: schema` is only where v2 acts and the database does not answer: that is `FACTORY_V2_OFF` or a database fix, not a revert of your change);
+      - `/ready` answers 200 (a 503 `waitingFor: schema` is only where v2 acts and the database does not answer: that is a database fix, not a revert of your change);
       - `factory.ps1 operator status` (after your own stream printed `operator.registered` again) shows every name of the kept
         `connected` list connected again, and `plant.owners` holds every item each of them owned. Allow five minutes.
    6. Record it: `factory.ps1 operator record-release --pr N --version V` with the new version.
