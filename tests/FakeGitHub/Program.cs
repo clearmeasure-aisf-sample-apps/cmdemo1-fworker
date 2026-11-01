@@ -42,6 +42,13 @@ if (int.TryParse(Environment.GetEnvironmentVariable("FAKE_PROXY_PORT"), out var 
 app.Run(async ctx =>
 {
     var method = ctx.Request.Method; var path = ctx.Request.Path.Value ?? "/"; var query = ctx.Request.Query;
+    // as GitHub: a request without a User-Agent is refused 403 whatever it asks (the test controls /_fake, the fake Cursor API and the fake Octopus, which have no such rule, are not GitHub)
+    if (!path.StartsWith("/_fake") && !path.StartsWith("/v1/agents") && !ctx.Request.Headers.ContainsKey("X-Octopus-ApiKey") && string.IsNullOrWhiteSpace(ctx.Request.Headers.UserAgent.ToString()))
+    {
+        ctx.Response.StatusCode = 403; ctx.Response.ContentType = "text/plain";
+        await ctx.Response.WriteAsync("Request forbidden by administrative rules. Please make sure your request has a User-Agent header.\nCheck https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required for more information.\n");
+        return;
+    }
     // the uploads host of GitHub (a release asset): the body is binary, only its length is kept
     if (path.StartsWith("/_uploads/") && method == "POST")
     {

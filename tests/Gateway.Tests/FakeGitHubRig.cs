@@ -24,7 +24,7 @@ public sealed class FakeGitHubRig : IDisposable
     FakeGitHubRig(Process process, int port)
     {
         this.process = process; Port = port;
-        Http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(60) };
+        Http = new HttpClient(new Fworker.Integrations.GitHub.GitHubUserAgentHandler(new HttpClientHandler { AllowAutoRedirect = false })) { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(60) };
         Directory.CreateDirectory(Dir);
     }
 
@@ -129,8 +129,8 @@ public sealed class FakeGitHubRig : IDisposable
             ["OCTOPUS_API_KEY"] = "API-FAKE", ["FACTORY_WEBHOOK_SECRET"] = new string('w', 40),
         };
         if (env is not null) foreach (var kv in env) values[kv.Key] = kv.Value;
-        var github = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { BaseAddress = new Uri($"http://127.0.0.1:{Port}/"), Timeout = Timeout.InfiniteTimeSpan };
-        var parts = ReadModelParts.Build(Instance(edit), null, k => values.GetValueOrDefault(k), github, new HttpClient(), null, null, null, refusals,
+        var github = new HttpClient(new Fworker.Integrations.GitHub.GitHubUserAgentHandler(new HttpClientHandler { AllowAutoRedirect = false })) { BaseAddress = new Uri($"http://127.0.0.1:{Port}/"), Timeout = Timeout.InfiniteTimeSpan };
+        var parts = ReadModelParts.Build(Instance(edit), null, k => values.GetValueOrDefault(k), github, new HttpClient(new Fworker.Integrations.GitHub.GitHubUserAgentHandler()), null, null, null, refusals,
             (t, ct) => { clock.Waits.Add(t); clock.Now += t; return Task.CompletedTask; }, () => clock.Now);
         return (parts, clock);
     }

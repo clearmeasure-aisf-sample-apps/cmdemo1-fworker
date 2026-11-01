@@ -184,7 +184,7 @@ sealed class ReadModelParts
         // two clients with the identity of the rule scripts: the verbs' own reads follow redirects themselves (without the credential), the state store's calls are plain API calls
         HttpClient Client(bool follow) => new(new RuleIdentityHandler(new GitHubAuthHandler(tokens!, new HttpClientHandler { AllowAutoRedirect = follow }), observe)) { BaseAddress = new Uri(baseUrl), Timeout = follow ? TimeSpan.FromSeconds(100) : Timeout.InfiniteTimeSpan };   // (the wire of the verbs sets the time of each call itself)
         var journalHttp = github ?? (tokens is null ? null : Client(true));
-        if (api is null) api = github is not null ? new HttpGitHubApi(github, delay) : tokens is null ? new NoGitHubIdentity() : new HttpGitHubApi(Client(false), delay, new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }));
+        if (api is null) api = github is not null ? new HttpGitHubApi(github, delay) : tokens is null ? new NoGitHubIdentity() : new HttpGitHubApi(Client(false), delay, new HttpClient(new GitHubUserAgentHandler(new HttpClientHandler { AllowAutoRedirect = false })));
         var gh = new RuleGitHub(api, settings, clock);
         states ??= journalHttp is null || tokens is null ? new NoStateStore("secret-missing", "GH_TOKEN is not set on the gateway")
             : instance.Home is not { } home ? new NoStateStore("config-missing", "the instance configuration names no owner and repo") : MakeStates(settings, instance, journalHttp, tokens, home, env);

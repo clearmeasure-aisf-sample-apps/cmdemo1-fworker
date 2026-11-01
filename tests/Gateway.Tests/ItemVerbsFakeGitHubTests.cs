@@ -42,7 +42,7 @@ public sealed partial class ItemVerbsFakeGitHubTests : IAsyncLifetime
         psi.Environment["FACTORY_CONFIG"] = Path.Combine(root, "config", "instance.json");
         fake = Process.Start(psi)!;
         _ = fake.StandardOutput.ReadToEndAsync(); _ = fake.StandardError.ReadToEndAsync();
-        control = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(30) };
+        control = new HttpClient(new Fworker.Integrations.GitHub.GitHubUserAgentHandler()) { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(30) };
         for (var i = 0; ; i++)
         {
             try { if ((await control.GetAsync("_fake/state")).IsSuccessStatusCode) break; } catch (HttpRequestException) { }

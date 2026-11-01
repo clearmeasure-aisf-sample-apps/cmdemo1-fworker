@@ -351,7 +351,7 @@ static class QcWiring
         if (tokens is null) return null;
         var cfg = QcConfig.From(c.Instance.Root, env);
         var api = env("GITHUB_API_URL");
-        http ??= new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler())) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
+        http ??= new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler(), "factory-worker-gateway")) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
         var budget = c.GitHubBudget;
         Action<string, string?, string?, string?> observe = (resource, remaining, reset, limit) =>
             budget?.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
