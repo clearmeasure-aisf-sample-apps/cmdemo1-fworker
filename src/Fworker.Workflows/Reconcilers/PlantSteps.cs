@@ -104,8 +104,8 @@ public interface IPlantSteps
     Task<PlantStepResult> DesignWaiting();
 }
 
-/// <param name="start">V1.1: starts the saga of the item Replenish has just placed in the keeper's column (the gateway where the engine acts; null: v1 runs the item). It may fail or answer false: the admission starts the saga of a card in a step column that has none.</param>
-public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphanMemory orphans, PlantStepSettings settings, Func<bool>? mayAct = null, Func<StartWorkItem, Task>? start = null) : IPlantSteps
+/// <param name="start">V1.1: starts the saga of the item Replenish has just placed in the keeper's column (the gateway where the engine acts; null: v1 runs the item); it is given the column, whose step the saga begins at. It may fail or answer false: the admission starts the saga of a card in a step column that has none.</param>
+public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphanMemory orphans, PlantStepSettings settings, Func<bool>? mayAct = null, Func<StartWorkItem, string, Task>? start = null) : IPlantSteps
 {
     FactoryRules Rules => cx.Rules;
     bool May() => mayAct?.Invoke() ?? true;
@@ -323,7 +323,7 @@ public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphan
             // replenishment: the admission (Adoption/Admission.cs) starts the saga of a card in a step column that has none, the pass after.
             if (start is not null)
             {
-                try { await start(new StartWorkItem(new ItemId(new RepoId(Rules.Owner, Rules.Repo), n), "replenish", WorkPlans.Feature, Step: StepKind.Design)); }
+                try { await start(new StartWorkItem(new ItemId(new RepoId(Rules.Owner, Rules.Repo), n), "replenish", WorkPlans.Feature), Rules.KeeperColumn); }
                 catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"replenish: the saga of #{n} was not started ({e.GetType().Name}); the admission starts it"); }
             }
             await using (await cx.Locks.Item(d.Number, TimeSpan.FromSeconds(3))) await cx.Journal(d.Number, null, "replenish", [new("new", n), new("title", topic.Title)], "");

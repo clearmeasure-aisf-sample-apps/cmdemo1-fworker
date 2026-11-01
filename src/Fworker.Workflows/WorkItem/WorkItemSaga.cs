@@ -228,7 +228,8 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         if (plan is null || plan.Name == WorkPlans.Redeliver) return Nothing(existing, WorkItemOutcome.Refused, $"there is no plan '{s.Plan}' to start on");
         if (existing is { IsOpen: true })
         {
-            // V1.1: a start that names the step (Replenish's, the admission's) for an item that has a saga does nothing at all: the two can meet in one pass, a pass can come twice, a message can be redelivered
+            // V1.1: a start that names the step (Replenish's, the admission's) for an item that has a saga does nothing at all: the two can meet in one pass, a pass can come twice, a message can be redelivered. A start lost
+            // between the save and its publication (a crash) is not repeated by the message: WorkItemRearm sends the timers and commands of the saved row again, and the decision is the row's history.
             if (s.Step is not null) return Nothing(existing, WorkItemOutcome.Refused, "the item is open");
             // a redelivery of the start finds its own transition still the last and publishes it again; a start of an item that has moved on changes nothing
             if (existing.LastKey == "start") return Reemit(existing, WorkItemState.FromJson(existing.ToJson()));
@@ -264,7 +265,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         var first = at is StepKind.Design or StepKind.Develop or StepKind.Verify && plan.Has(at.Value) ? at.Value : plan.First;
         state.Step = first;
         c.Decide(action, source);
-        c.Enter(first, first == plan.First ? "first step of the plan" : $"the card stands in the {first} column");
+        c.Enter(first, first == plan.First ? (at is not null && at != first ? $"the {at} column is not a step of the {plan.Name} plan: begins at its first step" : "first step of the plan") : $"the card stands in the {first} column");
         return Seal(c, null, key);
     }
 

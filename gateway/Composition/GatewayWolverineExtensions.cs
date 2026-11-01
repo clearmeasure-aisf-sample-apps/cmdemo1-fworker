@@ -178,10 +178,12 @@ static class GatewayWolverineExtensions
                     // W9.10g: the plant-wide steps of the sweep as jobs of the leader (PlantStepJobs.cs; the sweep leaves them out where this exists), and the retention prune
                     var restoredSince = DateTime.UtcNow;
                     // V1.1: Replenish starts the saga of the item it creates, when the engine carries the plan (intake.v2Plans names it); else v1 runs the item as before
-                    Func<Fworker.Workflows.WorkItem.StartWorkItem, Task> StartOnReplenish = async m =>
+                    Func<Fworker.Workflows.WorkItem.StartWorkItem, string, Task> StartOnReplenish = async (m, column) =>
                     {
                         if (!workItems.Intake.IsV2Plan(m.Plan)) return;
-                        if (!await host.PublishAsync(m)) throw new InvalidOperationException("the Wolverine host is not up");
+                        // the saga begins at the step of the column the card was placed in (the keeper's column: Technical Design, the Design step)
+                        var step = workItems.Docs.Settings.Columns.Where(kv => string.Equals(kv.Value, column, StringComparison.OrdinalIgnoreCase)).Select(kv => (Fworker.Workflows.WorkItem.StepKind?)kv.Key).FirstOrDefault() ?? Fworker.Workflows.WorkItem.StepKind.Design;   // (a keeper column that is no step's: the first step)
+                        if (!await host.PublishAsync(m with { Step = step })) throw new InvalidOperationException("the Wolverine host is not up");
                     };
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
                     Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)

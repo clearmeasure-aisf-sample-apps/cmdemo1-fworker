@@ -30,6 +30,8 @@ public class AdmissionTests
         public readonly List<object> Published = [];
         public readonly List<string> Log = [];
         public bool Leader = true, AdoptionDone = true, HostUp = true;
+        public readonly Dictionary<string, DateTimeOffset> SeenReopened = [];
+        public readonly HashSet<int> Excluded = [];
         public DateTimeOffset Clock = Now;
         public AdmissionConfig Config = new("factory worker", "AI Factory", "Demo", "", "<!-- aisf:docs-only -->", Settings().Policy, MaxStarts: 6);
         public AdoptionSettings Mapping = Settings();
@@ -44,7 +46,7 @@ public class AdmissionTests
                 m => { if (!HostUp) return Task.FromResult(false); lock (Published) Published.Add(m); return Task.FromResult(true); }, (m, due) => Task.FromResult(true));
             var options = new AdoptionOptions(Home, Mapping, () => []);
             var runner = new AdoptionRunner(options, ports, () => Clock);
-            return new Admission(options, Config with { Policy = Mapping.Policy }, runner, ports, () => Leader, () => AdoptionDone, (id, _) => Task.FromResult(ClosedIssues.Contains(id.Number)), () => Clock, Log.Add);
+            return new Admission(options, Config with { Policy = Mapping.Policy }, runner, ports, () => Leader, () => AdoptionDone, (id, _) => Task.FromResult(ClosedIssues.Contains(id.Number)), () => Clock, Log.Add, () => Excluded, key => SeenReopened.TryGetValue(key, out var at) ? at : null, key => SeenReopened.Remove(key));
         }
 
         public World Put(int n, string column, JsonObject? state, string[]? labels = null, string body = "The body.", bool issueOpen = true)
@@ -206,12 +208,14 @@ public class AdmissionTests
     }
 
     [Fact]
-    public async Task AnItemWhoseSagaCompleted_AndWhoseIssueIsOpenAgain_IsReopened_Once()
+    public async Task AnItemWhoseSagaCompleted_AndWhoseCardTheBoardSawClosedAndNowSeesOpen_IsReopened_Once()
     {
         var w = new World().Put(12, Develop, null);
         await Completed(w, 12, TimeSpan.FromHours(3));
+        w.SeenReopened["acme/orders#12"] = Now.AddHours(-1);
         await w.Run();
         var reopen = Assert.Single(w.Of<ReopenWorkItem>());
+        Assert.Empty(w.SeenReopened);   // (the proof is used up)
         Assert.Equal(("admission-reopen|1", new ItemId(Home, 12)), (reopen.Key, reopen.Item));
         Assert.Empty(w.Of<StartWorkItem>());
         Assert.Equal(1, w.Admission.Report.Reopened);
@@ -220,8 +224,123 @@ public class AdmissionTests
         await fx.Send(new StartWorkItem(SagaFixture.Item, "board", "feature"));
         await fx.Send(new ItemClosed(SagaFixture.Item, "c1", "test"));
         Assert.False(fx.State.IsOpen);
-        await fx.Send(new ReopenWorkItem(SagaFixture.Item, "the issue is open and its card stands in a step column", "admission-reopen|1"));
+        await fx.Send(new ReopenWorkItem(SagaFixture.Item, "the issue was reopened", "admission-reopen|1"));
         Assert.Equal((2, true), (fx.State.Generation, fx.State.IsOpen));
+    }
+
+    [Fact]
+    public async Task AMergedItemWhoseCloseAndCardMoveFailed_IsNotReopened_ItsCardWasNeverSeenClosed()
+    {
+        // the saga completed, the issue is still open and the card still stands in a step column: nothing shows a person reopened it
+        var w = new World().Put(12, Verify, null);
+        await Completed(w, 12, TimeSpan.FromHours(3));
+        await w.Run(); await w.Run();
+        Assert.Empty(w.Of<ReopenWorkItem>());
+        Assert.Empty(w.Of<StartWorkItem>());
+        Assert.Equal(0, w.Admission.Report.Reopened);
+        Assert.Equal(2, (int)w.Admission.Report.ToJson()["skippedBy"]!["completed-no-proof"]!);   // (looked at again every pass, so the board's proof is seen the pass it comes)
+    }
+
+    [Fact]
+    public async Task ABoardProofFromBeforeTheSagaEnded_OrForAMergedItem_ProvesNothing()
+    {
+        var w = new World().Put(12, Develop, null).Put(13, Develop, null);
+        await Completed(w, 12, TimeSpan.FromHours(3));
+        w.SeenReopened["acme/orders#12"] = Now.AddHours(-5);   // the card was closed and opened while the saga ran: before its end
+        var merged = new WorkItemState { Item = "acme/orders#13", Generation = 1, Plan = "feature", Status = WorkItemStatus.Completed, CompletedAt = Now.AddHours(-3), Step = StepKind.Deliver, MergeCommit = new string('a', 40) };
+        Assert.True(await w.Items.Save(merged.Item, merged, 0, default));
+        w.SeenReopened["acme/orders#13"] = Now.AddHours(-1);
+        await w.Run();
+        Assert.Empty(w.Of<ReopenWorkItem>());
+        Assert.Equal(2, (int)w.Admission.Report.ToJson()["skippedBy"]!["completed-no-proof"]!);
+    }
+
+    [Fact]
+    public async Task AReopenedV1Item_WithANewerStateCommentWrittenAfterTheSagaEnded_GoesThroughTheReconcilersReopenPath()
+    {
+        var w = new World().Put(12, Develop, State(rev: 9, extra: "\"design\": { \"docs_only\": false }"));
+        await Completed(w, 12, TimeSpan.FromHours(3));
+        await w.Run();
+        Assert.Empty(w.Of<ReopenWorkItem>());
+        var row = w.Row(12);
+        Assert.Equal((2, true, StepKind.Develop, 9L), (row.Generation, row.IsOpen, row.Step, (long)row.CommentRev));
+        Assert.Equal(1, w.Admission.Report.Reopened);
+    }
+
+    [Fact]
+    public async Task AStateCommentWrittenAroundTheCompletion_IsTheProjectionsEcho_NotAReopening()
+    {
+        var comment = State(rev: 9); comment["updated"] = Iso(TimeSpan.FromMinutes(19));
+        var w = new World().Put(12, Develop, comment);
+        await Completed(w, 12, TimeSpan.FromMinutes(20));
+        await w.Run();
+        Assert.False(w.Row(12).IsOpen);
+        Assert.Equal(0, w.Admission.Report.Reopened);
+    }
+
+    [Fact]
+    public async Task APassReopensNoMoreThanTheLimit_AndItemsTheAdoptionCouldNotFenceAreLeftAlone()
+    {
+        var w = new World { Config = new("factory worker", "AI Factory", "Demo", "", "<!-- aisf:docs-only -->", Settings().Policy, MaxStarts: 6) { MaxReopens = 1 } };
+        foreach (var n in new[] { 12, 13, 14 }) { w.Put(n, Develop, null); await Completed(w, n, TimeSpan.FromHours(3)); w.SeenReopened[$"acme/orders#{n}"] = Now.AddHours(-1); }
+        w.Excluded.Add(14);
+        await w.Run();
+        Assert.Equal([12], w.Of<ReopenWorkItem>().Select(r => r.Item.Number));
+        await w.Run();
+        Assert.Equal([12, 13], w.Of<ReopenWorkItem>().Select(r => r.Item.Number));   // (one a pass; the proof of 12 is used up, so the next pass reaches 13)
+        Assert.DoesNotContain(w.Of<ReopenWorkItem>(), r => r.Item.Number == 14);
+    }
+
+    [Fact]
+    public async Task AHeldCard_GetsNoSaga_UntilTheHoldIsLifted()
+    {
+        var w = new World { Config = new("factory worker", "AI Factory", "Demo", "", "<!-- aisf:docs-only -->", Settings().Policy, MaxStarts: 6) { HoldLabels = ["on-ice"] } };
+        w.Put(12, Design, null, ["factory worker", "hold:owner"]).Put(13, Design, null, ["factory worker", "on-ice"]).Put(14, Design, State(), ["factory worker", "hold:review"]);
+        await w.Run();
+        Assert.Empty(w.Of<StartWorkItem>());
+        Assert.Empty(w.Items.States);   // (a held card with v1's state comment is not adopted either)
+        Assert.Equal(3, (int)w.Admission.Report.ToJson()["skippedBy"]!["held"]!);
+        w.Put(12, Design, null); w.Clock = Now.AddMinutes(6);   // the hold is lifted; the card is looked at again after the skip time
+        await w.Run();
+        Assert.Equal([12], w.Of<StartWorkItem>().Select(s => s.Item.Number));
+    }
+
+    [Fact]
+    public void TheAdoptionsMapping_PutsAHotfixItemOnTheHotfixPlan_BeginningAtDevelopWhenItsCardIsInDesign_AndSkipsItWhereThePlanIsNotCarried()
+    {
+        var inDesign = Map(Design, State(), with: s => s with { Labels = ["factory worker", "hotfix"] });
+        Assert.Equal(("hotfix", StepKind.Develop), (inDesign.State!.Plan, inDesign.State.Step));
+        var inVerify = Map(Verify, State(), with: s => s with { Labels = ["factory worker", "hotfix"] });
+        Assert.Equal(("hotfix", StepKind.Verify), (inVerify.State!.Plan, inVerify.State.Step));
+        Assert.Equal("plan-not-carried: hotfix", Map(Develop, State(), Settings(p => p with { CarriedPlans = ["docs", "feature"] }), s => s with { Labels = ["factory worker", "hotfix"] }).SkipReason);
+        Assert.Equal("feature", Map(Develop, State()).State!.Plan);
+    }
+
+    [Fact]
+    public async Task AHotfixCard_IsStartedOnTheHotfixPlan_AtItsColumnButNeverBeforeDevelop_AndAdoptedOntoIt_WhereTheEngineCarriesThePlan()
+    {
+        var w = new World().Put(12, Design, null, ["factory worker", "hotfix"]).Put(13, Verify, null, ["factory worker", "hotfix"])
+            .Put(14, Develop, State(extra: Claim(Develop, true, TimeSpan.FromMinutes(25))), ["factory worker", "hotfix"]);
+        await w.Run();
+        var starts = w.Of<StartWorkItem>().OrderBy(x => x.Item.Number).ToList();
+        Assert.Equal([(12, "hotfix", StepKind.Develop), (13, "hotfix", StepKind.Verify)], starts.Select(x => (x.Item.Number, x.Plan!, x.Step!.Value)));
+        // the adopted one holds the plan and its live claim's slot
+        Assert.Equal(("hotfix", StepKind.Develop, true), (w.Row(14).Plan, w.Row(14).Step, w.Row(14).SlotKnown));
+        Assert.Empty(w.Of<SlotWanted>());
+        // the hotfix plan begins at Develop in the saga: a start at Design on it is the plan's first step
+        var fx = new SagaFixture();
+        await fx.Send(new StartWorkItem(SagaFixture.Item, "board", "hotfix", Step: StepKind.Design));
+        Assert.Equal(StepKind.Develop, fx.State.Step);
+    }
+
+    [Fact]
+    public async Task AHotfixCard_WhereTheEngineDoesNotCarryThePlan_IsLeftAlone()
+    {
+        var w = new World { Mapping = Settings(p => p with { CarriedPlans = ["docs", "feature"] }) }.Put(12, Design, null, ["factory worker", "hotfix"]).Put(14, Develop, State(), ["factory worker", "hotfix"]);
+        await w.Run();
+        Assert.Empty(w.Of<StartWorkItem>());
+        Assert.Empty(w.Items.States);
+        Assert.Equal(2, (int)w.Admission.Report.ToJson()["skippedBy"]!["plan-not-carried"]!);
     }
 
     [Fact]
@@ -255,7 +374,7 @@ public class AdmissionTests
     public async Task WhatIsNotTheEnginesToAdmit_IsSkippedWithItsReason()
     {
         var w = new World().Put(1, Design, null, ["factory worker", "env:tdd"], issueOpen: false).Put(2, Design, null, ["bug", "env:tdd"]).Put(3, Design, null, ["factory worker", "AI Factory", "env:tdd"])
-            .Put(4, Design, null, ["factory worker", "Demo", "env:tdd"]).Put(5, Design, null, ["factory worker", "env:uat"]).Put(6, Design, null, ["factory worker", "env:tdd", "hotfix"]).Put(7, Design, null, ["factory worker"]);
+            .Put(4, Design, null, ["factory worker", "Demo", "env:tdd"]).Put(5, Design, null, ["factory worker", "env:uat"]).Put(7, Design, null, ["factory worker"]);
         w.Config = w.Config with { EnvLabel = "env:tdd" };
         await w.Run();
         Assert.Empty(w.Of<StartWorkItem>());
@@ -265,7 +384,6 @@ public class AdmissionTests
         Assert.Equal(1, (int)json["rival-label"]!);
         Assert.Equal(1, (int)json["demo-label"]!);
         Assert.Equal(2, (int)json["env-scope"]!);   // (env:uat; and #7 carries no env: label at all while scoping is on)
-        Assert.Equal(1, (int)json["hotfix-label"]!);
         // a card skipped is not read again at once
         var reads = w.Reads.ItemReads;
         await w.Run();

@@ -202,25 +202,34 @@ public sealed class SweeperV2ArgumentsTests
         var own = new V2Ownership(new InMemoryWorkItemStore(), Home);
         own.Set([9, 3, 7]);
         var args = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 2 } };
-        Sweeper.AddV2Arguments(args, own, ["docs", "feature"]);
+        Sweeper.AddV2Arguments(args, own, ["docs", "feature", "hotfix"]);
         Assert.Equal([3, 7, 9], args["skip_items"]!.AsArray().Select(x => x!.GetValue<int>()).ToArray());
-        Assert.Equal(["docs", "feature"], args["intake"]!["v2Plans"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray());
+        Assert.Equal(["docs", "feature", "hotfix"], args["intake"]!["v2Plans"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray());
         Assert.Equal(2, args["intake"]!["freeSlots"]!.GetValue<int>());
+        // V1.1: where the engine carries plans every item is the engine's, with a saga or not: the script is told so
+        Assert.True(args["v2_all_items"]!.GetValue<bool>());
 
         // an incremental pass has no intake block: the plans have nowhere to go, the owned set still does
         var incremental = new JsonObject { ["items"] = new JsonArray(4) };
-        Sweeper.AddV2Arguments(incremental, own, ["docs"]);
-        Assert.NotNull(incremental["skip_items"]); Assert.Null(incremental["intake"]);
+        Sweeper.AddV2Arguments(incremental, own, ["docs", "feature", "hotfix"]);
+        Assert.NotNull(incremental["skip_items"]); Assert.Null(incremental["intake"]); Assert.True(incremental["v2_all_items"]!.GetValue<bool>());
+
+        // a plan not carried (hotfix): its items have nobody but v1, so v1 keeps sweeping every item
+        var partial = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 2 } };
+        Sweeper.AddV2Arguments(partial, own, ["docs", "feature"]);
+        Assert.Null(partial["v2_all_items"]); Assert.NotNull(partial["skip_items"]);
+        Assert.True(Sweeper.EngineOwnsAllItems(["Docs", "FEATURE", "hotfix"])); Assert.False(Sweeper.EngineOwnsAllItems(["docs", "feature"]));
 
         // nothing owned, no plans: nothing is added
         var none = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 1 } };
         Sweeper.AddV2Arguments(none, new V2Ownership(new InMemoryWorkItemStore(), Home), []);
+        Assert.Null(none["v2_all_items"]);   // (an engine that carries no plan leaves the items to v1 as before)
         Assert.Equal(["intake"], none.Select(p => p.Key).ToArray()); Assert.Equal(["freeSlots"], ((JsonObject)none["intake"]!).Select(p => p.Key).ToArray());
 
         // v1 (no ownership at all): the script is called as it always was
         var v1 = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 1 } };
         Sweeper.AddV2Arguments(v1, null, ["docs"]);
-        Assert.Equal(["intake"], v1.Select(p => p.Key).ToArray()); Assert.Null(v1["intake"]!["v2Plans"]);
+        Assert.Equal(["intake"], v1.Select(p => p.Key).ToArray()); Assert.Null(v1["intake"]!["v2Plans"]); Assert.Null(v1["v2_all_items"]);
     }
 
     // The control (v1) shows that the sweeper sweeps in this test environment at all; the v2 gateway's store throws on every read, so no pass runs and no item is acted on until the table has been read.

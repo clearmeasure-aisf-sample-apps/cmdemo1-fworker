@@ -463,6 +463,7 @@ $SagaScenarios['saga: admission: a replenished item starts its saga in the pass 
         $started = Wait-Until -Seconds 90 { $null -ne (Saga-View $m) }
         Check "#$m has a saga" $started "view $((Saga-View $m) | ConvertTo-Json -Compress -Depth 4)"
         if (-not $started) { return }
+        [void](Wait-Until -Seconds 40 { (Adm-History $m) -match 'started' })   # (the view is read at most every 5 seconds and its history can be a read behind)
         $v = Saga-View $m
         Check "the saga of #$m is on the feature plan, at Design, and was started by Replenish (source replenish), not adopted" ("$($v.step)" -eq 'Design' -and "$($v.plan)" -eq 'feature' -and (Adm-History $m) -match 'started replenish' -and (Adm-History $m) -notmatch 'adopted') "view $($v | ConvertTo-Json -Compress -Depth 4); history $(Adm-History $m)"
         Check "the card of #$m is still in Technical Design" ((Saga-Col $m) -eq 'Technical Design') "column $(Saga-Col $m)"
@@ -514,6 +515,59 @@ $SagaScenarios['saga: admission: a card a person moves from Todo into Developmen
         Check 'the status counts the start or the adoption' (([int]$s.started + [int]$s.adopted) -ge 1 -and [int]$s.errors -eq 0) ($s | ConvertTo-Json -Compress -Depth 4)
     } finally {
         Adm-Park $items
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    }
+}
+
+$SagaScenarios['saga: admission: an item whose issue a person closed and then reopened gets a second generation (a reopened item), and v1''s sweep does nothing to a card of its own that has no saga'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1''s sweep runs these items (suites auto and owner)' $true; return }
+    Saga-NumbersAbove 160
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $oldGrace = [Environment]::GetEnvironmentVariable('FACTORY_ADMISSION_REOPEN_GRACE_SECONDS')
+    $items = @()
+    $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $setState = { param($n, $state) [void](Invoke-RestMethod "$gh/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = $state } | ConvertTo-Json)) }
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        if (-not $cfg.ContainsKey('recurringJobs')) { $cfg.recurringJobs = @{} }
+        $cfg.recurringJobs.boardReconcilerSeconds = 30
+        $cfg.intake.v2Plans = @('docs', 'feature', 'hotfix')   # (v1's sweep leaves every item to the engine only when the engine carries every plan)
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        $env:FACTORY_ADMISSION_REOPEN_GRACE_SECONDS = '20'
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        $r = New-Item-Fake 'Admission reopened' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Development'
+        # a held card (the admission gives it no saga) with a merge record waiting for master, which v1's settle would act on, in an AI column
+        $items += $r
+        Restart-Gateway
+        Check 'the Wolverine host runs' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        [void](Wait-Until -Seconds 120 { $x = Adopt-Run; $null -ne $x -and "$($x.outcome)" -eq 'done' })
+        $h = New-Item-Fake 'Admission v1 own' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'hold:owner') 'Development'
+        $items += $h
+        $iso = { param($t) $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+        Adopt-State $h @{ design = @{ docs_only = $false }; merge = @{ sha = 'abc1234'; merged_at = (& $iso (Get-Date).AddMinutes(-3)); awaiting = 'master-green'; pr = 5 } }
+        $before = @((Saga-FakeLog) | Where-Object { $_ -match "^(POST|PATCH|PUT) /repos/[^/]+/[^/]+/issues/$h(/|$)" }).Count
+        Check "the card in Development gets a saga (started at Develop)" (Wait-Until -Seconds 150 { $v = Saga-View $r; $null -ne $v -and "$($v.step)" -eq 'Develop' }) "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4)"
+        # a person closes the issue: the poll of the board reconciler ends the saga
+        & $setState $r 'closed'
+        $done = Wait-Until -Seconds 150 { $v = Saga-View $r; ($null -eq $v) -or ("$($v.status)" -eq 'completed') -or ('completed' -in (Saga-Actions $r)) }
+        Check "the saga of #$r ends when its issue is closed" $done "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4); $((Saga-Actions $r) -join ',')"
+        Start-Sleep -Seconds 35   # (the board reconciler sees the card closed in one pass, and open in a later one)
+        & $setState $r 'open'
+        [void](Fake 'move' @{ number = $r; column = 'Development' })
+        $fi = Get-FakeIssue $r
+        Check "the person's reopening and move took (issue open, card in Development)" ($fi.open -eq $true -and "$($fi.column)" -eq 'Development') "issue: column $($fi.column), open $($fi.open)"
+        $again = Wait-Until -Seconds 240 { $v = Saga-View $r; $null -ne $v -and [int]$v.generation -ge 2 -and "$($v.status)" -eq 'open' }
+        Check "the issue reopened after the board showed its card closed gets the next generation" $again "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4); $((Adm-Status) | ConvertTo-Json -Compress -Depth 4)"
+        Check 'the status counts the reopening' ([int](Adm-Status).reopened -ge 1) ((Adm-Status) | ConvertTo-Json -Compress -Depth 4)
+        # v1's sweep (every few seconds in the tests) did nothing to the hotfix item: no write to its issue, no saga for it
+        $after = @((Saga-FakeLog) | Where-Object { $_ -match "^(POST|PATCH|PUT) /repos/[^/]+/[^/]+/issues/$h(/|$)" }).Count
+        Check "v1 wrote nothing to #$h, whose merge record its settle would have acted on (the engine acts: every item is its own)" ($after -eq $before) "writes before $before, after $after"
+        Check "#$h has no saga (held; v1 does nothing to it either)" ($null -eq (Saga-View $h)) ((Saga-View $h) | ConvertTo-Json -Compress -Depth 3)
+    } finally {
+        Adm-Park $items
+        [Environment]::SetEnvironmentVariable('FACTORY_ADMISSION_REOPEN_GRACE_SECONDS', $oldGrace)
         Set-Content -Path $cfgPath -Value $orig -NoNewline
         Restart-Gateway
         [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })

@@ -22,7 +22,7 @@ public sealed class PlantStepsTests
         public readonly InMemoryClaimOrphans Orphans = new();
         public bool May = true;
         public bool StartFails;
-        public readonly List<Fworker.Workflows.WorkItem.StartWorkItem> Started = [];
+        public readonly List<(Fworker.Workflows.WorkItem.StartWorkItem Message, string Column)> Started = [];
         public PlantSteps Steps;
         public VerbContext Cx;
 
@@ -32,7 +32,7 @@ public sealed class PlantStepsTests
             World.Rules = r;
             Cx = new VerbContext(r, World, World, World, World, () => World.Clock);
             Steps = new PlantSteps(Cx, World, Orphans, new PlantStepSettings(lease, replenish ?? ReplenishSettings.Off), () => May,
-                m => StartFails ? throw new InvalidOperationException("the host is not up") : Task.Run(() => Started.Add(m)));
+                (m, column) => StartFails ? throw new InvalidOperationException("the host is not up") : Task.Run(() => Started.Add((m, column))));
         }
 
         public KeeperWorld.Issue Add(int n, string title, string column = "Technical Design", bool open = true, params string[] labels)
@@ -260,14 +260,14 @@ public sealed class PlantStepsTests
     }
 
     [Fact]
-    public async Task Replenish_StartsTheSagaOfTheItemItCreated_AtDesign_AfterTheCardIsInTheKeepersColumn()
+    public async Task Replenish_StartsTheSagaOfTheItemItCreated_WithTheKeepersColumn_AfterTheCardIsInIt()
     {
         var r = new Rig(On);
         r.Finished(70);
         var res = await r.Steps.Replenish(0, 1);
         var made = Assert.Single(res.Replenish!["created"]!.AsArray()).GetValue<int>();
-        var start = Assert.Single(r.Started);
-        Assert.Equal((made, "replenish", "feature", Fworker.Workflows.WorkItem.StepKind.Design), (start.Item.Number, start.Source, start.Plan, start.Step));
+        var (start, column) = Assert.Single(r.Started);
+        Assert.Equal((made, "replenish", "feature", "Technical Design"), (start.Item.Number, start.Source, start.Plan, column));
         Assert.Equal("acme/work", start.Item.Repository.ToString());
     }
 
