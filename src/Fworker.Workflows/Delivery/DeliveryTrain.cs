@@ -165,6 +165,20 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 if (s.SignOffs.All(x => x.InterruptionId != so.InterruptionId))
                     s.SignOffs.Add(new TrainSignOff { InterruptionId = so.InterruptionId, DeploymentId = so.DeploymentId, TaskId = so.TaskId, Version = so.Version, Since = now });
                 break;
+            case TrainCommandRefused rf:
+                var retryAt = rf.At.AddSeconds(Math.Max(1, p.PollSeconds));
+                if (!rf.Settled) break;
+                if (rf.Command == "PromoteRelease" && s.Requested.ContainsKey(rf.Version) && s.DeploymentOf(rf.Version, p.Environment) is null
+                    && rf.CommandKey == $"PromoteRelease|{p.Deployable}|{rf.Version}|{p.Environment}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(rf.Version))}")
+                {
+                    s.Requested.Remove(rf.Version); s.FirstRequested.Remove(rf.Version);
+                    s.RetryNotBefore[rf.Version] = retryAt;
+                }
+                else if (rf.Command == "AnswerSignOff" && s.SignOffs.FirstOrDefault(x => x.TaskId == rf.TaskId && x.Answered) is { } refused)
+                {
+                    refused.Answered = false; refused.RetryAfter = retryAt;
+                }
+                break;
             case TrainHold h:
                 s.Held = h.Held; s.HeldReason = h.Held ? h.Reason : "";
                 s.HeldIncident = h.Held ? h.IncidentId : "";
@@ -274,7 +288,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 s.DeliveredItems.Add($"{c.Item}|{c.Commit}");
                 items.Add(c.Item);
             }
-            s.Settled.Add(version);
+            s.Settled.Add(version); s.RetryNotBefore.Remove(version);
             if (carried.Count > 0) RememberDelivery(version, carried);
             if (s.Current is null || !s.Releases.TryGetValue(s.Current, out var cur) || (s.DeploymentOf(s.Current, env)?.FinishedAt ?? DateTimeOffset.MinValue) <= (dep.FinishedAt ?? dep.StartedAt)) s.Current = version;
             // older releases that never reached the environment ride in this one: "delivered in release X, superseding Y"
@@ -335,7 +349,13 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         {
             var cands = CandidatesOf(n).ToList();
             if (cands.Count > 0)
-                foreach (var c in cands) { items.Add(c.Item); itemGaps.AddRange(c.Gates.Gaps); if (p.DependenciesDelivered) itemGaps.AddRange(await DependencyGaps(c, j.Items, ct)); }
+                foreach (var c in cands)
+                {
+                    // The gates are read again at every look (the reads keep an answer for a minute): a label put on or taken off after the merge, or a demo video published, changes them and no event the train hears of says so.
+                    // v1 reads them in every pass. A read that finds the item gone leaves the gates of the merge.
+                    if (await reads.ReadGates(ItemId.Parse(c.Item), ct) is { } fresh) c.Gates = fresh;
+                    items.Add(c.Item); itemGaps.AddRange(c.Gates.Gaps); if (p.DependenciesDelivered) itemGaps.AddRange(await DependencyGaps(c, j.Items, ct));
+                }
             else
             {
                 // an item found by its commit that is no candidate (a docs-only item went straight to Done): v1 reads its gates too
@@ -408,6 +428,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     {
         foreach (var so in s.SignOffs.ToList())
         {
+            if (!so.Answered && so.RetryAfter is { } retry && retry > now) { wakes.Add(retry); continue; }   // the answer was refused: asked again after the poll, as v1's next pass does
             if (so.Answered)
             {
                 // the answer's effect is not seen yet: send it again after a while (the key makes a second send harmless)
@@ -415,7 +436,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 wakes.Add((so.AnsweredAt ?? now).Add(DeliveryTrainService.CommandRetry));
                 continue;
             }
-            if (!s.Requested.ContainsKey(so.Version) || !s.Releases.TryGetValue(so.Version, out var release))
+            if (!(s.Requested.ContainsKey(so.Version) || s.RetryNotBefore.ContainsKey(so.Version)) || !s.Releases.TryGetValue(so.Version, out var release))
             {
                 Decide("following", so.Version, [], [$"the Sign-off of task {so.TaskId} belongs to a deployment the gateway did not create"]);
                 continue;
@@ -535,6 +556,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 continue;
             }
             var reasons = common.Concat(j.ItemGaps).Distinct().ToList();
+            if (j.ItemGaps.Count > 0) wakes.Add(now.AddSeconds(p.PollSeconds));   // an item's gap (a label, a demo video) is lifted by the item, not by an event the train hears of: it looks again at v1's pace
             if (stop) { if (reasons.Count > 0) Note(r.Version, j.Items, reasons); continue; }
             judged.Add(new ReleaseCandidate(r.Version, r.Assembled, reasons.Count == 0));
             if (reasons.Count == 0) { winner = j; stop = true; continue; }
@@ -550,6 +572,11 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         if (blocked) { mentioned.UnionWith(open2.Select(x => x.Version)); Retract(mentioned); return; }
         if (pick is null || winner is null) { Retract(mentioned); return; }
         mentioned.Add(pick.Version); Retract(mentioned);
+        if (s.RetryNotBefore.TryGetValue(pick.Version, out var notBefore))
+        {
+            if (notBefore > now) { wakes.Add(notBefore); return; }   // the executor was refused (a 403): v1 asks again in its next pass, the train after the poll
+            s.RetryNotBefore.Remove(pick.Version);
+        }
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
         s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)

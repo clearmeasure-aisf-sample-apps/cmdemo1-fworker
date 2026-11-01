@@ -52,6 +52,13 @@ public sealed record TrainRollback(string Key, string IncidentId, int Generation
 [MessageIdentity("delivery.train.rollback-answered")]
 public sealed record RollbackAnswered(string Key, string IncidentId, int Generation, string Outcome, string Code, string? ToRelease, string Reason, DateTimeOffset At) : IEvent;
 
+/// <summary>
+/// V2.1: the executor settled a command of this train as failed (Octopus refused it: a 403 for a missing permission, or the tries ran out). v1 asks again in its next pass, so the train takes the request back and asks again after the
+/// policy's poll, instead of waiting out the five minutes it gives an unconfirmed command. Only a <paramref name="Settled"/> refusal (Permanent) counts, and for a promotion only the one of the current request's <paramref name="CommandKey"/>: a command that ran out of tries may have created the deployment, and a late refusal of an earlier request says nothing of the current one. <paramref name="Command"/> is "PromoteRelease" (named by <paramref name="Version"/>) or "AnswerSignOff" (named by <paramref name="TaskId"/>).
+/// </summary>
+[MessageIdentity("delivery.train.command-refused")]
+public sealed record TrainCommandRefused(string Key, string Command, string Version, string TaskId, string CommandKey, bool Settled, DateTimeOffset At) : TrainInput(Key);
+
 /// <summary>The train looks again: a timer fired (<paramref name="Due"/> is the time it was scheduled for), or a fact the train does not keep changed (an item was delivered to another environment).</summary>
 [MessageIdentity("delivery.train.wake")]
 public sealed record TrainWake(string Key, DateTimeOffset? Due = null) : TrainInput(Key);

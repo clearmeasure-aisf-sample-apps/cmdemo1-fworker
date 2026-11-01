@@ -20,7 +20,7 @@ using Wolverine.ErrorHandling;
 public sealed record DeliveryCommandFinished(string IdempotencyKey, string Name, bool Ok, string Error);
 
 /// <summary>The runs of the delivery commands: the handler of the command, the retry of a transient failure, the messages of the outcome.</summary>
-public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer, PromotionStateWriter? recorder = null, PromotionJournal? journal = null)
+public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer, PromotionStateWriter? recorder = null, PromotionJournal? journal = null, IDeliveryPolicies? policies = null)
 {
     static RuntimeOutcome Settle<T>(T c, CommandResult r) where T : IntegrationCommand
     {
@@ -28,6 +28,9 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         var failed = IntegrationCommandHandler<T>.FailureMessage(c, r);
         return new(r, failed == null ? null : new DeliveryCommandFinished(c.IdempotencyKey, c.Name, false, r.Error), failed);
     }
+
+    /// <summary>A refusal that settles (Permanent): the effect did not happen. A command that ran out of tries may have had its effect, and the train does not take its request back.</summary>
+    static bool IsSettled(CommandResult? r) => r is { Ok: false, Failure: FailureKind.Permanent or FailureKind.NotSupported };
 
     static RuntimeOutcome Exhausted(IntegrationCommand c, string error)
     {
@@ -45,6 +48,8 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         // V2.1: the journal lines v1's AutoPromoter writes on the items: "promoted" with the task, and the refusal of Octopus (a 403 names the permission the owner must grant) as a waiting reason
         if (journal is not null && result is { Ok: true, Execution.Length: > 0 }) await journal.Promoted(c, result.Execution, ct);
         else if (journal is not null && result is { Ok: false } && result.Error.Contains("(403", StringComparison.Ordinal)) await journal.PromoteRefused(c, result.Error, ct);
+        // V2.1: a command that was refused or ran out of tries is told to the train, which asks again after its poll (v1 asks again in its next pass) and does not wait out the five minutes of an unconfirmed command
+        if (messages.OfType<DeliveryCommandFinished>().Any(m => !m.Ok)) return [.. messages, new TrainCommandRefused(TrainKey.Of(c.Deployable, c.Environment), c.Name, c.Version, "", c.IdempotencyKey, IsSettled(result), DateTimeOffset.UtcNow)];
         return messages;
     }
 
@@ -53,6 +58,9 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         CommandResult? result = null;
         var messages = await RuntimeCommandService.Outcome(c, async () => Settle(c, result = await answer.Handle(c, ct)), e => Exhausted(c, e), attempts);
         if (journal is not null && result is { Ok: false } && result.Error.Contains("(403", StringComparison.Ordinal)) await journal.AnswerRefused(c, result.Error, ct);
+        if (policies is not null && messages.OfType<DeliveryCommandFinished>().Any(m => !m.Ok))
+            return [.. messages, .. policies.All().Where(x => x.Acts && !x.Shadow && string.Equals(x.Deployable, c.Deployable, StringComparison.OrdinalIgnoreCase))
+                .Select(x => new TrainCommandRefused(TrainKey.Of(x.Deployable, x.Environment), c.Name, "", c.TaskId, c.IdempotencyKey, IsSettled(result), DateTimeOffset.UtcNow))];
         return messages;
     }
 
@@ -217,7 +225,7 @@ static class DeliveryActingWiring
         var trainStore = new SqlTrainStore(() => ItemMergedWiring.Open(parts.ConnectionString));
         // V2.1: the journal lines of the promotion on the items (the home repository's), through the one journal ledger of the gateway
         var journal = c.Instance.Home is { } homeRepo ? new PromotionJournal(() => c.JournalLedger, homeRepo, parts.Policies, trainStore) : null;
-        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter), promotions, journal);
+        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter), promotions, journal, parts.Policies);
         // W9.10p: the shadow of the environments v1's AutoPromoter still promotes (uat and prod until delivery.autoPromote.trainActs): the AutoPromoter's passes (AddGatewayBackground) and the status endpoints find it through the holder
         if (shadowHolder is not null) shadowHolder.Shadow = parts.Shadow;
         RollbackWiring.Attach(host, c, env, mayAct, ledger);   // W8.3: the executor of the train's incident rollback (RollbackRelease) and the migration probe it takes; the executor refuses every environment but tdd

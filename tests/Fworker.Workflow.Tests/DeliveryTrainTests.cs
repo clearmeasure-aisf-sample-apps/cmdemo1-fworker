@@ -281,6 +281,76 @@ public class DeliveryTrainTests
         Assert.Equal(["acme/orders#5", "acme/orders#7"], f.LastDecision.Items.Order());
     }
 
+    [Fact]
+    public async Task AGateThatChangesAfterTheMerge_IsReadAgain_AndLiftsTheWait()
+    {
+        // a Hold label, an Auto Merge label or a published demo video change the gates of a merged item and no event the train hears of says so: v1 reads them in every pass, the train at every look
+        var gaps = new[] { "#7 has the 'video' label and no demo video published (release demo-7, asset demo-7.mp4)" };
+        var f = await OneRelease(gaps: gaps);
+        var first = f.LastDecision!;
+        Assert.Equal("waiting", first.Action);
+        Assert.Equal(gaps, first.Reasons);
+        f.Reads.Gates["acme/orders#7"] = new ItemMergedGates(true, "", true, true, true, []);   // the video is published
+        await f.Mature();
+        Assert.Single(f.Of<PromoteRelease>());
+        Assert.Equal("promote", f.LastDecision!.Action);
+    }
+
+    [Fact]
+    public async Task AWaitOnAnItemsGap_LooksAgainAtThePolicysPoll_NotOnlyAtTheSafetyWake()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a');
+        await f.Merge(7, 'a', ["#7 has no 'Auto Merge' label"]);
+        f.Reads.Running["tdd"] = "1.0.2";
+        await f.Release("1.0.2", 'a'); await f.Deploy("1.0.2", "Tdd", "Started");
+        var r = await f.Deploy("1.0.2", "Tdd", "Succeeded");
+        Assert.NotNull(r.WakeAt);
+        Assert.True(r.WakeAt!.Value - f.Now <= TimeSpan.FromSeconds(120), $"the next look is {r.WakeAt!.Value - f.Now} away");
+    }
+
+    [Fact]
+    public async Task ARefusedPromotion_IsTakenBack_AndAskedAgainAfterThePoll_WithANewKey()
+    {
+        var f = await OneRelease();
+        await f.Mature();
+        var cmd = Assert.Single(f.Of<PromoteRelease>());
+        f.All.Clear();
+        var refused = await f.Send(new TrainCommandRefused(f.Key, "PromoteRelease", "1.0.2", "", cmd.IdempotencyKey, true, f.Now));
+        Assert.Empty(f.Of<PromoteRelease>());   // not before the poll
+        Assert.Empty(f.State.Requested);
+        Assert.NotNull(refused.WakeAt);
+        await f.Fire(refused);
+        var again = Assert.Single(f.Of<PromoteRelease>());
+        Assert.Equal("1.0.2", again.Version);
+        Assert.NotEqual(cmd.IdempotencyKey, again.IdempotencyKey);
+    }
+
+    [Fact]
+    public async Task ARefusal_OfAnEarlierRequestOrOfACommandThatRanOutOfTries_TakesNothingBack()
+    {
+        var f = await OneRelease();
+        await f.Mature();
+        var cmd = Assert.Single(f.Of<PromoteRelease>());
+        await f.Send(new TrainCommandRefused(f.Key, "PromoteRelease", "1.0.2", "", cmd.IdempotencyKey, false, f.Now));   // ran out of tries: the deployment may exist
+        await f.Send(new TrainCommandRefused(f.Key, "PromoteRelease", "1.0.2", "", "PromoteRelease|orders|1.0.2|uat|0", true, f.Now));   // a late refusal of another request
+        Assert.True(f.State.Requested.ContainsKey("1.0.2"));
+        Assert.Empty(f.State.RetryNotBefore);
+    }
+
+    [Fact]
+    public async Task ARefusedSignOffAnswer_IsAskedAgainAfterThePoll_NotAfterFiveMinutes()
+    {
+        var f = await AtTheSignOff();
+        var first = Assert.Single(f.Of<AnswerSignOff>());
+        f.All.Clear();
+        var refused = await f.Send(new TrainCommandRefused(f.Key, "AnswerSignOff", "", first.TaskId, first.IdempotencyKey, true, f.Now));
+        Assert.Empty(f.Of<AnswerSignOff>());
+        Assert.False(f.State.SignOffs.Single().Answered);
+        await f.Fire(refused);
+        Assert.Equal(first.Proceed, Assert.Single(f.Of<AnswerSignOff>()).Proceed);
+    }
+
     // ---- the Sign-off --------------------------------------------------------------------------------------------------------------------------------------
 
     /// <summary>The release promoted by the train and its deployment waiting at the Sign-off.</summary>

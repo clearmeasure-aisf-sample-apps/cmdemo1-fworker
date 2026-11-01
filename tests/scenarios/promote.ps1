@@ -120,7 +120,8 @@ $PromoteScenarios = [ordered]@{
     # two full sweeps that read the board with both items before the release exists: none still holds a read with item a alone
     $f0 = [long](Get-Plant).sweep.full
     [void](Wait-Until -Seconds 40 { [long](Get-Plant).sweep.full -ge $f0 + 2 })
-    [void](Fake 'octo-release' @{ version = '3.2.1'; sha = $a.sha; tdd = 'Success' })
+    # (the release is made at the newest commit, as a real release is: the train reads the commits the release adds to what runs, and the item merged by the later commit is in that range)
+    [void](Fake 'octo-release' @{ version = '3.2.1'; sha = $b.sha; tdd = 'Success' })
     Check 'each item gets one waiting comment' (Wait-Until -Seconds 40 { @(Pm-Events $a.n 'promotion-waiting').Count -ge 1 -and @(Pm-Events $b.n 'promotion-waiting').Count -ge 1 }) "$(Pm-Brief $a.n) /// $(Pm-Brief $b.n)"
     Wait-Sweeps -Count 2 -MinSeconds 8     # later sweeps
     Check 'no deployment is created' ((Pm-Deps).creates -eq 0)
@@ -151,13 +152,13 @@ $PromoteScenarios = [ordered]@{
     $i = Pm-Item '3.5.1' -Tdd 'Failed'
     Check 'it waits, naming the failed tdd deployment' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'deployment to tdd is Failed' }).Count -eq 1 }) (Pm-Brief $i.n)
     [void](Fake 'health' @{ status = 503 })
-    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success' })
+    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success'; new = $true })
     Check 'then the non-Healthy tdd app' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'tdd app answered Unhealthy on /_healthcheck/detailed' }).Count -eq 1 }) (Pm-Brief $i.n)
     [void](Fake 'health' @{ status = 200 })
     Start-Sleep -Seconds 10
     Check 'healthy again is not enough: a non-Healthy read since the deployment finished keeps it waiting' ((Pm-Deps).creates -eq 0)
     # a new tdd deployment of the release (finished now): the reads start again
-    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success' })
+    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success'; new = $true })
     # a slow CI machine can take more than one sweep to notice the new deployment, and can journal the reason again: at least one, within 90 s
     Check 'first it waits for two Healthy reads apart, the later after the settle time' (Wait-Until -Seconds 90 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not been Healthy long enough' }).Count -ge 1 }) (Pm-Brief $i.n)
     Check 'then it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.5.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)

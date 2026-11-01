@@ -1159,10 +1159,12 @@ sealed class World
                 { var n2 = ++octoSeq; octoDeps.Add(new OctoDep { Id = $"Deployments-P{n2}", RelId = r.Id, Env = OctoEnvIds[en], TaskId = $"ServerTasks-P{n2}", State = "Success" }); }
                 return (200, J(("ok", true), ("id", r.Id)));
             }
-            case "octo-dep":   // { release (version), env, state }: sets the state of that deployment (the newest of that release and environment)
+            case "octo-dep":   // { release (version), env, state, new }: sets the state of that deployment (the newest of that release and environment), or with new a deployment of its own
             {
                 var r = releases.FirstOrDefault(x => x.Version == b?["release"]?.ToString()); var eid = OctoEnvIds.GetValueOrDefault(b?["env"]?.ToString() ?? "", "");
                 var d = octoDeps.LastOrDefault(x => r != null && x.RelId == r.Id && x.Env == eid); if (d == null) return (404, J(("ok", false)));
+                // new: true is a redeploy, as Octopus has it: a deployment of its own (a new id and task), the earlier one stays as it ended. Without it the newest deployment changes its state (a deployment that ends)
+                if (b?["new"]?.GetValue<bool>() == true) { var n = ++octoSeq; d = new OctoDep { Id = $"Deployments-P{n}", RelId = r!.Id, Env = eid, TaskId = $"ServerTasks-P{n}" }; octoDeps.Add(d); }
                 d.State = b?["state"]?.ToString() ?? "Success"; return (200, J(("ok", true)));
             }
             case "octo-forbid":   // { create, interruption }: the permission named in a 403 of that call; "" (default) allows it
