@@ -82,8 +82,7 @@ $CopilotScenarios = [ordered]@{
         $code = Cop-Code $t
         Check 'the prompt carries a one-time code and no credential' ($code -ne '' -and -not ("$($b.prompt)" -match 'r1\.|b1\.|i1\.|w1\.|w2\.|fake-copilot'))
         Check 'neither the token nor the code is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-copilot').Count -eq 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $code).Count -eq 0)
-        # v1 sets the execution id in the start call; v2 settles it when the start's result message is handled, which can trail the task's creation at the fake by seconds on a loaded runner
-        [void](Wait-Until -Seconds 30 { @((Cop-Status).executions | Where-Object { $_.item -eq $n -and $_.execution -eq $t.id }).Count -eq 1 })
+        [void](Wait-RuntimeExecution { Cop-Status } -Item $n -Execution "$($t.id)")   # (v2 settles the execution when the start's result message is handled; see lib.ps1)
         $st = Cop-Status
         Check 'status: the task runs under the copilot-cloud runtime' ($st.running -eq 1 -and @($st.executions | Where-Object { $_.item -eq $n -and $_.execution -eq $t.id }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
         $link = "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks/$($t.id)"
@@ -104,7 +103,8 @@ $CopilotScenarios = [ordered]@{
         $row = @((Get-Plant).plant.workers | Where-Object { $_.name -like "cop-$n-*" })
         Check 'its worker shows type copilot-cloud, mode api' ($row.Count -eq 1 -and $row[0].mode -eq 'api' -and $row[0].type -eq 'copilot-cloud' -and $row[0].execution -eq $t.id) ($row | ConvertTo-Json -Compress -Depth 4)
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
-        Check 'session_end ends the task for the runtime' (Wait-Until -Seconds 15 { (Cop-Status).running -eq 0 })
+        # the end of this task, not the runtime's count: the end re-offers the open item and the runtime launches a second execution for it (below), so running can be 0 and 1 again between two polls
+        Check 'session_end ends the task for the runtime' (Wait-Until -Seconds 15 { @((Cop-Status).executions | Where-Object { $_.execution -eq $t.id }).Count -eq 0 })
         Check 'status: last[] carries the url' (Wait-Until -Seconds 15 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id -and $_.url -eq $link }).Count -eq 1 })
         Check 'the launch comment on the issue names the task and links its Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*started **cop-$n-* (task *$($t.id)*). Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")
         Check 'the accepted comment links the Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*cop-$n-* accepted*Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")

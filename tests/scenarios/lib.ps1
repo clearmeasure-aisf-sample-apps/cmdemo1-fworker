@@ -148,6 +148,19 @@ function Wait-Until([scriptblock]$Cond, [int]$Seconds = 30, [string]$Message = '
     return $false
 }
 
+# Waits until a runtime's execution is settled: the row of the status for the item (and worker, when given) carries its execution id (the given one, when
+# given) and is no longer provisioning. v1 sets both in the start call; v2 settles them when the start's result message is handled, which can trail the
+# creation of the task, agent or run at the fake by seconds on a loaded runner, so a status read right after a start can show execution "" and
+# provisioning. $Status is the scenario's status reader (Cop-Status, Cur-Status, Oct-Status, Rt-Status). Returns the settled row, or $null at the timeout
+# (the check that follows then reports what the status showed).
+function Wait-RuntimeExecution([scriptblock]$Status, [int]$Item = 0, [string]$Worker = '', [string]$Execution = '', [int]$Seconds = 30) {
+    $script:RtExecRow = $null
+    [void](Wait-Until -Seconds $Seconds {
+        $script:RtExecRow = ((& $Status).executions | Where-Object { $_ -and ($Item -le 0 -or "$($_.item)" -eq "$Item") -and ($Worker -eq '' -or "$($_.worker)" -eq $Worker) -and ($Execution -eq '' -or "$($_.execution)" -eq $Execution) -and "$($_.execution)" -ne '' -and "$($_.status)" -ne 'provisioning' } | Select-Object -First 1)
+        $null -ne $script:RtExecRow
+    })
+    return $script:RtExecRow
+}
 function Fake([string]$What, $Body = $null) {
     $u = "http://127.0.0.1:$($script:FakePort)/_fake/$What"
     if ($null -eq $Body) { Invoke-RestMethod $u } else { Invoke-RestMethod $u -Method POST -Body ($Body | ConvertTo-Json -Depth 8) -ContentType 'application/json' }
@@ -613,8 +626,20 @@ function Set-ItemState([int]$Item, [scriptblock]$Edit) {
     $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
     $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
     & $Edit $st
+    # the revision moves with the edit: Save-State refuses a write whose read has an older revision (state-conflict), so a pass that read the state before this edit
+    # cannot write its copy over it (an edit that kept the revision was overwritten by such a pass, and the park it wrote was gone)
+    if ($st.ContainsKey('rev')) { $st.rev = [int]$st.rev + 1 }
     $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+}
+# Set-ItemState under the item lock, as a verb writes: no pass of the gateway is between its read and its write of the item while the edit is made.
+# (Not for a caller that holds the lock itself: Lock-ItemFile cannot be taken twice.)
+function Set-ItemStateLocked([int]$Item, [scriptblock]$Edit) {
+    $deadline = (Get-Date).AddSeconds(45); $lock = $null
+    while ($null -eq $lock) {
+        try { $lock = Lock-ItemFile $Item } catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Milliseconds 200 }
+    }
+    try { Set-ItemState $Item $Edit } finally { $lock.Dispose() }
 }
 function Get-ItemState([int]$Item) {
     $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]

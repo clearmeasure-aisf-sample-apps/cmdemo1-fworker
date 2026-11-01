@@ -52,6 +52,7 @@ $CursorScenarios = [ordered]@{
         Check 'the prompt allows code changes and names the private build and acceptance gate' ("$($b.prompt.text)" -match 'Code and database changes are allowed' -and "$($b.prompt.text)" -match 'PrivateBuild\.ps1' -and "$($b.prompt.text)" -match 'AcceptanceTests\.ps1')
         Check 'no other credential in the launch body' (-not $b.PSObject.Properties['envVars'] -and -not (($b | ConvertTo-Json -Compress -Depth 8) -match 'fake-cursor|i1\.|w1\.|w2\.'))
         Check 'neither the key nor the r1 is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-cursor').Count -eq 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch (Cur-R1 $a)).Count -eq 0)
+        [void](Wait-RuntimeExecution { Cur-Status } -Item $n -Execution "$($a.id)")
         $st = Cur-Status
         $w0 = "$(@($st.executions | Where-Object { $_.execution -eq $a.id })[0].worker)"
         Check 'status: the agent runs under the cursor-cloud runtime' ($st.running -eq 1 -and @($st.executions | Where-Object { $_.item -eq $n -and $_.execution -eq $a.id }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
