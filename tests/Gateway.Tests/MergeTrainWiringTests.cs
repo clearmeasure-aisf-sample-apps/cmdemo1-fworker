@@ -85,7 +85,7 @@ public sealed class MergeTrainInertTests
 
     static IEnumerable<(string Path, string Text)> Sources() =>
         Directory.EnumerateFiles(Path.Combine(Root, "gateway"), "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}Internal{Path.DirectorySeparatorChar}Generated{Path.DirectorySeparatorChar}"))   // (the generated handler code, WolverineCodegen, names every handler)
             .Select(f => (Path.GetRelativePath(Root, f).Replace('\\', '/'), ArchitectureTests.Code(File.ReadAllText(f))));
 
     [Fact]

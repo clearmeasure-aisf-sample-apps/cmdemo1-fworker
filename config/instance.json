@@ -158,6 +158,7 @@
   },
   "wolverine": {
     "mode": "solo",
+    "preGeneratedCode": false,
     "scheduledJobSeconds": 14400,
     "firstScheduledJobSeconds": 3600
   },

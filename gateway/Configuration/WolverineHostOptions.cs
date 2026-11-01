@@ -16,6 +16,8 @@ sealed record WolverineHostOptions
     public string ServiceName { get; init; } = "fworker-gateway";
     /// <summary>Balanced mode with Wolverine's leader election; false is Solo.</summary>
     public bool LeaderElection { get; init; }
+    /// <summary>Load the handler code generated at build time (gateway/Internal/Generated, WolverineCodegen) instead of compiling it at first use. That code is generated for the deployed configuration (deploy.overrides.json merged over the defaults), so only the deployed image turns it on: a gateway with other settings generates other code for the same handler names (WolverineHostService.ConfigureCodeGeneration).</summary>
+    public bool PreGeneratedCode { get; init; }
 
     // Node heartbeat (the node agent's health check) and everything that rides the leader election: the first one is delayed too, so that a start does not poll.
     public TimeSpan HealthCheckPollingTime { get; init; } = TimeSpan.FromHours(4);
@@ -73,6 +75,7 @@ sealed record WolverineHostOptions
         var o = new WolverineHostOptions
         {
             LeaderElection = d.LeaderElection,
+            PreGeneratedCode = block["preGeneratedCode"] is JsonValue pg && pg.TryGetValue<bool>(out var pgb) && pgb,
             HealthCheckPollingTime = T("healthCheckSeconds", d.HealthCheckPollingTime), FirstHealthCheckExecution = T("firstHealthCheckSeconds", d.FirstHealthCheckExecution),
             StaleNodeTimeout = T("staleNodeSeconds", d.StaleNodeTimeout), NodeReassignmentPollingTime = T("nodeReassignmentSeconds", d.NodeReassignmentPollingTime),
             FirstNodeReassignmentExecution = T("firstNodeReassignmentSeconds", d.FirstNodeReassignmentExecution),

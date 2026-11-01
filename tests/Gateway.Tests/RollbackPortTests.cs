@@ -215,7 +215,7 @@ public sealed class RollbackPortTests
             {
                 w.ServiceName = "fworker-rollback-tests";
                 w.Discovery.DisableConventionalDiscovery();
-                w.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
+                w.CodeGeneration.TypeLoadMode = TypeLoadMode.Dynamic;   // Auto would load the pre-generated types of the gateway assembly, which were generated with other options
                 RollbackHostSinks.Failures = failures;
                 w.Discovery.IncludeType(typeof(RollbackHostSinks));
                 RollbackWiring.Register(w.Services, w, service, probe, durable: false);

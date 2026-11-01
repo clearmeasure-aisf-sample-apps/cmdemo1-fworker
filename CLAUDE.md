@@ -43,6 +43,21 @@ dotnet build gateway          -c Release -nodeReuse:false -p:UseSharedCompilatio
 
 The image (optional locally; the pull request builds it): `docker build -t fworker --build-arg VERSION=0.0.1 .`
 
+**Wolverine's generated handler code** is in the repository (`gateway/Internal/Generated/WolverineHandlers/*.cs`, compiled into the gateway; never edit by hand). Without it every
+container start compiled the handlers with Roslyn at their first use (about 11 s and +650 MB of memory for the 114 handlers, measured); with it a first use loads a type. The mode is
+`TypeLoadMode.Auto`: static, with a dynamic fallback for a handler that has no generated type (the start logs `"event":"codegen"` with how many). It is on only where `wolverine.preGeneratedCode` is true
+(`config/deploy.overrides.json`, the deployed image): the code is generated for those settings, so a gateway with the source defaults (the tests, the v2 CI gateways) compiles at first use as before
+(`TypeLoadMode.Dynamic`). Any change of a handler, a message, a
+Wolverine policy or option, or a Wolverine version changes the code, and `WolverineCodegenDriftTests` (Gateway.Tests, no database) fails until it is regenerated:
+
+```bash
+FWORKER_WRITE_WOLVERINE_CODEGEN=1 dotnet test tests/Gateway.Tests -c Release -nodeReuse:false -p:UseSharedCompilation=false --filter TheGeneratedCodeIsWhatTheHandlersGenerate
+dotnet build gateway -c Release -nodeReuse:false -p:UseSharedCompilation=false   # compiles the new files in; commit them with the change
+```
+
+The generator builds the gateway as the image configures it (`config/instance.json` with `config/deploy.overrides.json` merged over it, tdd in `engine.v2Environments`, a GitHub token and an
+Octopus key present), so a deploy override that adds a handler is covered by the same command.
+
 ## Test
 
 Build first (above); the suites start the built binaries. Nothing here needs a secret or the network.

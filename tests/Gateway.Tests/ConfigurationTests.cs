@@ -84,7 +84,8 @@ public sealed class ConfigurationTests : IDisposable
         Assert.False(dep.LeaderElection);
         Assert.Equal(TimeSpan.FromSeconds(60), dep.ScheduledJobPollingTime);
         Assert.Equal(TimeSpan.FromSeconds(5), dep.ScheduledJobFirstExecution);
-        Assert.Equal(dflt with { ScheduledJobPollingTime = dep.ScheduledJobPollingTime, ScheduledJobFirstExecution = dep.ScheduledJobFirstExecution }, dep);
+        Assert.True(dep.PreGeneratedCode);   // the deployed image loads the handler code generated at build time (WolverineCodegen)
+        Assert.Equal(dflt with { ScheduledJobPollingTime = dep.ScheduledJobPollingTime, ScheduledJobFirstExecution = dep.ScheduledJobFirstExecution, PreGeneratedCode = true }, dep);
     }
 
     [Fact]

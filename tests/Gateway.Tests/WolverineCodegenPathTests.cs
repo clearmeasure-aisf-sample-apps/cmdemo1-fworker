@@ -22,6 +22,28 @@ public sealed class WolverineCodegenPathTests
     }
 
     [Fact]
+    public void WithoutThePreGeneratedCode_NothingIsLoadedFromTheAssembly()
+    {
+        var w = new WolverineOptions();
+        WolverineHostService.ConfigureCodeGeneration(w, preGenerated: false);
+        Assert.Equal(JasperFx.CodeGeneration.TypeLoadMode.Dynamic, w.CodeGeneration.TypeLoadMode);
+    }
+
+    [Fact]
+    public void ThePreGeneratedCode_IsOnInTheDeployedSettings_AndOffInTheDefaults()
+    {
+        string Read(params string[] path)
+        {
+            var root = AppContext.BaseDirectory;
+            for (var d = new DirectoryInfo(root); d is not null; d = d.Parent)
+                if (File.Exists(Path.Combine(d.FullName, "config", "instance.json"))) { root = d.FullName; break; }
+            return File.ReadAllText(Path.Combine(new[] { root }.Concat(path).ToArray()));
+        }
+        Assert.False(System.Text.Json.Nodes.JsonNode.Parse(Read("config", "instance.json"))!["wolverine"]!["preGeneratedCode"]!.GetValue<bool>());
+        Assert.True(System.Text.Json.Nodes.JsonNode.Parse(Read("config", "deploy.overrides.json"))!["wolverine"]!["preGeneratedCode"]!.GetValue<bool>());
+    }
+
+    [Fact]
     public void TypeLoadMode_StaysAuto()
     {
         var w = new WolverineOptions();
