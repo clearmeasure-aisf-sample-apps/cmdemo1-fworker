@@ -68,8 +68,7 @@
       "enabled": false,
       "environments": ["uat", "prod"],
       "gatewayEnvironment": "",
-      "signoffWaitHours": 2,
-      "trainActs": false
+      "signoffWaitHours": 2
     },
     "finalEnvironment": "prod",
     "dependenciesDelivered": true,
@@ -245,7 +244,6 @@
     "questionDedupeMinutes": 60,
     "baseUpdateDebounceSeconds": 20,
     "sweepMinSeconds": 60,
-    "promoteSeconds": 60,
     "journalWaitingMinutes": 30
   },
   "baseUpdate": {

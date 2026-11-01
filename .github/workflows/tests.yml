@@ -39,7 +39,7 @@ env:
 jobs:
   # Tier 1: the scenario suites against the fake GitHub, on the v2 engine, the only engine (V3.1 of the v2-only plan removed v1's shards and the second run of the claims). A matrix entry lists its
   # suites after `suites:` (name, name@g/n, name@all/n: see the header of this file). The gateway under test runs with engine.v2Environments naming FACTORY_ENVIRONMENT (v2ci, or the suite's own name where it
-  # sets one: tdd for copilot, promote, envscope), so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own
+  # sets one: tdd for copilot, envscope), so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own
   # on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the database name per process). The suite saga runs each of its scenarios on a gateway profile of its own (run-all.ps1 $ProfiledSuites).
   # golden/v2-differences.txt declares where the engine writes differently from the golden files on purpose.
   tier1:
@@ -163,16 +163,6 @@ jobs:
           - name: octopus
             suites: octopus,copilot-manager
             parallel: 2
-          # promote (tdd, slot 28): 667 s of scenarios in one process on a development machine, 3 shards as in tier1 above
-          - name: promote-0
-            suites: promote@0/3
-            parallel: 1
-          - name: promote-1
-            suites: promote@1/3
-            parallel: 1
-          - name: promote-2
-            suites: promote@2/3
-            parallel: 1
           # qc-worker: 494 s of scenarios in one process on a development machine, 4 shards as in tier1 above
           - name: qc-worker-0
             suites: qc-worker@0/4

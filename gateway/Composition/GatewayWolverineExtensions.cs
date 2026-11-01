@@ -256,9 +256,6 @@ static class GatewayWolverineExtensions
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)
             services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });
-        // W9.10p: where the engine acts and v1's AutoPromoter still promotes the app's uat and prod, the train's shadow of them is found through the same holder (the AutoPromoter's passes, the status endpoints)
-        if (c.Engine.V2Acts && c.WolverineHost && c.Instance.Home != null && AutoPromoter.Runs(c.Instance, true))
-            services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return shadowHolder; });
         return services;
     }
 }

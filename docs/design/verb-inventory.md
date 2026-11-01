@@ -126,7 +126,6 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 | Entry | File | Sites | Verbs | Kind | Owner | Leaves | What it is |
 |---|---|---|---|---|---|---|---|
-| auto-promote | `gateway/AutoPromoter.cs` | 1 | auto-promote | runner | W9.10p | W9.12 | The automatic promotion of the app to uat and prod. It has no v2 route by decision. **exception until W9.12.** |
 | base-watch-verbs | `gateway/BaseUpdate.cs` | 1 | by argument | router | W9.3 | - | BaseWatch runs base-watch and base-update-branch through the Runner (routed since #542; its own table is gone). |
 | base-journal | `gateway/BaseUpdate.cs` | 1 | journal | router | W9.8 | - | The journal line of a base update (#477). |
 | transcripts | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.8 | W9.11b | TranscriptStore: transcript-save, transcript-load and transcript-prune, the rule scripts of the ref store (RunScriptAsync). **exception until W9.11b.** |
@@ -169,7 +168,6 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 ### Exceptions
 
-- **auto-promote** (until W9.12): Decision 2 of 2026-10-30: the app's uat and prod promotions stay with v1's AutoPromoter until the delivery train has a recorded clean live window (the W5 gate). W9.11b must keep Verbs.Promote.ps1 and the Runner path for this one verb.
 - **plant-snapshot** (until W9.11b): The snapshot is the hand-over between gateway processes and the rollback to v1 until W9.11b removes v1; the plant is in SQL from W9.10k.
 - **transcripts** (until W9.11b): The ref store of the sessions written before the move to the database. Where the engine acts the `DatabaseTranscriptBackend` reads it as the fallback of a load and prunes it with the database; both go through the rule script (`Runner.RunScriptAsync`), because the board routes answer `transcript-load` and `transcript-prune` from `factory.Transcripts` and would never reach the refs. It goes with v1 at W9.11b, after the 14 days the refs are kept.
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.

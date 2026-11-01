@@ -7,7 +7,7 @@
 #   -ListScenarios  prints suite, scenario and tier, tab separated; with -Suite only what that suite would run (after -Tier and -Only), with -Groups n -Group g only that group's share
 #   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json (owner: contiguous runs in suite order, cut only at its barriers, as its scenarios build on each other); the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
-#   The gateway under test runs the v2 engine (Wolverine), the only engine: FACTORY_ENVIRONMENT is the suite's own environment name where it sets one (tdd for copilot, promote and envscope, whose scenarios depend
+#   The gateway under test runs the v2 engine (Wolverine), the only engine: FACTORY_ENVIRONMENT is the suite's own environment name where it sets one (tdd for copilot and envscope, whose scenarios depend
 #                on it) and the CI-only name 'v2ci' for every other suite; the configuration's engine.v2Environments names it, and FACTORY_DB_CONNECTION is the SQL Server of FACTORY_TEST_SQL with a database of its own
 #                for this process (the gateway's DbUp creates it, FACTORY_DB_CREATE=1, tests only, and applies the scripts). FACTORY_TEST_SQL is required: without it a run exits 2.
 #   -V2Profile   the test profile of the gateway: 'plain' (default: intake off, as every suite runs), 'saga-docs' (the intake is on and names the docs plan, so the docs items of the Todo column
@@ -65,7 +65,6 @@ foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerA
 . (Join-Path $PSScriptRoot 'keeper.ps1')            # the backlog keeper session (gateway/Keeper.cs): scenarios named "keeper: ..." join the manager suite
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
 . (Join-Path $PSScriptRoot 'octopus.ps1')           # the Octopus runbook runtime against the fake Octopus: suite 'octopus' (uses the helpers of owner.ps1 and runtime.ps1)
-. (Join-Path $PSScriptRoot 'promote.ps1')           # the automatic promotion of a release to uat and prod (Verbs.Promote.ps1): suite 'promote'
 . (Join-Path $PSScriptRoot 'repos.ps1')             # isolation of the home repository from a second repository in the fake (W1.9): suite 'repos'
 . (Join-Path $PSScriptRoot 'saga.ps1')              # work items that start sagas (W9.10d): suite 'saga', on both engines from one script (uses the helpers of owner.ps1)
 # every barrier of the owner suite (owner.ps1) names one of its scenarios: a renamed one would move the cut of its groups without a word
@@ -161,11 +160,6 @@ $SuiteDefs = @(
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
                 agent = 'codex'; perHostCapacity = 1; overflowRoles = @('qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
-    # the automatic promotion (promote.ps1, docs/design/auto-promote.md): on, for any gateway environment; tdd and uat health on the fake's /_healthcheck
-    @{ Name = 'promote'; Policy = 'auto'; Set = $PromoteScenarios; Env = 'promote'; Timing = @{ staleItemMinutes = 600; promoteSeconds = 3 }
-        Extra = @{ delivery = @{ autoPromote = @{ enabled = $true; environments = @('uat', 'prod'); gatewayEnvironment = 'tdd'; signoffWaitHours = 0.05 } }
-            octopus = @{ url = '__FAKE_URL__/octopus'; space = 'Spaces-355'; project = 'cmdemo1-ui'; prodUrl = 'https://ca-cmdemo1-prod-ui.example'; tddUrl = '__FAKE_URL__'; uatUrl = '__FAKE_URL__'; healthPath = '/_healthcheck/detailed'; health = @{ spacingMinutes = 0.05; settleMinutes = 0.1; retries = 2; retrySeconds = 0.5 }
-                environments = @{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' } } } }
     # isolation (repos.ps1, docs/design/system-gateway.md H12): v1 serves the home repository only; a second repository's issues are linked to the shared board of the fake
     @{ Name = 'repos'; Policy = 'auto'; Set = $ReposScenarios; Timing = @{ staleItemMinutes = 600 } }
     # work items that start sagas (saga.ps1, W9.10d): owner mode with the gateway's own merge on (the default), the intake on (v1: FACTORY_INTAKE=1 of the suite's environment; v2: the saga profile of run.ps1) with a limit of 3;
@@ -306,7 +300,7 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
 }
 
 # The environment name and the database of this process. The CI-only name 'v2ci' is in no list of config/instance.json (Run-Suite adds the name in use to engine.v2Environments of the test
-# configuration only), so no deployed gateway can run v2 because of it. A suite whose scenarios depend on its environment (copilot, promote, envscope: FACTORY_ENVIRONMENT tdd and the env: label scoping)
+# configuration only), so no deployed gateway can run v2 because of it. A suite whose scenarios depend on its environment (copilot, envscope: FACTORY_ENVIRONMENT tdd and the env: label scoping)
 # keeps its own name (Invoke-SuiteDef): in that run the test configuration is the only place that makes tdd a v2 environment. The database is new for every process (a suite, or one group of a suite): the
 # gateway's DbUp creates it (FACTORY_DB_CREATE, tests only) and applies the scripts of src/Fworker.Database, a run never meets the tables of another, and the CI job's SQL Server container goes with the job.
 # The connection string carries the password: it is never printed.
@@ -346,8 +340,6 @@ function Get-SuiteEnv([string]$Kind) {
         'cursor' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; CURSOR_API_KEY = 'fake-cursor' } }
         # the copilot suite: owner mode and the token of the fake agent tasks API (COPILOT_TASKS_TOKEN, as the deployed gateway reads it)
         'copilot' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
-        # the promote suite: the key that creates deployments, composed here at run time
-        'promote' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_LEADER_LEASE = '0'; OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()) } }
         # the saga suite: the owner suite's environment, and v1's own intake on (a saga profile of run.ps1 takes the switch from the configuration instead, where v1's intake leaves the plans of intake.v2Plans to the engine's), three items at most in the AI columns
         'saga' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_INTAKE = '1'; FACTORY_INTAKE_WIP = '3' } }
         'envscope' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_LEADER_LEASE = '0' } }
@@ -392,8 +384,6 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
     }
     $cfg = @{ mergePolicy = $Policy; humanApprovers = @('factory-worker-testperson[bot]') }; foreach ($k in $Extra.Keys) { $cfg[$k] = $Extra[$k] }
     $cfg['engine'] = @{ v2Environments = @($script:V2EnvName) }   # (no suite sets an engine block of its own)
-    # W9.10p: the promote suite names the gateway environment tdd for delivery.autoPromote; the engine run's environment is v2ci, and the AutoPromoter must run there (it promotes uat and prod where the engine acts)
-    if ($cfg.ContainsKey('delivery') -and $cfg['delivery'] -is [System.Collections.IDictionary] -and $cfg['delivery'].Contains('autoPromote') -and $cfg['delivery']['autoPromote'] -is [System.Collections.IDictionary]) { $cfg['delivery']['autoPromote']['gatewayEnvironment'] = $script:V2EnvName }
     Start-TestEnv $cfg -Merge $script:V2Profiles[$V2Profile]
     # /ready does not wait for the database (the host starts in the background: the migration, which creates the database, then the node), and a journal line before the host is
     # up is refused ("the Wolverine host is not up"); so no scenario starts before the status says the host runs, and that the engine is v2 (this fails, once, when it is not)
@@ -411,7 +401,7 @@ function Invoke-SuiteDef($Def) {
     $script:SuiteName = $Def.Name
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
     $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind
-    # the suite's own environment name where it sets one (copilot, promote, envscope: tdd), else the CI-only name
+    # the suite's own environment name where it sets one (copilot, envscope: tdd), else the CI-only name
     # A suite in $V2DefaultEnvSuites runs as v1 runs it, with FACTORY_ENVIRONMENT unset, which the gateway reads as tdd (W9.9c prep, #361): its scenarios check the name (the dashboard, the agent names of Cursor, the scale-to-zero
     # warning) or the baked runtime settings that apply in tdd, in a local gateway or with no name only (RuntimeSettings.Load: caeJob is off in any other environment, v2ci included)
     $script:V2EnvName = $(if ($envs.ContainsKey('FACTORY_ENVIRONMENT') -and "$($envs['FACTORY_ENVIRONMENT'])".Trim()) { "$($envs['FACTORY_ENVIRONMENT'])".Trim() } elseif ($V2DefaultEnvSuites -contains $Def.Name) { 'tdd' } else { 'v2ci' })

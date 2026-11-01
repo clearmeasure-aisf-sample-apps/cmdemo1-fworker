@@ -105,7 +105,7 @@ public sealed class ManagerCopilotGatewayTests(ManagerCopilotOnGateway gw) : ICl
             Assert.True(ds.Count == 1 && ds[0].Lifetime == ServiceLifetime.Singleton, $"{t.Name}: {ds.Count} registrations");
         }
         // the two loops Program.cs started last, in that order, after the gateway's other hosted services
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "AutoPromoter", "RuntimeLoop", "PlantTicker", "CopilotCiReleaseService", "CloudOwnerWatch", "ManagerCopilotService", "McpSessionSweeper" },
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "RuntimeLoop", "PlantTicker", "CopilotCiReleaseService", "CloudOwnerWatch", "ManagerCopilotService", "McpSessionSweeper" },
             CompositionGraph.GatewayHostedOrder(sp));
         CompositionGraph.AssertHostedAreSingletons(sp);
         var tick = sp.GetServices<IHostedService>().OfType<ManagerCopilotService>().Single();

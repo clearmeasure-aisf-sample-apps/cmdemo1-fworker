@@ -75,7 +75,7 @@ public sealed class CompositionGraphTests(TwoPortGateway gw) : IClassFixture<Two
     {
         if (!StubPwsh.Supported) return;
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order);
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "PlantTicker", "McpSessionSweeper" }, order);
         CompositionGraph.AssertHostedAreSingletons(gw.Host.Services);
     }
 
@@ -169,7 +169,7 @@ public sealed class CompositionGraphRuntimesTests(RuntimesOnGateway gw) : IClass
     {
         if (!StubPwsh.Supported) return;
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "AutoPromoter", "RuntimeLoop", "RuntimeLoop", "PlantTicker",
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "RuntimeLoop", "RuntimeLoop", "PlantTicker",
             // the loops Program.cs started after Build() until C5c, where it started them: the CI release, the Copilot owner watch, the Cursor owner watch
             "CopilotCiReleaseService", "CloudOwnerWatch", "CloudOwnerWatch", "McpSessionSweeper" }, order);
         CompositionGraph.AssertHostedAreSingletons(gw.Host.Services);

@@ -325,7 +325,7 @@ public sealed class CatalogOnGatewayTests(CatalogOnGateway gw) : IClassFixture<C
         var sp = gw.Host.Services;
         var order = CompositionGraph.GatewayHostedOrder(sp);
         Assert.Equal("CatalogRefreshService", order[^1]);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order[..^1]);
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "PlantTicker", "McpSessionSweeper" }, order[..^1]);
         Assert.Same(sp.GetRequiredService<CatalogRefreshService>(), sp.GetServices<IHostedService>().OfType<CatalogRefreshService>().Single());
 
         var catalog = sp.GetRequiredService<ISystemCatalog>();
