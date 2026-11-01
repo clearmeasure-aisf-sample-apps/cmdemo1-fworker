@@ -57,7 +57,7 @@ public sealed class DatabaseOptionsTests
     [Fact]
     public void TheDeployedConfigurationNeverSetsFactoryDbCreate()
     {
-        // tdd's identity cannot CREATE DATABASE and bicep creates it: the variable is for tests/scenarios/run.ps1 -Engine v2 only
+        // tdd's identity cannot CREATE DATABASE and bicep creates it: the variable is for tests/scenarios/run.ps1 only
         var root = AppContext.BaseDirectory;
         while (root != null && !File.Exists(Path.Combine(root, "Dockerfile"))) root = Path.GetDirectoryName(root);
         Assert.NotNull(root);

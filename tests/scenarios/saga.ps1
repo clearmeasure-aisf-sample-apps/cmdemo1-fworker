@@ -1,12 +1,11 @@
 # Tier 1 scenarios that START SAGAS on the v2 engine (W9.10d, #552): the suite 'saga'.
 #
-# Until this file no scenario of Tier 1 ran a WorkItemSaga: intake was off in every suite, so the v2 job claimed verbs and nothing else. Here a work item is created in the Todo column and the intake
-# pulls it, and the scenario plays the owner session of that item from Technical Design to the merge. Every scenario runs on BOTH engines from the same script, so the golden writes of the suite (recorded
-# on v1) are the oracle for v2 and what v2 does differently is declared in golden/v2-differences.txt (blocks saga/*):
-#   v1  the rule script's intake (FACTORY_INTAKE=1) pulls the card; the verbs, the gateway's merge after the PASS and the sweep do the rest, the merge is a `rule` write with a record in the state comment;
-#   v2  the engine's intake (config intake.enabled with intake.v2Plans, profile saga-docs or saga-feature of run.ps1; the rule script's intake skips the plans of intake.v2Plans, W9.10e) starts the
-#       WorkItemSaga; the verbs are v2's; the merge is the saga's own call through the merge train (source `gateway`), the card goes to Done by the gateway's projection and no comment says that it merged.
-# The suite is claimed by v2-claims.txt by scenarios, with the profile of each plan (the scenario of the docs plan with saga-docs, the others with saga-feature; the last scenario, W9.10j's slots, turns the scheduler on itself).
+# A work item is created in the Todo column and the intake pulls it, and the scenario plays the owner session of that item from Technical Design to the merge. The golden writes of the suite are the
+# oracle, and what the engine does differently from the golden files is declared in golden/v2-differences.txt (blocks saga/*): the engine's intake (config intake.enabled with intake.v2Plans, profile
+# saga-docs or saga-feature of run.ps1) starts the WorkItemSaga; the verbs are v2's; the merge is the saga's own call through the merge train (source `gateway`), the card goes to Done by the gateway's
+# projection and no comment says that it merged.
+# Each scenario needs a gateway of its own with the profile of its plan (the scenario of the docs plan with saga-docs, the others with saga-feature; the last scenario, W9.10j's slots, turns the
+# scheduler on itself): run-all.ps1 starts them one by one ($ProfiledSuites there).
 $script:SagaOwner = 'sg1'
 
 # the owner session that gives the intake its free slot (a connected owner session with capacity); started once, left running for the suite's other scenarios
@@ -91,36 +90,31 @@ function Saga-CheckMerged($x, [string]$Plan) {
     Start-Sleep -Seconds 4   # (a second merge call would come within the settle of the first)
     Check "exactly one merge write for PR #$($x.pr) (the gateway's merge is on)" ((Saga-MergeCalls $x.pr) -eq 1) "merge calls: $(Saga-MergeCalls $x.pr)"
     $writes = Saga-Writes
-    if ($script:GoldenEngine -eq 'v2') {
-        if ($null -ne $writes) {
-            $gw = @(Saga-WritesOf $writes 'gateway' 'PUT' "/pulls/$($x.pr)/merge$")
-            $rule = @(Saga-WritesOf $writes 'rule' 'PUT' "/pulls/$($x.pr)/merge$")
-            Check 'v2: the merge write is the gateway''s own (the saga through the merge train), none is the rule script''s' ($gw.Count -eq 1 -and $rule.Count -eq 0) "gateway $($gw.Count), rule $($rule.Count)"
-            $ruleMoves = @($writes | Where-Object { $_ -and "$(Get-RecField $_ 'source')" -eq 'rule' -and "$(Get-RecField $_ 'path')" -eq '/graphql' -and "$(Get-RecField $_ 'field')" -eq 'updateProjectV2ItemFieldValue' -and (Get-RecField $_ 'cause') -eq $null })
-            Check 'v2: no card move after the PASS is the rule script''s (the projection moves the card)' ($ruleMoves.Count -eq 0) "rule card moves outside a verb call: $($ruleMoves.Count)"
-        }
-        Check 'v2: no comment on the item says that the gateway merged it (the saga''s history is the record)' ((Saga-MergeComments $x.n $x.pr) -eq 0) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
-        # W9.10i: the state comment follows the saga in the format v1 reads (the rollback path of FACTORY_V2_OFF). The rule script's sweep writes no wait record of its own (it leaves the saga's item alone, W9.10e); the record that is
-        # there is the gateway's projection of the saga's merge: the commit and the pull request, the PASS processed, and the docs plan (which ends at the merge) done at once, the feature plan awaiting master's CI as v1 leaves it after a merge
-        $recorded = Wait-Until -Seconds 60 { $r = Saga-V1Merge $x.n; $r.sha -ne '' -and $r.processed }
-        $r = Saga-V1Merge $x.n
-        Check 'v2: the state comment holds the merge record of the saga''s merge (commit, pull request) and the PASS is processed' ($recorded -and $r.pr -eq $x.pr) ($r | ConvertTo-Json -Compress)
-        if ($Plan -eq 'docs') {
-            $done = Wait-Until -Seconds 30 { (Saga-V1Merge $x.n).done }
-            Check 'v2: the docs item is done in the state comment (done_at, nothing awaited)' ($done -and (Saga-V1Merge $x.n).awaiting -eq '') ((Saga-V1Merge $x.n) | ConvertTo-Json -Compress)
-        } else {
-            Check 'v2: the feature item awaits master CI in the state comment, as v1 leaves it after a merge (or has gone on)' ($r.awaiting -ne '' -or $r.done) ($r | ConvertTo-Json -Compress)
-        }
+    if ($null -ne $writes) {
+        $gw = @(Saga-WritesOf $writes 'gateway' 'PUT' "/pulls/$($x.pr)/merge$")
+        $rule = @(Saga-WritesOf $writes 'rule' 'PUT' "/pulls/$($x.pr)/merge$")
+        Check 'v2: the merge write is the gateway''s own (the saga through the merge train), none is the rule script''s' ($gw.Count -eq 1 -and $rule.Count -eq 0) "gateway $($gw.Count), rule $($rule.Count)"
+        $ruleMoves = @($writes | Where-Object { $_ -and "$(Get-RecField $_ 'source')" -eq 'rule' -and "$(Get-RecField $_ 'path')" -eq '/graphql' -and "$(Get-RecField $_ 'field')" -eq 'updateProjectV2ItemFieldValue' -and (Get-RecField $_ 'cause') -eq $null })
+        Check 'v2: no card move after the PASS is the rule script''s (the projection moves the card)' ($ruleMoves.Count -eq 0) "rule card moves outside a verb call: $($ruleMoves.Count)"
+    }
+    Check 'v2: no comment on the item says that the gateway merged it (the saga''s history is the record)' ((Saga-MergeComments $x.n $x.pr) -eq 0) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
+    # W9.10i: the state comment follows the saga in the format v1 reads (the rollback path of FACTORY_V2_OFF). The rule script's sweep writes no wait record of its own (it leaves the saga's item alone, W9.10e); the record that is
+    # there is the gateway's projection of the saga's merge: the commit and the pull request, the PASS processed, and the docs plan (which ends at the merge) done at once, the feature plan awaiting master's CI as v1 leaves it after a merge
+    $recorded = Wait-Until -Seconds 60 { $r = Saga-V1Merge $x.n; $r.sha -ne '' -and $r.processed }
+    $r = Saga-V1Merge $x.n
+    Check 'v2: the state comment holds the merge record of the saga''s merge (commit, pull request) and the PASS is processed' ($recorded -and $r.pr -eq $x.pr) ($r | ConvertTo-Json -Compress)
+    if ($Plan -eq 'docs') {
+        $done = Wait-Until -Seconds 30 { (Saga-V1Merge $x.n).done }
+        Check 'v2: the docs item is done in the state comment (done_at, nothing awaited)' ($done -and (Saga-V1Merge $x.n).awaiting -eq '') ((Saga-V1Merge $x.n) | ConvertTo-Json -Compress)
     } else {
-        Check 'v1: the merge is recorded on the item once (the rule script''s comment and merge record)' ((Wait-Until -Seconds 30 { (Saga-MergeComments $x.n $x.pr) -eq 1 })) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
-        Check 'v1: the state comment holds the merge record' ((Pm-State $x.n).ContainsKey('merge')) ((Pm-State $x.n) | ConvertTo-Json -Compress -Depth 4)
+        Check 'v2: the feature item awaits master CI in the state comment, as v1 leaves it after a merge (or has gone on)' ($r.awaiting -ne '' -or $r.done) ($r | ConvertTo-Json -Compress)
     }
     # The issue is closed when the docs item is done, on both engines (v1's settle closes it; the pull request has no closing keyword, so nothing else does). The golden files held this write as a tail line that
     # v2-differences.txt removed for v2, so a v2 that never closed the issue passed the comparison: the state of the issue is asserted here, and the write is the gateway's (CloseWorkItemIssue), once.
     if ($Plan -eq 'docs') {
         $closed = Wait-Until -Seconds 90 { $i = Get-FakeIssue $x.n; $null -ne $i -and -not $i.open }
         Check "the issue of #$($x.n) is closed when the docs item is done" $closed "issue open: $((Get-FakeIssue $x.n).open), column $(Saga-Col $x.n)"
-        if ($script:GoldenEngine -eq 'v2' -and $null -ne ($w2 = Saga-Writes)) {
+        if ($null -ne ($w2 = Saga-Writes)) {
             $closes = @(Saga-WritesOf $w2 'gateway' 'PATCH' "/issues/$($x.n)$" | Where-Object { "$(Get-RecField $_ 'body')" -match 'closed' })
             Check 'v2: the close is one write of the gateway, none is the rule script''s' ($closes.Count -eq 1 -and @(Saga-WritesOf $w2 'rule' 'PATCH' "/issues/$($x.n)$" | Where-Object { "$(Get-RecField $_ 'body')" -match 'closed' }).Count -eq 0) "gateway closes: $($closes.Count)"
         }
@@ -147,7 +141,6 @@ $SagaScenarios['saga: a code item pulled from Todo (the feature plan) is designe
 # What v1's sweep does for every item after the PASS (the settle's wait for master CI and its parks, the demotion of a PASS whose pull request was closed) the saga does for the items it owns, with the watcher
 # `item-steps` (every minute on the leader; the profile's first run is at once). On v1 the rule script does them and the scenarios of the suites `auto` and `owner` test that, so these scenarios have nothing to
 # play there. They read the saga through the dashboard (the `v2Items` block: step, park and the newest decisions); the comments of the rule script's settle are not written on v2 (the saga's history is the record).
-function Saga-V2Only { if ($script:GoldenEngine -eq 'v2') { return $true }; Check 'v2 only: on v1 the sweep of the rule script does this step (suite auto)' $true; return $false }
 function Saga-View([int]$n) {
     try {
         $d = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/dashboard" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5
@@ -158,7 +151,6 @@ function Saga-View([int]$n) {
 # v2 only: the verb moves the card at once, the saga takes the completion from its queue (the first use of a handler generates its code, seconds on a loaded runner). A verb of the next step sent before the saga has left the
 # step is recorded in the step it left (a review of Development read as one of Design) and the completion is lost; the owner session of a real run is far slower than that, so the scenario waits for the saga as a session would.
 function Saga-WaitStep([int]$n, [string[]]$Left, [string]$What) {
-    if ($script:GoldenEngine -ne 'v2') { return }
     $over = Wait-Until -Seconds 60 { $v = Saga-View $n; $null -ne $v -and "$($v.step)" -notin $Left }
     Check "the saga of #$n has taken the completion ($What)" $over "view $((Saga-View $n) | ConvertTo-Json -Compress -Depth 4)"
 }
@@ -167,7 +159,6 @@ function Saga-Actions([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return @
 function Saga-NumbersAbove([int]$Count) { foreach ($i in 1..$Count) { Fake 'issue' @{ title = "filler $i"; body = 'x'; labels = @(); column = 'Done' } | Out-Null } }
 
 $SagaScenarios['saga: sweep step: a merged code item waits for the CI of master, and a green master ends the wait'] = {
-    if (-not (Saga-V2Only)) { return }
     Saga-NumbersAbove 10
     $x = Saga-Play 'Saga master green' "Change the code, as the criteria say.`n`n- criterion one" $false
     if (-not $x) { return }
@@ -180,7 +171,6 @@ $SagaScenarios['saga: sweep step: a merged code item waits for the CI of master,
 }
 
 $SagaScenarios['saga: sweep step: a red master after the one re-run parks the merged item master-broken, and a green master lifts the park by itself'] = {
-    if (-not (Saga-V2Only)) { return }
     Saga-NumbersAbove 20
     Fake 'config' @{ masterRed = $true; rerunSeconds = 3; rerunConclusion = 'failure' } | Out-Null
     $x = Saga-Play 'Saga master broken' "Change the code, as the criteria say.`n`n- criterion one" $false
@@ -199,7 +189,6 @@ $SagaScenarios['saga: sweep step: a red master after the one re-run parks the me
 }
 
 $SagaScenarios['saga: sweep step: a PASS whose pull request was closed without merging is void, and the item goes back to Development'] = {
-    if (-not (Saga-V2Only)) { return }
     Saga-NumbersAbove 30
     $x = Saga-Play 'Saga closed pull request' "Change the code, as the criteria say.`n`n- criterion one" $false
     if (-not $x) { return }
@@ -218,7 +207,6 @@ $SagaScenarios['saga: sweep step: a PASS whose pull request was closed without m
 }
 
 $SagaScenarios['saga: sweep step: a merge by a person ends the Merge step wherever the item was, and the wait for master CI begins'] = {
-    if (-not (Saga-V2Only)) { return }
     Saga-NumbersAbove 40
     $x = Saga-Play 'Saga merged by a person' "Change the code, as the criteria say.`n`n- criterion one" $false
     if (-not $x) { return }
@@ -279,7 +267,6 @@ function Slots-Take([int]$n, $Run) {
 function Slots-Reasons([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return '' }; (@($v.history | ForEach-Object { "$($_.action) $(@($_.reasons) -join ' ')" }) -join ' | ') }
 
 $SagaScenarios['saga: slots: three sessions against a day budget of three are started, one after the other and across a gateway restart, the fourth item waits for the budget'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the scheduler is the v2 engine''s; v1''s sessions are the plant''s (suites octopus and runtime)' $true; return }
     Saga-NumbersAbove 60
     $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
     $envNames = 'OCTOPUS_RUNBOOK_API_KEY', 'FACTORY_OCTOPUS_HOST_TOKEN', 'FACTORY_TRANSCRIPT_SAVE_SECONDS', 'FACTORY_INTAKE_WIP'
@@ -376,7 +363,6 @@ function Adopt-State([int]$n, [hashtable]$More) {
 }
 
 $SagaScenarios['saga: adoption: a start with v1 items in flight adopts them (the item with its owner, the item in Technical Design), reports it in the v2 status, and the next start adopts nothing again'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1 has no engine to adopt for (the sweep of the rule script owns the items; suites auto and owner)' $true; return }
     Saga-NumbersAbove 90
     # no owner session of an earlier scenario is left to be offered the items
     if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }

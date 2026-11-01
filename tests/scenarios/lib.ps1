@@ -133,7 +133,7 @@ function Restart-Gateway([switch]$Graceful) {
     [void](Wait-Until -Seconds 30 { try { [bool](Invoke-RestMethod "$(Get-GatewayBase)/ready" -TimeoutSec 2) } catch { $false } })
     Wait-V2HostRunning
 }
-# -Engine v2 (FACTORY_DB_CONNECTION is set): /ready does not wait for the Wolverine host, which starts in the background after the schema (a few seconds, more on a loaded runner), and a command
+# (FACTORY_DB_CONNECTION is set in every run): /ready does not wait for the Wolverine host, which starts in the background after the schema (a few seconds, more on a loaded runner), and a command
 # dispatched before it runs is refused ("the Wolverine host is not up": a runtime start answers "no capacity", a journal line is refused). run.ps1 waits for it after the first start of a suite;
 # this is the same wait after a restart. It gives up quietly after 60 s (a gateway that does not run the host, such as a standby, is not told off here: the scenario's own checks say what failed).
 function Wait-V2HostRunning([int]$Seconds = 60) {
@@ -337,19 +337,16 @@ $script:SuiteName = ''
 
 # Golden writes (tests/scenarios/golden/README.md): the fake records every scenario's writes (FAKE_RECORD_DIR) and Run-Scenario compares them
 # with tests/scenarios/golden/<suite>/<slug>.writes.txt where that file exists. TEST_GOLDEN: compare (the default), record (never compare), off.
-# The declared differences of the v2 engine (golden/v2-differences.txt, issue #468): v2-differences.ps1 has the pure functions. Only a run with
-# -Engine v2 (run.ps1 sets $script:GoldenEngine) reads them; for v1 the golden directory is the one of the repository, as it always was.
+# The declared differences of the engine from the golden files (golden/v2-differences.txt, issue #468): v2-differences.ps1 has the pure functions.
 . (Join-Path $PSScriptRoot 'v2-differences.ps1')
-$script:GoldenEngine = 'v1'
 $script:EffectiveGolden = $null
-# The directory the writes of a scenario are compared with, and the group check reads the tail lines from: v1 the golden directory itself; v2 the
-# golden directory with the declared differences applied (a copy; the directory itself while no block is declared). Built once per suite (Initialize-V2Golden).
+# The directory the writes of a scenario are compared with, and the group check reads the tail lines from: the golden directory with the declared
+# differences applied (a copy; the directory itself while no block is declared). Built once per suite (Initialize-V2Golden).
 function Get-GoldenDir {
-    if ($script:GoldenEngine -ne 'v2') { return (Join-Path $script:Root 'tests/scenarios/golden') }
     if ($null -eq $script:EffectiveGolden) { Initialize-V2Golden }
     return $script:EffectiveGolden.dir
 }
-# -Engine v2, once per suite after its gateway is up (run.ps1): applies golden/v2-differences.txt to the golden files. The check fails when the file is not
+# Once per suite after its gateway is up (run.ps1): applies golden/v2-differences.txt to the golden files. The check fails when the file is not
 # true to the baseline: a block with no '# why:', a '-' line that is not in its golden file, a block for a scenario with no golden file, a line not understood.
 # A caused ('= ') line that v2 writes and no block declares is not a case of its own: the scenario then differs from the golden file, and fails as in v1.
 function Initialize-V2Golden {
@@ -474,8 +471,8 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
             $shown += "    record    $(if ($null -eq $c.actual) { '(no more writes)' } else { $c.actual })"
         }
         $shown += "golden: $golden"
-        # v2: the golden file above is the effective one, the repository's golden file with the declared differences applied (a temporary copy)
-        if ($script:GoldenEngine -eq 'v2') { $shown += "v2: the repository's golden file is tests/scenarios/golden/$(Split-Path -Leaf (Split-Path -Parent $file))/$(Split-Path -Leaf $file); what v2 writes on purpose is a block of tests/scenarios/golden/v2-differences.txt" }
+        # the golden file above is the effective one, the repository's golden file with the declared differences applied (a temporary copy)
+        $shown += "v2: the repository's golden file is tests/scenarios/golden/$(Split-Path -Leaf (Split-Path -Parent $file))/$(Split-Path -Leaf $file); what v2 writes on purpose is a block of tests/scenarios/golden/v2-differences.txt"
         $shown += "record: $file"; $shown += "raw:    $(Get-RecField $Rec 'raw')"
         $detail = "(the writes differ from the golden file: $($why -join '; '))`n        " + ($shown -join "`n        ")
     }

@@ -241,43 +241,6 @@
       "seconds": 27.2
     }
   },
-  "peer-approved": {
-    "inspector requests changes: the item goes back to Development": {
-      "tier": "full",
-      "checks": 11,
-      "seconds": 63.4
-    },
-    "a push after approval invalidates it": {
-      "tier": "full",
-      "checks": 9,
-      "seconds": 59.2
-    },
-    "inspector approves, a different identity from the author; merge needs it": {
-      "tier": "full",
-      "checks": 17,
-      "seconds": 82.3
-    },
-    "the approver may not be the author": {
-      "tier": "fast",
-      "checks": 8,
-      "seconds": 54.9
-    },
-    "text addressed to the reviewer, and a secret in the diff, are mandatory escalations": {
-      "tier": "full",
-      "checks": 18,
-      "seconds": 96.9
-    },
-    "a PASS verdict whose pull request is closed without merging is void: the sweep demotes the item": {
-      "tier": "full",
-      "checks": 9,
-      "seconds": 54.0
-    },
-    "mandatory escalation: the inspector cannot approve, the hold needs a named person": {
-      "tier": "full",
-      "checks": 19,
-      "seconds": 91.5
-    }
-  },
   "merge-queue": {
     "merge queue: a second merge waits until the first has its release candidate": {
       "tier": "fast",
@@ -371,11 +334,6 @@
       "checks": 2,
       "seconds": 33.9
     },
-    "owner: an accept that waited for a slow journal does not let its offer lapse: the item is not offered again while it is being accepted": {
-      "tier": "full",
-      "checks": 4,
-      "seconds": 34.7
-    },
     "metrics: an accepted owner item has its match-to-accept time from the journal": {
       "tier": "fast",
       "checks": 4,
@@ -421,11 +379,6 @@
       "checks": 3,
       "seconds": 1.8
     },
-    "pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself; the session's merge call answers already-merged": {
-      "tier": "fast",
-      "checks": 13,
-      "seconds": 23.1
-    },
     "pass-merge: a PASS nobody merged (the session stopped after the verdict) is merged by the sweep after the grace, with no call": {
       "tier": "fast",
       "checks": 11,
@@ -436,25 +389,10 @@
       "checks": 10,
       "seconds": 29.8
     },
-    "pass-merge: checks still running at the verdict: the answer is waiting, the item is not offered to anyone, and it is merged when they go green": {
-      "tier": "fast",
-      "checks": 14,
-      "seconds": 45.5
-    },
-    "pass-merge: a pull request that cannot be merged takes the existing demote path once, and the sweep does not loop": {
-      "tier": "fast",
-      "checks": 11,
-      "seconds": 32.9
-    },
     "pass-merge: an item without the Auto Merge label, or a verdict under another merge policy, is not merged by the gateway": {
       "tier": "fast",
       "checks": 18,
       "seconds": 53.5
-    },
-    "pass-merge: a push after the verdict voids it: not merged, the item goes back to Development": {
-      "tier": "fast",
-      "checks": 10,
-      "seconds": 22.6
     },
     "pass-merge: the session's merge call racing the sweep merges once": {
       "tier": "full",
@@ -475,26 +413,6 @@
       "tier": "fast",
       "checks": 6,
       "seconds": 26.6
-    },
-    "pass-merge: a branch behind its base is brought up to date by the gateway, its merge commit is verified and merged": {
-      "tier": "fast",
-      "checks": 10,
-      "seconds": 23.6
-    },
-    "pass-merge: a push that lands while the gateway's update of the branch is still pending is not merged: demoted (stale-head)": {
-      "tier": "fast",
-      "checks": 11,
-      "seconds": 30.9
-    },
-    "pass-merge: a PASS for a head other than the current one is refused, and a verdict without a head is never merged by the gateway": {
-      "tier": "fast",
-      "checks": 19,
-      "seconds": 40.8
-    },
-    "pass-merge: a hand-made two-parent merge pushed by a worker while the gateway's update is pending is not merged: demoted (stale-head)": {
-      "tier": "fast",
-      "checks": 10,
-      "seconds": 29.2
     },
     "owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it": {
       "tier": "full",
@@ -520,11 +438,6 @@
       "tier": "fast",
       "checks": 7,
       "seconds": 22.0
-    },
-    "owner: the owner is released at item.merged, its session is told session.end, and the gateway settles the item to Done": {
-      "tier": "fast",
-      "checks": 17,
-      "seconds": 28.1
     },
     "owner: a pin that waits too long falls back to another worker and is journalled": {
       "tier": "fast",
@@ -595,21 +508,6 @@
       "tier": "full",
       "checks": 16,
       "seconds": 38.4
-    },
-    "settle: a merged item whose master Build stays red keeps its settle state, is never offered, and goes on when a later master commit that contains it is green": {
-      "tier": "full",
-      "checks": 16,
-      "seconds": 50.6
-    },
-    "settle: a stranded merged item is re-armed by the sweep and settled; a finished one is settled again through resettle": {
-      "tier": "full",
-      "checks": 18,
-      "seconds": 47.1
-    },
-    "migration number: the gateway does not merge a PASS whose DbUp number was taken on master meanwhile": {
-      "tier": "fast",
-      "checks": 12,
-      "seconds": 17.2
     },
     "owner: pr-checks with an item token reads the checks of that item's own pull request and of no other": {
       "tier": "full",
@@ -685,16 +583,6 @@
       "tier": "fast",
       "checks": 18,
       "seconds": 54.1
-    },
-    "base update (conflict mode): right before the gateway merges a PASS, a branch behind master is brought up to date once, and the new head is merged": {
-      "tier": "full",
-      "checks": 13,
-      "seconds": 48.0
-    },
-    "runner gate: at most runner.maxProcesses rule scripts at once; a freed slot goes to the sweep first, the journal last; a verb that waits too long is runner-busy": {
-      "tier": "full",
-      "checks": 13,
-      "seconds": 39.1
     },
     "runner gate: a rule script shares no .NET startup profile; a corrupt one in HOME stops no sweep (issue 375)": {
       "tier": "full",
@@ -794,11 +682,6 @@
       "tier": "full",
       "checks": 20,
       "seconds": 43.6
-    },
-    "qc: auto-merge, docs-only and fork items get no offer": {
-      "tier": "full",
-      "checks": 33,
-      "seconds": 53.1
     },
     "qc: a GET of the link has no side effect": {
       "tier": "full",
@@ -975,11 +858,6 @@
       "checks": 10,
       "seconds": 0.1
     },
-    "qc: gate under the auto policy nothing changed: the label is required and QC is not a gate": {
-      "tier": "full",
-      "checks": 21,
-      "seconds": 6.4
-    },
     "qc: runner pool a pooled call returns the exit code, stdout and stderr of a process call": {
       "tier": "fast",
       "checks": 18,
@@ -1000,62 +878,10 @@
       "checks": 12,
       "seconds": 8.3
     },
-    "qc: runner pool a call that does not finish in time fails as a process call does, and its worker is replaced": {
-      "tier": "fast",
-      "checks": 8,
-      "seconds": 9.8
-    },
     "qc: dashboard connects from a #token= fragment and removes it from the address bar": {
       "tier": "fast",
       "checks": 2,
       "seconds": 0.0
-    }
-  },
-  "qc-gate": {
-    "qc: gate a reset keeps the record of the run for the same head": {
-      "tier": "full",
-      "checks": 14,
-      "seconds": 58.9
-    },
-    "qc: gate a person's approval wakes the owner with qc.approved (webhook and sweep), a dismissal clears it, and the retried merge succeeds": {
-      "tier": "full",
-      "checks": 45,
-      "seconds": 158.2
-    },
-    "qc: gate a push to a new head needs a new QC run and a new approval": {
-      "tier": "full",
-      "checks": 28,
-      "seconds": 101.9
-    },
-    "qc: gate the requirements can be switched off in the configuration": {
-      "tier": "full",
-      "checks": 21,
-      "seconds": 85.6
-    },
-    "qc: gate Auto Merge items are unaffected under peer-approved": {
-      "tier": "full",
-      "checks": 12,
-      "seconds": 56.6
-    },
-    "qc: gate a non-auto-merge PASS stays on the approval path; merge needs a QC run, then a person, then merges": {
-      "tier": "fast",
-      "checks": 26,
-      "seconds": 102.6
-    },
-    "qc: gate documentation-only items are exempt from the QC run but not from the approval": {
-      "tier": "full",
-      "checks": 12,
-      "seconds": 48.6
-    },
-    "qc: gate an Auto Merge label added to an item with a live environment tears the environment down": {
-      "tier": "full",
-      "checks": 22,
-      "seconds": 65.4
-    },
-    "qc: gate a sweep that is still writing the QC offer does not undo an approval recorded meanwhile": {
-      "tier": "full",
-      "checks": 13,
-      "seconds": 59.5
     }
   },
   "author": {
@@ -1326,11 +1152,6 @@
       "tier": "full",
       "checks": 7,
       "seconds": 20.5
-    },
-    "msg: a long text is shown to 1,000 characters, and the whole of it is read with inbox --id": {
-      "tier": "fast",
-      "checks": 5,
-      "seconds": 1.3
     },
     "msg: the presence verb sets the summary, once in ten seconds, and refuses a credential in it": {
       "tier": "fast",
@@ -1699,16 +1520,6 @@
       "checks": 10,
       "seconds": 0.5
     },
-    "mgr: the worker connect prompt with messaging off is byte for byte the one main produces, and gen-connect-prompt.sh still renders it": {
-      "seconds": 2.5,
-      "tier": "fast",
-      "checks": 28
-    },
-    "mgr: a real sweep keeps the owner of an item whose merge is settling and of an item it could not read, and drops the owner it no longer lists": {
-      "tier": "fast",
-      "checks": 5,
-      "seconds": 23.6
-    },
     "mgr: a session started with both FACTORY_TOKEN and FACTORY_SUPERVISOR_TOKEN is warned once at its start, and neither token is printed": {
       "tier": "fast",
       "checks": 7,
@@ -1953,26 +1764,6 @@
     }
   },
   "cursor": {
-    "cursor: an item labelled runtime:cursor-cloud launches one agent with the bootstrap prompt, the repository at master and the gateway's /mcp with an r1; the agent works the item by MCP and session_end deletes it": {
-      "checks": 21,
-      "tier": "fast",
-      "seconds": 28.8
-    },
-    "cursor: a failed launch frees the slot and the item gets a new agent; an agent past api.cursor.maxMinutes is cancelled and deleted": {
-      "checks": 7,
-      "tier": "fast",
-      "seconds": 27.6
-    },
-    "cursor: an agent that ends by itself is deleted and its item taken back; a restarted gateway deletes the agents a former process left": {
-      "checks": 5,
-      "tier": "fast",
-      "seconds": 14.4
-    },
-    "cursor: v1 takes docs-only items only: a code item labelled for it in Development is not launched": {
-      "checks": 2,
-      "tier": "fast",
-      "seconds": 7.0
-    },
     "cursor: an item labelled runtime:cursor-cloud launches one agent with the bootstrap prompt, the repository at master and the gateway's /mcp with an r1; the agent works the item by MCP; session_end ends the run and keeps the agent as the item's owner": {
       "tier": "fast",
       "checks": 31,
@@ -2108,11 +1899,6 @@
       "tier": "fast",
       "checks": 11,
       "seconds": 12.5
-    },
-    "copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot; a task past api.copilot.maxMinutes fails and its code dies": {
-      "checks": 7,
-      "tier": "fast",
-      "seconds": 36.1
     },
     "copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item's copilot/ pull request head with its App, once; a head mismatch and another env's item are skipped; a 403 is surfaced as an owner action": {
       "tier": "fast",

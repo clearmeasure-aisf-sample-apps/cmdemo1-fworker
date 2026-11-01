@@ -1,22 +1,18 @@
 {
   "fast": {
     "auto": 75.0,
-    "peer-approved": 25.0,
     "merge-queue": 64.0,
     "owner": 13.0,
     "qc": 74.0,
     "qc-worker": 61.0,
-    "qc-gate": 40.0,
     "author": 9.0
   },
   "full": {
     "auto": 395.0,
-    "peer-approved": 158.0,
     "merge-queue": 94.0,
     "owner": 206.0,
     "qc": 294.0,
     "qc-worker": 533.0,
-    "qc-gate": 287.0,
     "qc-gate-idle": 51.0,
     "qc-gate-lifetime": 41.0,
     "qc-gate-grace": 92.0,

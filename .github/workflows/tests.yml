@@ -16,14 +16,9 @@
 # Every scenario's writes to the fake GitHub are recorded (TEST_WRITES_DIR) and compared with tests/scenarios/golden where a golden file
 # exists; each Tier 1 job uploads its records as the artifact writes-<job>-<attempt> (tests/scenarios/golden/README.md says how to re-record).
 # The jobs unit (tests/Gateway.Tests, the gateway in process: routes and their guards, start and stop, in 4 shards) and src (the smoke test and the
-# test projects of src/) run the quick tests in minutes. SQL Server is a service of those two and of the job v2 below: the Tier 1 shards do not pass
-# a connection to the gateway.
-# The jobs "Tier 1 (v2 ...)" (v2 below, a matrix like tier1) are a second engine, not shards: they run the suites and scenarios of tests/scenarios/v2-claims.txt once more with
-# run-all.ps1 -Engine v2 (FACTORY_ENVIRONMENT v2ci, or the suite's own name; engine.v2Environments naming it; FACTORY_DB_CONNECTION a SQL Server of its own; the saga profiles of run.ps1 -V2Profile start
-# sagas). Those scenarios also run, as before, in the shards. An entry of the v2 matrix names its suites after `claims:`, not `suites:`, so "Every scenario is in exactly one shard" does not read it
-# (it runs tests/ci/run-v2-claims.py, which proves that every claim of the file is in exactly one v2 entry), and the jobs upload v2-results-*, not suite-results-*, so "Tests result" does not count
-# their scenarios a second time. They are required: "Tests result" fails when one fails (V2_BLOCKING there, true since the first green run of Tests on master). The job "Image starts without a database"
-# builds the image and starts it with no FACTORY_DB_CONNECTION three ways (uat; tdd with v2 configured; tdd with the kill switch): /ready must answer 200, 503 "database" (v2 inert, up), 200.
+# test projects of src/) run the quick tests in minutes. SQL Server is a service of those two and of the Tier 1 shards: every Tier 1 process makes a database of its own on it.
+# The job "Image starts without a database" builds the image and starts it with no FACTORY_DB_CONNECTION three ways (uat; tdd with v2 configured; tdd with the kill switch): /ready must answer 200, 503 "database"
+# (v2 inert, up), 200.
 name: Tests
 
 on:
@@ -42,17 +37,25 @@ env:
   POWERSHELL_UPDATECHECK: "Off"
 
 jobs:
+  # Tier 1: the scenario suites against the fake GitHub, on the v2 engine, the only engine (V3.1 of the v2-only plan removed v1's shards and the second run of the claims). A matrix entry lists its
+  # suites after `suites:` (name, name@g/n, name@all/n: see the header of this file). The gateway under test runs with engine.v2Environments naming FACTORY_ENVIRONMENT (v2ci, or the suite's own name where it
+  # sets one: tdd for copilot, promote, envscope), so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own
+  # on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the database name per process). The suite saga runs each of its scenarios on a gateway profile of its own (run-all.ps1 $ProfiledSuites).
+  # golden/v2-differences.txt declares where the engine writes differently from the golden files on purpose.
   tier1:
     name: Tier 1 (${{ matrix.name }})
     runs-on: ubuntu-24.04
-    # a shard takes about 6 minutes of suites (issue 371, 2.8); the suites step stops at 16 minutes, and the rest leaves the uploads their time
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         # parallel: how many entries of suites run-all.ps1 runs at once (an @all/n entry is n processes on its own)
         include:
-          # auto: one process, 40 scenarios, about 2,070 s of scenarios on CI runners (run 40765741009): 8 groups of about 260 s, one per runner
+          # the suite saga: each scenario on a gateway profile of its own (run-all.ps1 $ProfiledSuites)
+          - name: saga
+            suites: saga
+            parallel: 2
+          # auto, owner, manager, copilot: whole suites in the groups of the v1 shards above (W9.9c prep, #361); the engine runs the same scenarios and goldens
           - name: auto-0
             suites: auto@0/8
             parallel: 1
@@ -77,16 +80,6 @@ jobs:
           - name: auto-7
             suites: auto@7/8
             parallel: 1
-          - name: peer-approved
-            suites: peer-approved@all/2
-            parallel: 1
-          - name: merge-queue-a
-            suites: merge-queue@0/2,qc-rate
-            parallel: 2
-          - name: merge-queue-b
-            suites: merge-queue@1/2,qc-proxy,repos,saga
-            parallel: 2
-          # owner: about 2,900 s of scenarios in 10 contiguous groups, cut only at the barriers of owner.ps1 (the largest barrier-to-barrier run is about 410 s); the cuts are the optimal ones for the seconds of scenario-stats.json (Select-GroupShare)
           - name: owner-0
             suites: owner@0/10
             parallel: 1
@@ -117,83 +110,6 @@ jobs:
           - name: owner-9
             suites: owner@9/10
             parallel: 1
-          # copilot: about 970 s of scenarios in 4 groups of about 245 s
-          - name: copilot-0
-            suites: copilot@0/4
-            parallel: 1
-          - name: copilot-1
-            suites: copilot@1/4
-            parallel: 1
-          - name: copilot-2
-            suites: copilot@2/4
-            parallel: 1
-          - name: copilot-3
-            suites: copilot@3/4
-            parallel: 1
-          # promote (slot 28): its group ports 38000-38299 are below the ephemeral range the step "Ephemeral ports above the test ports" sets; one scenario alone is 190 s
-          - name: promote-0
-            suites: promote@0/3
-            parallel: 1
-          - name: promote-1
-            suites: promote@1/3
-            parallel: 1
-          - name: promote-2
-            suites: promote@2/3
-            parallel: 1
-          - name: operator
-            suites: operator,mcp,envscope,copilot-deadline,cursor-deadline
-            parallel: 2
-          # runtime alone: beside other suites its settled-background-line goldens failed under load (issue 371 follow-up: runs 40684732381, 40567669960)
-          - name: runtime
-            suites: runtime
-            parallel: 1
-          - name: cursor
-            suites: cursor
-            parallel: 1
-          - name: octopus
-            suites: octopus,copilot-manager
-            parallel: 2
-          # qc-gate: its 9 scenarios (about 740 s alone) in 4 groups, one job each (three groups in one job ran about twice as slow as their scenarios alone)
-          - name: gate-0
-            suites: qc-gate@0/4
-            parallel: 1
-          - name: gate-1
-            suites: qc-gate@1/4
-            parallel: 1
-          - name: gate-2
-            suites: qc-gate@2/4
-            parallel: 1
-          - name: gate-3
-            suites: qc-gate@3/4
-            parallel: 1
-          # the six one-scenario qc-gate suites, about 1,040 s together: two jobs of 3 at once (the longest alone is 285 s)
-          - name: gate-b
-            suites: qc-gate-race,qc-gate-grace,qc-gate-idle
-            parallel: 3
-          - name: gate-c
-            suites: qc-gate-lease,qc-gate-waiting,qc-gate-lifetime
-            parallel: 3
-          # qc-worker: about 750 s of scenarios in 4 groups
-          - name: workers-0
-            suites: qc-worker@0/4,author
-            parallel: 2
-          - name: workers-1
-            suites: qc-worker@1/4
-            parallel: 1
-          - name: workers-2
-            suites: qc-worker@2/4
-            parallel: 1
-          - name: workers-3
-            suites: qc-worker@3/4
-            parallel: 1
-          # qc and messaging: their 4 groups in one job, as before (the rule-script pool and the client host: no pwsh per call)
-          - name: qc
-            suites: qc@all/4
-            parallel: 1
-          - name: messaging
-            suites: messaging@all/4
-            parallel: 1
-          # manager: about 1,800 s of scenarios in 8 groups of about 230 s, one per runner (three groups in one job failed under load)
           - name: manager-0
             suites: manager@0/8
             parallel: 1
@@ -218,6 +134,83 @@ jobs:
           - name: manager-7
             suites: manager@7/8
             parallel: 1
+          - name: copilot-0
+            suites: copilot@0/4
+            parallel: 1
+          - name: copilot-1
+            suites: copilot@1/4
+            parallel: 1
+          - name: copilot-2
+            suites: copilot@2/4
+            parallel: 1
+          - name: copilot-3
+            suites: copilot@3/4
+            parallel: 1
+          # qc and messaging: their 4 groups in one job each, as in tier1 (the rule-script pool and the client host)
+          - name: qc
+            suites: qc@all/4
+            parallel: 1
+          - name: messaging
+            suites: messaging@all/4
+            parallel: 1
+          # runtime alone (the settled-background-line goldens failed beside other suites on v1); the runtime suites after it
+          - name: runtime
+            suites: runtime
+            parallel: 1
+          - name: cursor
+            suites: cursor,cursor-deadline,author
+            parallel: 2
+          - name: octopus
+            suites: octopus,copilot-manager
+            parallel: 2
+          # promote (tdd, slot 28): 667 s of scenarios in one process on a development machine, 3 shards as in tier1 above
+          - name: promote-0
+            suites: promote@0/3
+            parallel: 1
+          - name: promote-1
+            suites: promote@1/3
+            parallel: 1
+          - name: promote-2
+            suites: promote@2/3
+            parallel: 1
+          # qc-worker: 494 s of scenarios in one process on a development machine, 4 shards as in tier1 above
+          - name: qc-worker-0
+            suites: qc-worker@0/4
+            parallel: 1
+          - name: qc-worker-1
+            suites: qc-worker@1/4
+            parallel: 1
+          - name: qc-worker-2
+            suites: qc-worker@2/4
+            parallel: 1
+          - name: qc-worker-3
+            suites: qc-worker@3/4
+            parallel: 1
+          # the QC environment suites (policy auto)
+          - name: qc-gates-a
+            suites: qc-gate-race,qc-gate-grace,qc-gate-lease
+            parallel: 2
+          - name: qc-gates-b
+            suites: qc-gate-idle,qc-gate-lifetime,qc-gate-waiting,qc-rate,qc-proxy
+            parallel: 2
+          # whole suites of a few minutes each (envscope runs as tdd, with its own environment name)
+          - name: small
+            suites: repos,envscope,mcp,copilot-deadline,operator,merge-queue
+            parallel: 2
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
+          MSSQL_MEMORY_LIMIT_MB: "1024"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
+          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
     steps:
       - uses: actions/checkout@v6.0.1
 
@@ -233,6 +226,16 @@ jobs:
           chmod +x "$RUNNER_TEMP/pwsh/pwsh"
           echo "$RUNNER_TEMP/pwsh" >> "$GITHUB_PATH"
 
+      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
+      - name: SQL Server is reachable
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
+
       - name: Build the gateway and the fake GitHub
         run: |
           set -euo pipefail
@@ -241,11 +244,10 @@ jobs:
             dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
           done
 
-      # Every port Tier 1 listens on is below 50000: a suite's slot range 6100-9199, a group's 10000 + 1000 * slot + 100 * group + 0..99 (group
-      # at most 9). Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a
-      # group of a high slot (23 and up: 33000 and up) is about to listen on. This moves that range above them, and fails when a suite appended
-      # at the end of run.ps1 puts a range into it: the slot that did (30, the suite saga: 40000-40999) behind a range of 40000-60999 made the
-      # fake or the suite of a claim fail to bind (exit 3, "Address already in use") in most runs of the job "Tier 1 (v2 saga)".
+      # Every port Tier 1 listens on is below 50000: a suite's slot range 6100-9199, a group's (and a profiled scenario's) 10000 + 1000 * slot + 100 * n + 0..99 (n at most 9).
+      # Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a group of a high slot is about to listen on: this moves that range above them,
+      # and fails when a suite appended to run.ps1 puts a range into it. The range used to start at 40000, and the suite saga, slot 30, listens on 40000-40999: its jobs failed
+      # with exit 3 (the probe of run.ps1: "port ... is already in use") or with a fake that could not bind, in most runs of the job "Tier 1 (saga)".
       - name: Ephemeral ports above the test ports
         run: |
           set -euo pipefail
@@ -255,54 +257,46 @@ jobs:
           sudo sysctl -w net.ipv4.ip_local_port_range="50000 60999"
           cat /proc/sys/net/ipv4/ip_local_port_range
 
-      - name: Smoke
-        run: pwsh -NoProfile -File tests/smoke.ps1
-
       - name: Suites ${{ matrix.suites }} (full tier)
-        # below the job's 25 minutes, so that a hung shard still uploads its logs and results
-        timeout-minutes: 16
+        # below the job's 30 minutes, so that a hung job still uploads its logs and results
+        timeout-minutes: 22
         env:
           SUITES: ${{ matrix.suites }}
           PARALLEL: ${{ matrix.parallel }}
-          # the fake writes each scenario's record here (run-all.ps1 and the group children inherit it); TEST_GOLDEN unset: compare
+          # the fake writes each scenario's record here and the golden files are compared, as in the shards (TEST_GOLDEN unset: compare)
           TEST_WRITES_DIR: ${{ runner.temp }}/writes
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/suite-logs"
           pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Tier full -NoBuild -Parallel "$PARALLEL" -Suites "$SUITES" -LogDir "$RUNNER_TEMP/suite-logs"
 
-      # The result of every suite and shard (checks, scenarios, failures), always: "Tests result" adds them up and proves every scenario ran.
       - name: Keep the results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: suite-results-${{ matrix.name }}
-          path: ${{ runner.temp }}/suite-logs/*.result.json
+          path: |
+            ${{ runner.temp }}/suite-logs/*.result.json
+            ${{ runner.temp }}/suite-logs/*.log
           if-no-files-found: warn
           retention-days: 7
 
-      # The logs hold the fixtures of the tests only (the suites know no real credential). run-all.ps1 keeps the work directory of a failed
-      # suite only: its gateway logs (gateway.out/err, and those of a restarted gateway) and the PowerShell cache of its HOME (issue 375:
-      # every new pwsh of a suite exits 139 across gateway restarts; seen in the octopus, owner and copilot suites).
+      # the gateway and fake logs of a failed job (the fixtures of the tests only): run-all.ps1 keeps the work directory of a failed job only
       - name: Keep the logs of a failed run
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: suite-logs-${{ matrix.name }}
           path: |
-            ${{ runner.temp }}/suite-logs/*.log
             ${{ runner.temp }}/suite-logs/*.err
-            ${{ runner.temp }}/suite-logs/*.result.json
             ${{ runner.temp }}/suite-logs/work-*/**/gateway*.out
             ${{ runner.temp }}/suite-logs/work-*/**/gateway*.err
-            ${{ runner.temp }}/suite-logs/work-*/*/home/.cache/powershell/
+            ${{ runner.temp }}/suite-logs/work-*/**/fake.out
+            ${{ runner.temp }}/suite-logs/work-*/**/fake.err
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
-      # The golden-write records of every scenario (passed or not), the input of a new baseline (tests/scenarios/golden/README.md); the run
-      # attempt in the name lets a re-run upload its own. The directory itself (not a glob) is the artifact's root, so a job of one suite keeps
-      # its <suite>/ directory too (Merge-GoldenWrites keys a record by it).
       - name: Keep the records of the writes
         if: always()
         uses: actions/upload-artifact@v7
@@ -434,277 +428,6 @@ jobs:
           for project in tests/Fworker.Contracts.Tests tests/Fworker.Domain.Tests tests/Fworker.Integrations.Tests tests/Fworker.Workflow.Tests; do
             dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
           done
-
-  # Tier 1 on the v2 engine (issue 467, W2.4a; W9.10d, #552): the claims of tests/scenarios/v2-claims.txt, run by `run-all.ps1 -Engine v2` in matrix jobs like the shards of tier1 above. A claim is a suite (or the
-  # scenarios of a suite that a regular expression names) and the test profile of run.ps1 -V2Profile (plain; saga-docs and saga-feature turn the engine's intake on, so that the Todo items of the saga suite
-  # start a WorkItemSaga). The gateway under test runs with engine.v2Environments naming FACTORY_ENVIRONMENT (v2ci, or the suite's own name where it sets one: tdd for copilot, promote, envscope), so Engine.V2Acts is
-  # true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the database name per
-  # process). This is a second engine over the same scenarios and goldens (golden/v2-differences.txt declares where v2 writes differently on purpose), not a shard: an entry names its suites after `claims:`, and no
-  # `suites:` line, so "Every scenario is in exactly one shard" does not read it; "Every v2 claim is in exactly one v2 job" (job coverage) checks the claims against these entries. The result files are v2-results-*,
-  # which "Tests result" does not add to the suites.
-  v2:
-    name: Tier 1 (v2 ${{ matrix.name }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # parallel: how many jobs of run-all.ps1 run at once (a claim by scenarios, a suite or a shard of one is a job)
-        include:
-          # the suite saga: two claims (docs plan, feature plan), each with its profile
-          - name: saga
-            claims: saga
-            parallel: 2
-          # auto, owner, manager, copilot: whole suites in the groups of the v1 shards above (W9.9c prep, #361); the engine runs the same scenarios and goldens
-          - name: auto-0
-            claims: auto@0/8
-            parallel: 1
-          - name: auto-1
-            claims: auto@1/8
-            parallel: 1
-          - name: auto-2
-            claims: auto@2/8
-            parallel: 1
-          - name: auto-3
-            claims: auto@3/8
-            parallel: 1
-          - name: auto-4
-            claims: auto@4/8
-            parallel: 1
-          - name: auto-5
-            claims: auto@5/8
-            parallel: 1
-          - name: auto-6
-            claims: auto@6/8
-            parallel: 1
-          - name: auto-7
-            claims: auto@7/8
-            parallel: 1
-          - name: owner-0
-            claims: owner@0/10
-            parallel: 1
-          - name: owner-1
-            claims: owner@1/10
-            parallel: 1
-          - name: owner-2
-            claims: owner@2/10
-            parallel: 1
-          - name: owner-3
-            claims: owner@3/10
-            parallel: 1
-          - name: owner-4
-            claims: owner@4/10
-            parallel: 1
-          - name: owner-5
-            claims: owner@5/10
-            parallel: 1
-          - name: owner-6
-            claims: owner@6/10
-            parallel: 1
-          - name: owner-7
-            claims: owner@7/10
-            parallel: 1
-          - name: owner-8
-            claims: owner@8/10
-            parallel: 1
-          - name: owner-9
-            claims: owner@9/10
-            parallel: 1
-          - name: manager-0
-            claims: manager@0/8
-            parallel: 1
-          - name: manager-1
-            claims: manager@1/8
-            parallel: 1
-          - name: manager-2
-            claims: manager@2/8
-            parallel: 1
-          - name: manager-3
-            claims: manager@3/8
-            parallel: 1
-          - name: manager-4
-            claims: manager@4/8
-            parallel: 1
-          - name: manager-5
-            claims: manager@5/8
-            parallel: 1
-          - name: manager-6
-            claims: manager@6/8
-            parallel: 1
-          - name: manager-7
-            claims: manager@7/8
-            parallel: 1
-          - name: copilot-0
-            claims: copilot@0/4
-            parallel: 1
-          - name: copilot-1
-            claims: copilot@1/4
-            parallel: 1
-          - name: copilot-2
-            claims: copilot@2/4
-            parallel: 1
-          - name: copilot-3
-            claims: copilot@3/4
-            parallel: 1
-          # qc and messaging: their 4 groups in one job each, as in tier1 (the rule-script pool and the client host)
-          - name: qc
-            claims: qc@all/4
-            parallel: 1
-          - name: messaging
-            claims: messaging@all/4
-            parallel: 1
-          # runtime alone (the settled-background-line goldens failed beside other suites on v1); the runtime suites after it
-          - name: runtime
-            claims: runtime
-            parallel: 1
-          - name: cursor
-            claims: cursor,cursor-deadline,author
-            parallel: 2
-          - name: octopus
-            claims: octopus,copilot-manager
-            parallel: 2
-          # promote (tdd, slot 28): 667 s of scenarios in one process on a development machine, 3 shards as in tier1 above
-          - name: promote-0
-            claims: promote@0/3
-            parallel: 1
-          - name: promote-1
-            claims: promote@1/3
-            parallel: 1
-          - name: promote-2
-            claims: promote@2/3
-            parallel: 1
-          # qc-worker: 494 s of scenarios in one process on a development machine, 4 shards as in tier1 above
-          - name: qc-worker-0
-            claims: qc-worker@0/4
-            parallel: 1
-          - name: qc-worker-1
-            claims: qc-worker@1/4
-            parallel: 1
-          - name: qc-worker-2
-            claims: qc-worker@2/4
-            parallel: 1
-          - name: qc-worker-3
-            claims: qc-worker@3/4
-            parallel: 1
-          # the QC environment suites (policy auto)
-          - name: qc-gates-a
-            claims: qc-gate-race,qc-gate-grace,qc-gate-lease
-            parallel: 2
-          - name: qc-gates-b
-            claims: qc-gate-idle,qc-gate-lifetime,qc-gate-waiting,qc-rate,qc-proxy
-            parallel: 2
-          # whole suites of a few minutes each (envscope runs as tdd, with its own environment name)
-          - name: small
-            claims: repos,envscope,mcp,copilot-deadline,operator,merge-queue
-            parallel: 2
-    env:
-      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
-    services:
-      sql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        env:
-          ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
-          MSSQL_MEMORY_LIMIT_MB: "1024"
-        ports:
-          - 1433:1433
-        options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
-          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
-    steps:
-      - uses: actions/checkout@v6.0.1
-
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: 10.0.x
-
-      - name: PowerShell ${{ env.PWSH_VERSION }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/pwsh"
-          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" | tar -xz -C "$RUNNER_TEMP/pwsh"
-          chmod +x "$RUNNER_TEMP/pwsh/pwsh"
-          echo "$RUNNER_TEMP/pwsh" >> "$GITHUB_PATH"
-
-      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
-      - name: SQL Server is reachable
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
-            sleep 2
-          done
-          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
-
-      - name: Build the gateway and the fake GitHub
-        run: |
-          set -euo pipefail
-          pwsh --version
-          for project in tests/FakeGitHub gateway; do
-            dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
-          done
-
-      # Every port Tier 1 listens on is below 50000: a suite's slot range 6100-9199, a group's (and a claim by scenarios') 10000 + 1000 * slot + 100 * n + 0..99 (n at most 9).
-      # Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a group of a high slot is about to listen on: this moves that range above them,
-      # and fails when a suite appended to run.ps1 puts a range into it. The range used to start at 40000, and the suite saga, slot 30, listens on 40000-40999: its claims (L29 to L32 of v2-claims.txt) failed
-      # with exit 3 (the probe of run.ps1: "port ... is already in use") or with a fake that could not bind, in most runs of the job "Tier 1 (v2 saga)".
-      - name: Ephemeral ports above the test ports
-        run: |
-          set -euo pipefail
-          slots=$(pwsh -NoProfile -File tests/scenarios/run.ps1 -ListSuites | grep -c .)
-          top=$((10000 + 1000 * (slots - 1) + 999))
-          if [ "$top" -ge 50000 ]; then echo "::error::the $slots suites of run.ps1 reach port $top, into the ephemeral range 50000-60999: lower the range's start in the workflow only if there is room above the ports"; exit 1; fi
-          sudo sysctl -w net.ipv4.ip_local_port_range="50000 60999"
-          cat /proc/sys/net/ipv4/ip_local_port_range
-
-      - name: The claims ${{ matrix.claims }} on the v2 engine (full tier)
-        # below the job's 30 minutes, so that a hung job still uploads its logs and results
-        timeout-minutes: 22
-        env:
-          CLAIMS: ${{ matrix.claims }}
-          PARALLEL: ${{ matrix.parallel }}
-          # the fake writes each scenario's record here and the golden files are compared, as in the shards (TEST_GOLDEN unset: compare)
-          TEST_WRITES_DIR: ${{ runner.temp }}/v2-writes
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/v2-results"
-          pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Engine v2 -Tier full -NoBuild -Parallel "$PARALLEL" -Suites "$CLAIMS" -LogDir "$RUNNER_TEMP/v2-results"
-
-      - name: Keep the results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: v2-results-${{ matrix.name }}
-          path: |
-            ${{ runner.temp }}/v2-results/*.result.json
-            ${{ runner.temp }}/v2-results/*.log
-          if-no-files-found: warn
-          retention-days: 7
-
-      # the gateway and fake logs of a failed claim (the fixtures of the tests only): run-all.ps1 keeps the work directory of a failed job only, as for the shards
-      - name: Keep the logs of a failed run
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: v2-logs-${{ matrix.name }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/v2-results/*.err
-            ${{ runner.temp }}/v2-results/work-*/**/gateway*.out
-            ${{ runner.temp }}/v2-results/work-*/**/gateway*.err
-            ${{ runner.temp }}/v2-results/work-*/**/fake.out
-            ${{ runner.temp }}/v2-results/work-*/**/fake.err
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Keep the records of the writes
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: writes-v2-${{ matrix.name }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/v2-writes
-          if-no-files-found: ignore
-          retention-days: 14
 
   # The image starts without a database (issue 459, the kill-switch case of W2.0; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
   # image job is a sibling of this workflow's caller, not an input of it) and run three times with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
@@ -860,10 +583,6 @@ jobs:
           test "$bad" -eq 0
           cp "$out/expected.tsv" "$RUNNER_TEMP/scenario-list.tsv"
 
-      # The claims of the v2 engine (W9.10d): the file parses, every claim names a suite of run.ps1 -ListSuites and lists a scenario, and every claimed suite is in exactly one entry (`claims:`) of the v2 matrix
-      - name: Every v2 claim is in exactly one v2 job
-        run: python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml --require-complete
-
       - name: Keep the list of scenarios
         uses: actions/upload-artifact@v7
         with:
@@ -877,7 +596,7 @@ jobs:
   # shard that ended early without failing.
   result:
     name: Tests result
-    needs: [tier1, coverage, unit, src, v2, image-start]
+    needs: [tier1, coverage, unit, src, image-start]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -967,21 +686,8 @@ jobs:
           UNIT_RESULT: ${{ needs.unit.result }}
           SRC_RESULT: ${{ needs.src.result }}
           IMAGE_START_RESULT: ${{ needs.image-start.result }}
-          V2_RESULT: ${{ needs.v2.result }}
-          # The jobs "Tier 1 (v2 ...)" fail this job, and so "Build result", since the first green run of Tests on master (issue 467, W9.9c precondition):
-          # the cutover makes v2 the engine that acts in tdd. "false" puts them back to reported-only (a pull request, protected area: workflows).
-          V2_BLOCKING: "true"
         run: |
-          echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}, src: ${SRC_RESULT}, image-start: ${IMAGE_START_RESULT}, v2: ${V2_RESULT} (blocking: ${V2_BLOCKING})"
-          if [ "${V2_RESULT}" != "success" ]; then
-            if [ "${V2_BLOCKING}" = "true" ]; then
-              echo "::error title=Tier 1 (v2)::the job Tier 1 (v2) ended ${V2_RESULT}; it is required (V2_BLOCKING true in tests.yml)"
-              echo "**Tier 1 (v2) ended ${V2_RESULT}.** It is required (\`V2_BLOCKING\` true in tests.yml)." >> "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
-            echo "::warning title=Tier 1 (v2)::the job Tier 1 (v2) ended ${V2_RESULT}; it is reported only (V2_BLOCKING false in tests.yml)"
-            echo "**Tier 1 (v2) ended ${V2_RESULT}.** It is reported only (\`V2_BLOCKING\` false in tests.yml)." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}, src: ${SRC_RESULT}, image-start: ${IMAGE_START_RESULT}"
           test "${TIER1_RESULT}" = "success"
           test "${COVERAGE_RESULT}" = "success"
           test "${UNIT_RESULT}" = "success"
