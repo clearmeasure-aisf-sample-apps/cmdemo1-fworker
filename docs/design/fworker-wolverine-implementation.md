@@ -1,7 +1,8 @@
 # Implementing ADR 0001: the sequence of work and its parallel lanes
 
-Status: implementation plan, 2026-10-26, revised the same day, on 2026-10-28 (the hybrid composition) and on 2026-10-30 (the audit;
-section "Revision 2026-10-30 (audit)" below). Stage C, W0 to W7 and W9.0, W9.2, W9.5 and W9.7 are built; W9.1, W9.3, W9.4, W9.6, W9.8
+Status: implementation plan, 2026-10-26, revised the same day, on 2026-10-28 (the hybrid composition), on 2026-10-30 (the audit;
+section "Revision 2026-10-30 (audit)" below) and on 2026-11-01 (v2 only; section "Revision 2026-11-01 (v2 only)" below, which
+supersedes W9.11a to c, W9.12 and the uat and prod parts of the 2026-10-30 revision where they differ). Stage C, W0 to W7 and W9.0, W9.2, W9.5 and W9.7 are built; W9.1, W9.3, W9.4, W9.6, W9.8
 and W8.0 to W8.3 are in flight; the rest is planned. Asked for by the owner: "prepare for
 implementation. I need the sequence of work, phased out including which tasks can be implemented by parallel subagents", then
 "Program.cs refactoring has to be first and stabilized before enhancement plan commences." It turns:
@@ -27,6 +28,312 @@ gates into events; Appendix B lists the issues of that revision.)
 | Stage C and the waves | `fwi-waves.puml` | [fwi-waves.svg](diagrams/fwi-waves.svg) |
 
 ![Waves](diagrams/fwi-waves.svg)
+
+## Revision 2026-11-01 (v2 only)
+
+**The owner's decision (2026-11-01):** "V1 goes away. V2 becomes the only way work items are implemented using the same original
+labels in GitHub", and "v2 takes uat/prod too": the delivery train acts for the app's uat and prod, and v1's `AutoPromoter` goes with
+the rest of v1. This supersedes decision 2 of 2026-10-30 (the `AutoPromoter` keeps uat and prod until W9.12) and the order of W9.9c,
+W9.11a to c and W9.12. tdd stays the acceptance bar (2026-10-26). Everything else of the 2026-10-30 revision stands (the SQL lease kept,
+Solo mode, `peer-approved` dropped, newest-only accepted, the nine defaults, W9.13 after the removal).
+
+**Where tdd stands** (read on 2026-11-01, about 14:30Z, `/api/v1/status` and `/api/v1/delivery-shadow`, release `1.0.1124`
+and later; v2 acts since #609 at 01:28Z):
+- v2 starts almost no work. One saga is open (docs plan, Verify, 13 hours old). The three items the plant ran today (#1177, #1179,
+  #1181, Technical Design, Octopus runbook sessions `oct-<item>-<hash>`) are replenished items, run by v1's sweep: `PlantSteps.Replenish`
+  creates the issue and puts its card in Technical Design, and nothing starts a saga for it. The adoption job adopts only at the start of
+  a lease term and skips a card with no state comment (`no-state-comment`), so a new card in a working column stays v1's.
+- v2's intake (`DocsIntakeJob`) pulls from Todo only when `Plant.IntakeSlots()` is above 0, and that counts connected owner sessions.
+  tdd's sessions are runtime sessions that the plant starts per item and phase; no owner session is connected, so the intake never pulls.
+  (v1's intake has the same rule, `Sweeper.cs:170`, so Todo is pulled by neither engine on tdd today.)
+- The app's uat and prod: 67 items wait in the Release Queue (#709 to #876), on releases 2.4.1228 to 2.4.1288 whose deployments to the
+  app's tdd failed (Deployments-57439 to 57450). v1 waits on each ("its deployment to tdd is Failed"). The train, which judges the newest
+  qualifying release only (#496), would have promoted 2.4.1298 to uat at 06:50Z (recorded as a shadow command, never executed).
+- The shadow comparison since 2026-10-28 (`live`): 261 comparisons over 24 releases; 6 releases compared, all six `match` with class
+  `wait:failed`; 0 `differs`; 38 `v2-only` and 1 `v1-only` rows not covered by the two declared differences (`queue-only-v1`,
+  `newest-only`), `unexplainedLive` 6, `met` false. No Sign-off, health window or follow-up of a request has been compared, and none can
+  be: in the shadow nothing is executed, so after a `promote` the train only sees "requested, Octopus showed none within 30 minutes; the
+  request is dropped". The W5 gate as written cannot be met in the shadow (see "The uat and prod switch").
+- v2 health: 123 dead letters (121 `TrainWake` with `MergeFactsException` since 2026-10-30, 1 `TrainDeploymentSeen`, 1 `TrainReplay`);
+  the board reconciler made 395 requests in the last hour against the estimate of 150 (79 passes: the 120 s job and the pass that
+  `sync-board` adds after every sweep).
+
+### 1. The map: every v1 behaviour, label and setting, and its v2 owner
+
+Sources: `docs/design/verb-inventory.md` and `.json` (74 verbs: 68 routed where v2 acts, 6 never routed), the architecture test of
+W9.10l (`tests/Gateway.Tests/ArchitectureInventoryTests.cs`, six declared exceptions), `Verbs.Sweep.ps1` (`Invoke-SyncBoard`) and the
+gateway. "Gap" means no v2 code owns it; the row of section 5 that closes it is named.
+
+**The sweep (`sync-board`, `Verbs.Sweep.ps1:495-936`, called by `Sweeper.SweepOnce`).** Where v2 acts the script skips the saga's items
+(`skip_items`, before any state read) and the plant-wide steps (`skip_steps`); what it still does is for items with no saga.
+
+| Step | v1 | v2 owner | After v2 only |
+|---|---|---|---|
+| Board read, resume file, budget deadline | `Get-BoardList`, :511, :554, :560 | the board reconciler (`BoardReconcilerJob`, 120 s) | sweep scaffolding goes |
+| Lease fence per item | :570, :846 | `ILeadership.MayAct` (SQL lock) | kept |
+| Gap renew (owner claims that ran out while no gateway was up) | `Invoke-GapRenew` :291 | adoption only (`AdoptionMapper` "gapRenewed"), not for an item that is already a saga | **gap**: V1.4 |
+| Labels per item (pins, priorities, runtime, profile, hold) | :586-603 | `SagaPlantFeed.Build` from the reconciler's cards | kept |
+| Re-arm settle of a stranded merged item | `Invoke-RearmSettle` :258 | `RearmSettle` (`SweepSteps.cs`, W9.10f) | kept |
+| Clear the park of a closed item | `Clear-ClosedPark` :272 | `ItemClosed` (W9.10h) | kept |
+| Park expiry | `Reset-ExpiredPark` :311 | `ParkExpired` timer | kept |
+| Settle and master-CI watch | `Invoke-SettleLocked` :165 | `MasterObserved` / `MasterWatchElapsed`, `ItemStepsJob` | kept |
+| Auto-unpark of `master-broken` | `Test-AutoUnpark` :334 | `SweepSteps` (stricter: a green commit that contains the merge) | kept, declared (W9.10f) |
+| Auto-unpark of `verdict-failed`, `fix-forward-exhausted`, the relaunch-budget parks | :348-366 | none on purpose (the saga counts the budgets; `ParkExpired` lifts the park after `timing.parkHours`) | declared difference, V1.4 records it in `v2-differences.txt` |
+| Release Queue card without a merge record: flag | :672-679 | none | **gap**: V1.4 |
+| Merge pickup (a person merged) | `Invoke-MergePickup` :184 | `ItemMerged` and W9.10f | kept |
+| Held-by-label and demo-label skips | :681, :706 | `HoldObserved` (W9.10h), `IntakeRule`, `ItemVerbs.Claim` | kept |
+| Demote a PASS whose pull request was closed | `Invoke-Demote` | `PullRequestClosed` (`SweepSteps`) | kept |
+| Clear hold when approved | `Invoke-ClearHoldIfApproved` | `ApprovalSeen` | kept |
+| Idle-owner release | :725-742 | `OwnerIdleElapsed` (`ItemStepsPort`) | kept |
+| The PASS merge | `Verb_merge -Gateway` :748-786 | `MergeTrainSaga` (direct) | kept; the hybrid `Script(...)` branches of `MergeVerbs.cs` go (V3.2) |
+| Awaiting checks after Development | `Complete-AwaitingChecks` :8, :802 | `FeatureChecksJob` and the CI rule (`ItemVerbs.Flow.cs`, W9.10q) | kept |
+| Offers (relaunch, handoff, board move, second look) | :830-868, `seen.json` | `V2Ownership.OfferNodes`, the scheduler (W9.10j) | kept |
+| Depends-on hold of offers | :852-867 | `DocsIntakeJob.DependenciesMet` (D1) at intake only | kept; an item admitted outside the intake (V1.1) is checked there too |
+| Claim-ref reap | `Invoke-ClaimRefReap` :225 | job `claim-ref-reap` (`PlantSteps.ClaimRefReap`) | kept |
+| Intake from Todo | `Invoke-Intake` :955 | job `docs-intake` (`IntakeRule`) | kept; slots from capacity (V1.2) |
+| Board guard | `Invoke-BoardGuard` :398 | job `board-guard` | kept |
+| QC sync | `Invoke-QcSync` (`Qc.ps1:263`) | job `qc-sync` (`QcService`) | kept |
+| Replenish | `Invoke-Replenish` (`Replenish.ps1:76`) | job `replenish` (`PlantSteps.Replenish`) | kept; it starts the saga (V1.1) |
+| Backlog low (`design_waiting`) | the sweep's count, `Keeper.cs` | job `backlog-low` | kept |
+| Base update fallback after a missed webhook | `BaseWatch.AfterSweep` (`BaseUpdate.cs:83`), called by the sweep | none: the sweep is its only caller | **gap**: V1.4 (a recurring job) |
+| Plant fields `held`, `pass_unmerged`, `unconfirmed`, `flags` | the sweep's answer | not fed for saga items (`SagaPlantFeed`) | `flags` with V1.4; the others are not needed (the saga merges its PASS, the intake holds dependencies) |
+
+**The rule-script verbs.** Item (18), merge (5), read models (6), keeper and manager (7), services (6), board (6) and QC (14) are routed
+to C# where v2 acts. Delivery is 6 of 7: `auto-promote` is not routed. Never routed: `auto-promote`, `plant-snapshot-save`, `-load`,
+`-clear`, `-await` and `leader-lease`. Still partly script although routed: `merge`, `approve-pr`, `clear-hold` and `base-watch` for an
+item with no saga and for a policy other than auto (`MergeVerbs.cs` `Script(...)`, `MergeVerbService` `if (!settings.Auto) return null`:
+the declared exceptions `merge-hybrid-script` and `merge-peer-approved`); `sync-board` (the script's pass plus one reconciler pass,
+`BoardVerbs.SyncBoard`); `ingest-event` and `journal` when the translator or the ledger is absent; `transcript-load` and `-prune` as the
+ref-store fallback. The six declared exceptions of the architecture test are `auto-promote`, `leader-lease`, `plant-snapshot`,
+`transcripts`, `merge-peer-approved`, `merge-hybrid-script`; each leaves in a row of section 5 (V2.3, V3.2).
+
+**The gateway's own calls into the scripts** (`Runner.RunAsync`, which asks the routes first, and `Runner.RunScriptAsync`, which never
+does): 28 of the 34 internal callers in the inventory are `router` forwards that need no script once the scripts are gone (`PlantHooks`,
+`PlantTicker`, `BaseUpdate`, `Qc.cs`, `ItemPrLookup`, `OwnerCiReleaseService`, the metrics, admin, webhook, operator-release and demo
+endpoints, `FeatureChecksJob`, the revocation, Copilot, journal and park calls of the composition, `ItemStepsPort`, `PlantRestoreCorrection`,
+`DeliveryVerbHost`, `QcPort`). The six that run a script are the six exceptions above.
+
+**Labels** (all compared without case; the names are the defaults of `config/instance.json`).
+
+| Label | v1 meaning | v2 owner |
+|---|---|---|
+| `factory worker` (`label`) | the item is the factory's: every board filter, the intake, the issues query; written on new items | `IntakeRule`, `PlantSteps`, `KeeperCommands` |
+| `AI Factory` (`rivalLabel`) | another factory's item: skipped, a claim refused | `IntakeRule`, `ItemVerbs.Claim`, `PlantSteps` |
+| `Demo` (`demoLabel`) | no offer, no claim, no intake | `IntakeRule`, `ItemVerbs.Claim` |
+| `enhancement` | written on replenished items only | written by `PlantSteps.Replenish` |
+| `Auto Merge` (`autoMergeLabel`) | the gateway merges a PASS; a promotion gate; QC eligibility | `MergeVerbRules`, `ContentGate`, `ItemMergedDeriver`, `QcConfig` |
+| `video` (`videoLabel`) | the demo evidence must be a video; a promotion gate | `PublishDemoVerb`, `ItemVerbs.Read`, `HttpMergeFactsReader` |
+| `Hold` | blocks promotion | `ContentGate`, `ItemMergedDeriver` |
+| `hold:owner` (`ownerHoldLabel`), any `hold:*`, `intake.holdLabels` (`Needs Human Review`) | a person holds the item: no offer, claim refused, merge held, no intake; keeper and manager verbs refused | `ItemVerbConfig`, `MergeVerbRules`, `HoldObserved`, `IntakeRule`, `SagaPlantFeed`, `FactoryRules` |
+| `Needs Human Review` (written) | the inspector's escalation under `peer-approved` (`Verbs.Inspect.ps1:144`) | goes with the dropped policy (decision 4); stays a hold label that v2 reads |
+| `worker:<name>` | pin: offered only to that worker; no intake | `SagaPlantFeed` (the plant's offer), `SlotRequestPort` (rank), `IntakeRule` |
+| `priority:top`, `priority:high` | order | `SlotRequestPort` rank, `SagaPlantFeed`, `KeeperCommands` |
+| `factory test` (`testLabel`) | the "testing" profile | `ModelTierReadModel`, `SagaPlantFeed` |
+| `env:<name>` (with `envScope`) | the item belongs to the environment named; tdd takes only `env:tdd` | every v2 reader (`ItemVerbConfig`, `FactoryRules`, `ReadModelSettings`, `RuleKit`, `WebhookEventTranslator`, `BoardPort`); **not** `IntakeRule` (V1.2 checks it) |
+| `runtime:octopus`, `runtime:copilot-cloud`, `runtime:cursor-cloud`, `runtime:cae-job` | the runtime of the item's sessions; wins over `runtimes.routing` | **gap**: the slot request takes `scheduler.runtime` only (`SlotRequestSettings.From`, "the plant's routing is v1's and is not read here"); V1.3 |
+| `agent:cursor` (and any `agent:`) | no reader in v1 or v2 (the agent is runtime configuration: `runtimes...octopus.agent`, `caeJob.agent`) | nothing to port; V1.3 states it |
+| `hotfix` | none in v1 | written by the incident saga on its hotfix item; a person's `hotfix` label starts nothing (**gap**: V1.3) |
+| `incident` (`incidents.issueLabel`) | none in v1 | the incident saga |
+| `engine:v2` (`intake.v2Label`) | none (parsed, never written) | removed with the setting (V3.2) |
+
+**Settings with a v1 reader only:** `gatewayMerge` (the engine merges where it acts), `runner.pool`, `poolMaxCalls`, `maxProcesses`
+(the Runner and its pool), `github.budgetReserve` (`GitHubBudget`; the v2 jobs' `budgetLow` reads the same budget object, kept),
+`keeper.maxNewItemsPerDay` (only `Verbs.Keeper.ps1` and `Keeper.cs`: **gap**, V1.4 ports the cap into `KeeperCommands`), and the host
+settings of `schedule` (`hostOwnedDefault`, `hostBuildsDefault`, `buildSlot*`, `leaseRenewMinutes`, `stale*`, `clientStartMinutes`,
+`progressMaxMinutes`, `continueMinutes`), which `Hosts.cs` and `Lease.cs` still read for the plant's connected sessions and keep.
+`engine.shadowEnvironments`, `intake.v2Plans` and `intake.v2Label` exist only for two engines and go in V3.2
+(`delivery.autoPromote.trainActs` goes in V2.3) (`v2Environments` stays as "where the engine acts"; an environment it does not name is inert). Everything else
+(`columns`, `ciGates`, `docsOnly*`, `timing.*`, `intake.*`, `keeper.replenish.*`, `manager`, `operator`, `messaging`, `delivery.*`,
+`octopus.*`, `incidents.*`, `mergeQueueDepth`, `mergeStrategy`, `baseUpdate.*`, `qc.*`, `scheduler.*`, `runtimes.*`, `api.*`,
+`recurringJobs.*`, `retention.*`, `wolverine.*`, `plant.*`, `stateAuthors`) has a v2 reader.
+
+**The `AutoPromoter`** (`gateway/AutoPromoter.cs` over `Verbs.Promote.ps1`) and the train (`DeliveryTrain.cs`, `OctopusPromoter.cs`):
+
+| v1 | v2 | |
+|---|---|---|
+| one project (`octopus.project`, cmdemo1-ui), targets `autoPromote.environments` (uat, prod), only on the gateway of `gatewayEnvironment` (tdd) | `DeliveryShadowSettings.From`, `AutoPromoteHere` | same |
+| the queue: Release Queue cards grouped by `merge.release`; a release no queued item names is not judged | candidates from `ItemMerged`; the newest qualifying release | declared `queue-only-v1`, `newest-only` (#496) |
+| previous environment's deployment `Success`; target deployment exists | `DeliveryTrain` :508-517 (same texts) | same |
+| item gates (Auto Merge, no hold, merged by the gateway after a PASS, the video asset) | `ItemGates.Gaps` (`ContentGate.cs`) | same |
+| content gate (every commit a queued or settled item's merge; fail-closed) | `ContentGate.Judge`, `CommitItemLookup` | same |
+| health evidence (`/_build` version, `overallStatus` Healthy, no bad read since the deployment, two reads 5 minutes apart, 10 minutes settle) | `EvidenceComposite.Evaluate`, reads kept in the train's row (survive a restart) | same; `state.promote_health` on the first item is no longer written (only v1 read it) |
+| a health read is tried 3 times, 20 s apart (`octopus.health.retries`, `retrySeconds`) before it counts as unreachable | `HttpTrainReads.Probe`: one try | **gap**: one stray failure is a stored bad read that blocks the release until a new deployment; V2.1 |
+| Sign-off: interruptions of our own deployments; responsible PUT, submit Proceed or Abort; hard and soft gaps; abort after `signoffWaitHours` (2) with `signoff_wait_since` | `SignOffRequested`, `OctopusPromoter.Answer`, `SignOffWaitRecorder` | same |
+| journal lines on the items: `promoted`, `promotion-waiting` (once per release, environment and reason, naming the item that holds the others), `promotion-signoff` | none (the train's history only) | **gap**: V2.1 |
+| a 403 of Octopus is a waiting reason on the items naming the missing permission | logged and retried, never shown on an item | **gap**: V2.1 |
+| no double deployment (Octopus re-read before the create) | `Promote` reads first; the ledger key | same |
+| pass every 60 s (`timing.promoteSeconds`) | poll 120 s, safety wake 10 minutes | slower, accepted |
+| no dependency rule | `dependencies-delivered` (on for an acting environment) | new behaviour with the switch, accepted (the owner's 2026-10-30 W9.12 text) |
+| no incident hold | `TrainHold` (W8.1) | v2 only |
+| `ReleaseQueue.cs` (`release.ready` on the operator stream, the dashboard's request button) | unchanged, fed by `SagaPlantFeed` `release_queue` | kept |
+
+### 2. How every factory item becomes a v2 saga
+
+The rule after this revision: **every open factory item in a column of a step has exactly one open `WorkItemSaga`**, whoever put it
+there. The adoption job already maps an item from v1's state comment; it becomes the **admission** (V1.1): it runs every pass of the
+board reconciler (not once per lease term) over the cards it has just read, and a card in a step column with no open saga is started.
+
+| How the item arrives | What starts its saga | Plan | Runtime of its sessions |
+|---|---|---|---|
+| Todo, through the intake | `DocsIntakeJob` (`StartWorkItem`, source `intake`), when the WIP limit (6), the design-waiting rule and the free slots allow; the slots are the connected owner sessions' plus the scheduler's free runtime capacity (V1.2) | body with `docsOnlyMarker`: docs; label `hotfix`: hotfix (V1.3); otherwise feature, switched to docs by a docs-only design (as today) | V1.3's order: a `runtime:<kind>` label; else `runtimes.environments.<env>.routing` for the phase; else `scheduler.runtime` (octopus on tdd). A connected owner session still goes first where `preferConnected` and the label names no API runtime (v1's rule) |
+| Replenish | `PlantSteps.Replenish` sends `StartWorkItem` (source `replenish`) right after it places the card in Technical Design (V1.1); the admission covers a crash between the two | feature (the replenished body carries no marker; its design is docs-only and switches the plan, as for any item) | as above (no runtime label is written: routing) |
+| A person moves a card into a working column (from Todo or from nowhere) | the admission: no state comment, so a fresh start at the step of the column (`StartWorkItem` with the column's step, source `board`); the `Depends on` check of the intake applies, and an unmet one parks the item `depends-on` (resumed when met) | as for the intake | as for the intake |
+| A person moves a card back to an earlier column | `CardMoved` (W9.10h) on the open saga | unchanged | unchanged |
+| A card with v1's state comment and no saga (in flight before this revision, or after a rollback) | the admission's adoption mapping (W9.10m) with the fencing (W9.10n), every pass | from the state comment (`design.docs_only`, the pull request's files) | as above, with the live claim's runtime kept |
+| A reopened item | the reconciler's reopen input: with a completed saga, `ReopenWorkItem` (the next generation, plan of the last one; redeliver goes back to feature); with no saga (finished by v1), the admission after the card is back in a step column. A reopened issue whose card is in Done or the Release Queue is not started (v1 did not either) | as left | as above |
+| A delivery undone after the settle window | `DeliveryLost` on the completed saga (W8.3) | redeliver | none (Deliver only) |
+| An incident | `CreateHotfixItem` (W8.1) | hotfix, top rank | as above |
+| An item with `env:<other>` | not admitted and not pulled (`envScope`): it is another environment's | | |
+| An item with `runtime:<kind>` | as its column says; the label sets the runtime of every slot request of the item. A runtime that is off in this environment holds the slot with the reason `runtime-off` (the scheduler's hold, shown in `/api/v1/status` `v2.capacity`) | | the label's |
+| An item with `agent:<name>` | as its column says; the label is not read (it never was) | | |
+| An item with `worker:<name>`, `hold:*`, `Demo`, `AI Factory` | not pulled from Todo; in a working column admitted but not offered (pin: offered only to that worker; hold: parked `hold: <label>` by `HoldObserved`) | | |
+
+### 3. The uat and prod switch
+
+What the train needs before it acts for the app's uat and prod (V2.1, then V2.2):
+1. **Parity gaps closed** (V2.1): the health read retried as v1 does (3 tries, 20 s); the three journal lines on the items, once per
+   reason, through the journal ledger (`promoted`, `promotion-waiting` naming the item that holds the others, `promotion-signoff`),
+   and the refused-permission notice as a `promotion-waiting` reason; the `promote` suite run on v2 with the train acting
+   (`run.ps1 -Engine v2` sets `trainActs` for it), the scenarios that depend on v1's pass design (`promote.ps1` :77, :344, :376, :403:
+   the pass budget and the cold pass) declared `v1-only-scenarios` with that reason, and the multi-release ones checked against
+   `newest-only` and declared in `golden/v2-differences.txt`.
+2. **Health gates and Sign-off:** built and equal to v1's (section 1 table); nothing else is needed.
+3. **The promote-health parity checks:** the evidence reads live in the train's row, so a restart keeps them; the state comment's
+   `promote_health` is not written by v2 and is not needed by anything after v1 is gone (`state-guard.ps1` trims it; left as is).
+4. **The W5 gate, restated a second time.** Its first event (3 live releases matched) cannot be met in the shadow: v1 waits on releases
+   whose tdd deployments failed, and the train's steps after a request (follow, health window, Sign-off) never run in the shadow because
+   nothing is executed. What was observed stays recorded (6 compared, 6 matched, 0 differs). The gate becomes: (a) the 6 unexplained
+   live rows explained on #264 (the 38 `v2-only` rows of releases that no queued item names and the one `v1-only` row of a superseded
+   release fall under the two declared differences once `ShadowGate` matches them by release and not only by the declared list; any
+   that does not is a defect, fixed in V2.1); (b) the dead letters of the train cleared and their cause closed (the 121 `TrainWake`
+   with `MergeFactsException` since 2026-10-30, after #607); (c) V2.1 merged with the acting `promote` suite green. The live evidence
+   (timers, the Sign-off answered, a restart during a wait) is observed after the switch, as the switch's own events (V2.2).
+
+**The order of the switch.** V2.2 is one overrides change, `delivery.autoPromote.trainActs: true` (uat and prod together: the rule
+script promotes every environment or none, so the switch cannot be per environment while the `AutoPromoter` exists). The same release
+stops the `AutoPromoter` loop (`AutoPromoter.Runs` is false) and removes the shadow (`/api/v1/delivery-shadow` answers 404). Before the
+merge: record the comparison on #264 (it is gone afterwards) and say on #268 that uat and prod change hands. After it, in this order:
+1. the release check; `/api/v1/status` shows no `AutoPromoter` run and the train's uat and prod policies acting;
+2. the first app release that reaches tdd healthy: one `PromoteRelease` to uat, one deployment, the health window, the journal lines on
+   its items; expect a large first batch (the 67 queued items ride the first qualifying release, newest-only);
+3. its prod promotion: the Sign-off answered by the train (Proceed, or Abort with the reason), one deployment, `DeliveredTo(prod)`, the
+   items complete their settle window;
+4. a gateway release during a train's wait, after which the `TrainWake` fires (#500);
+5. dead letters 0.
+
+**Rollback:** until V2.3 merges, a revert of V2.2 (one release, about 4 minutes) brings the `AutoPromoter` loop back; the train's
+`merge.promoted.<env>` records and `signoff_wait_since` in the state comment (W9.10i) are what v1 reads, so it does not promote twice.
+After V2.3 the rollback is a revert of V2.3 and V2.2 together. A wrong promotion in uat or prod is the operator's (incidents there
+escalate only, default 7 of 2026-10-30).
+
+### 4. The removal of v1 (W9.11a to c, revised)
+
+**Deleted:**
+- the sweep: `Sweeper.cs` (`sync-board` and its passes, `SweepV2Filter`, the `skip_items`/`skip_steps` arguments), `SweepGap.cs`,
+  `Plant.IntakeSlots` (moved to the capacity call of V1.2), the verb `sync-board` (the reconciler stays), `BoardVerbs.SyncBoard`'s script
+  half;
+- the rule scripts of the server: `plugin/scripts/lib/Verbs.*.ps1`, `Apps`, `BaseUpdate`, `Board`, `Checks`, `Journal`, `Leader`,
+  `Metrics`, `Owner`, `OperatorRelease`, `PlantSnapshot`, `Prs`, `Qc`, `Replenish` and `runner-host.ps1`; the server mode of
+  `factory.ps1` (`--server`, `$ServerVerbs`, the dot-sourcing at :50);
+- the Runner's script half: `RunnerPool.cs`, `RunnerGate.cs`, `RunnerEnv.cs`, `TestCause.cs` (as a script argument),
+  `Runner.RunScriptAsync`, `V1VerbRouter` and `VerbRouterFactory`, `V2VerbFeed`'s v1 answer path; `Runner` keeps only the route table and
+  its fences (renamed `VerbDispatch` or left, as the pull request finds simpler);
+- the hybrid fallbacks: `MergeVerbs.cs` `Script(...)`, `MergeVerbService`'s non-auto branch (the `merge-peer-approved` and
+  `merge-hybrid-script` exceptions), the transcript ref-store fallback (`RuleScriptTranscriptBackend`; rows older than the move have aged
+  out of the 14 days), `ingest-event` and `journal` script fallbacks;
+- the GitHub-ref lease (`leader-lease`, the five calls of `Leader.cs`), the ref snapshot (`plant-snapshot-*`,
+  `SnapshotCoordinator`'s ref half): the SQL lock (W9.10b) and the SQL plant (W9.10k) stay;
+- the `AutoPromoter` and `Verbs.Promote.ps1` (V2.3), the shadow machinery (`DeliveryShadow`, `ShadowComparison`, `ShadowGate`,
+  `ShadowStore`, `DeliveryActingShadowHandlers`, `DeliveryShadowPort`'s shadow half, `ShadowHistory`, `AdminDeliveryShadow`, the shadow
+  tables' prune; the tables stay, expand-only), `EngineMode.Shadow` and `engine.shadowEnvironments`;
+- `FACTORY_V2_OFF` (`EngineOptions.KillSwitch`), with its entry in cmdemo1-system replaced by the halt switch below; the adoption break
+  detection and the readoption hold (`AdoptionBreak`, `ReadoptionGate`, the `acted` heartbeat), which exist only for a v1 interval;
+- the state-directory files: `refusals.json` (the model ladder's counter, already C# in `MergeVerbService`: into the database),
+  `qc-items.json` (`FileQcIndex`: `factory.QcEnvironments` already holds it), `seen.json` (sweep only), `project-meta.json` (memory),
+  `item-N.lock` (the in-process `IItemLock`);
+- the settings `gatewayMerge`, `runner.*`, `intake.v2Plans`, `intake.v2Label` (`delivery.autoPromote.trainActs` already went in V2.3; an override that names
+  a removed setting fails the image build, so `deploy.overrides.json` loses them in the same pull request).
+
+**Kept:**
+- the client side of the plugin that workers download: `factory.ps1` (client verbs), `lib/Paths.ps1`, `Models.ps1`, a client `Core.ps1`
+  (without its `Leader.ps1` dot-source), `Client.*.ps1`, `Progress.ps1`, `qc-local.ps1`, `app-run.ps1`, `app-shot.ps1`,
+  `ensure-tools.ps1`, `models.default.json`, `launcher/`, `skills/`, `agents/`, `tools/shot`, `runner/`;
+- `pwsh` in the image for now (the `Dockerfile` checks `plugin/scripts/factory.ps1`; removing pwsh is a later, separate change of a
+  protected file); the `ScriptsDir` anchor of `GitHubBudget.Load`, `LeaderSettings.Load`, `ManagerCopilotSettings.Load` and
+  `PluginArchive.Root`;
+- the SQL lease, Solo mode, the plant (`Plant*.cs`, `Hosts.cs`, `Lease.cs`, `PlantHooks`, `PlantTicker`, messaging, the manager, the
+  operator, the keeper), `ReleaseQueue.cs`, `BaseWatch` (with its new caller), the adoption mapping (it is the admission's path for an item
+  that carries v1's state comment);
+- the v1-format state comment projection (W9.10i) through the W9.11 gate: it is what a rollback to the previous image reads. Retiring
+  the format is a later contract step with the owner's word (expand, then contract);
+- fworker's own uat and prod gateways: no database, inert on the board, on their last release before V3.2 until the owner says otherwise
+  (W9.11b of 2026-10-30, unchanged). "v2 takes uat/prod" is the app's environments.
+
+**The kill switch after v1.** There is no second engine to fall back to. Default (decision D1 below): `FACTORY_HALT=1`, read at start
+from the same cmdemo1-system entry that held `FACTORY_V2_OFF` (a new revision, no image change), stops every new side effect of the
+engine (the admission and the intake, session starts, merges, promotions and Sign-off answers, the replenish) and keeps the reconciler,
+the timers' bookkeeping, the verbs that read, `/api/v1/status` and the dashboard; `/ready` stays 200 and the status says `halted`. The
+rollback is a redeploy of the previous fworker release through Octopus (it still reads the v1-format state comment) or a revert.
+
+**CI and Tier 1:**
+- the v1 Tier 1 matrix (`tier1` of `tests.yml`, about 50 shard jobs) goes; the v2 matrix (`v2`) becomes the only Tier 1 and keeps its
+  shards, renamed `Tier 1 (...)`; `V2_BLOCKING`, the `-Engine` parameter, `FACTORY_V2_OFF` in the harness and `v2-claims.txt` go (every
+  suite runs on the one engine; the coverage job checks the shards against `run.ps1 -ListSuites` as before);
+- the suites `peer-approved` and `qc-gate` (declared v1-only; `merge-queue` is claimed on v2 and stays), the `v1-only-scenarios` lines and the scenarios
+  that test the Runner and the pool (`runner gate`, `qc: runner pool`) are deleted; `leader` is rewritten on the SQL lease only;
+- the parity tests that run the scripts (`MergeVerbParityTests`, `ServiceVerbParityTests`, `BoardVerbParityTests`, the script part of
+  `tests/smoke.ps1`) are retired; the goldens are frozen as C#-owned fixtures; `golden/v2-differences.txt` folds into them;
+- the job `Image starts without a database` stays (an environment with no database is inert); `Build result` and `secret-scan` remain
+  the required checks, unchanged in name;
+- the SQL Server service container becomes part of every Tier 1 job (it is already in the v2 jobs).
+
+### 5. The pull requests, in order
+
+Lanes: **V1** (tdd starts every item on v2), **V2** (the app's uat and prod), **V3** (v1 removed). V1.1 to V1.4 run in parallel, and
+V2.1 beside them; the composition files (`GatewayWolverineExtensions.cs`, `RecurringJobSlots.cs`, `GatewayServiceCollectionExtensions.cs`)
+are hot, so the main session integrates them as in section 1 of this plan ("How parallel subagents work"). Every pull request runs the smoke test and the suites of its area; every
+tdd check is read with `/api/v1/status` and recorded on #268.
+
+| PR | Scope | Files | Size | After | Tests | tdd check |
+|---|---|---|---|---|---|---|
+| **V1.1** admission | the adoption job becomes the admission: every reconciler pass (leader only), for each open factory card of the home repository in a step column with no open saga: the adoption mapping when it has v1's state comment, else `StartWorkItem` at the column's step (a new `Step` field on the message; `Begin` enters that step); the `Depends on` check parks `depends-on`; a reopened card with a completed saga sends `ReopenWorkItem`; `envScope`, rival, demo and hold labels respected; `PlantSteps.Replenish` sends `StartWorkItem` after the card is placed; the status block `v2.admission` (started, adopted, skipped by reason) | `src/Fworker.Workflows/Adoption/*`, `WorkItem/WorkItemSaga.cs`, `WorkItemMessages.cs`, `Reconcilers/PlantSteps.cs`, `gateway/Composition/Adoption*`, `GatewayWolverineExtensions.cs` (hot) | M | none | `Fworker.Workflow.Tests` per arrival (fresh card, v1 state comment, reopened, closed, env:other, held, depends-on); Tier 1 `saga` scenarios "a replenished item starts its saga", "a person moves a Todo card to Technical Design", "a reopened item"; `tests.yml` unchanged | a replenished item has a saga within one reconciler pass (`v2.sagas.byStep`); v1's sweep answers no action for it; #1177 to #1181 (or their successors) adopted with their live claims, no second session started |
+| **V1.2** intake slots from capacity | `DocsIntakeJob`'s free slots: `Plant.IntakeSlots()` plus the scheduler's free capacity of the runtimes it would grant (concurrency less in flight and queued, bounded by what is left of the day budget); `IntakeRule` checks `envScope` | `gateway/Ports/DocsPlanPort.cs`, `src/Fworker.Workflows/Intake/IntakeRule.cs`, `Capacity/CapacityService.cs`, `gateway/Intake.cs` | S | none | `IntakeRuleTests`, a `CapacityService` free-capacity case; Tier 1 `saga` "the intake pulls with no owner session, on runtime capacity" | a Todo item is pulled with no owner session connected; never more in flight than `maxConcurrent` (2) and the WIP limit (6); `docs-intake` job's last outcome `started N` |
+| **V1.3** runtime and plan from labels | `SlotRequestPort`: `runtime:<kind>` label, else `runtimes.environments.<env>.routing` for the phase, else `scheduler.runtime`; a runtime that is off holds with `runtime-off`; the pin honoured on the saga's offer (`V2Ownership.OfferNodes` offers a pinned item to that worker only); a `hotfix` label at the start chooses the hotfix plan (`StartWorkItem.Hotfix`); `agent:` stated as not a label in `verb-inventory.md`; `intake.v2Plans` gains hotfix and redeliver (W8.1b's config half) | `gateway/Ports/FeaturePlanPort.cs`, `gateway/Ports/WorkItemPort.cs` (offers), `DocsPlanPort.cs`, `config/deploy.overrides.json` (protected: the owner's decision of 2026-11-01 covers it) | S | none | `SlotRequestPortTests` (label, routing, default, off), an offer test for the pin; one scenario each in `copilot` and `cursor` (both claimed on v2) whose item carries a `runtime:` label and runs on a saga | an item labelled `runtime:copilot-cloud` asks the scheduler for that runtime (or is held `runtime-off` while Copilot is off for tdd); an unlabelled one gets octopus |
+| **V1.4** the sweep's last steps | the gap renew of owner claims of saga items at the first pass of a term; `BaseWatch.AfterSweep` as a recurring job (`base-watch-fallback`, 5 minutes); the Release Queue card without a merge record flagged (`flags` and a journal line); `keeper.maxNewItemsPerDay` in `KeeperCommands`; the auto-unpark difference declared in `v2-differences.txt` | `src/Fworker.Workflows/Reconcilers/*`, `Keeper/KeeperCommands.cs`, `gateway/BaseUpdate.cs`, `RecurringJobSlots.cs` (hot), `tests/scenarios/golden/v2-differences.txt` | M | none | `PlantStepsTests`, `BaseUpdate` job test, `KeeperCommandTests`; the base update scenarios of `owner` (`baseupdate.ps1`) with a missed webhook | after a release, a lapsed owner claim of a saga item is renewed before the first offer; `base-watch-fallback` runs (status `v2.jobs`) |
+| **Gate V1** | events, recorded on #268: for one day of normal work every open factory card in a step column has an open saga (`v2.admission` skipped only with reasons); v1's sweep reports no item action; one item of each arrival (Todo, replenish, a card moved by a person, a reopened one) runs to Done or the Release Queue; dead letters 0 outside the train | | | V1.1 to V1.4 | | |
+| **V2.1** train parity | the health read retry; the item journal lines (`promoted`, `promotion-waiting` once per reason with the holding item, `promotion-signoff`, the refused-permission reason) from the executor's and the train's decisions through the journal ledger; `ShadowGate` matches declared differences by rule, and the 6 unexplained rows are explained or fixed; the `TrainWake` `MergeFactsException` dead letters' cause closed; `run.ps1 -Engine v2` sets `trainActs` for `promote`; the pass-design scenarios declared; `DeliveryUatProdV1Tests`, `EngineOptionsTests` and `DeliveryShadowPortTests` follow | `src/Fworker.Workflows/Delivery/*`, `gateway/Ports/DeliveryExecutorPort.cs`, `DeliveryShadowReads.cs`, `src/Fworker.Integrations/Octopus/*`, `tests/scenarios/{run.ps1,v2-claims.txt,golden/v2-differences.txt}`, `tests/Gateway.Tests/*` | M | none (beside V1) | the `promote` suite green on v2 with the train acting; executor and journal unit tests; `DeliveryTrain` probe-retry tests | still shadow: the gate fields of `/api/v1/delivery-shadow` show `unexplainedLive` 0; v2 dead letters of the train 0 for a day |
+| **V2.2** the switch | `delivery.autoPromote.trainActs: true` in `config/deploy.overrides.json` (protected; the owner's decision of 2026-11-01 is the approval); the comparison recorded on #264 before the merge | `config/deploy.overrides.json`, `tests/Gateway.Tests` (the overrides assertions) | S | V2.1 | `apply-overrides.ps1` check; the overrides tests | the events of section 3, 1 to 5 |
+| **V2.3** the `AutoPromoter` and the shadow removed | `AutoPromoter.cs`, `Runs`, `OnActions`/`ObserveV1`, the loop's registration, `Verbs.Promote.ps1` from the server set, the shadow machinery (section 4), `trainActs` (the train always acts where `AutoPromoteHere`); the `auto-promote` exception leaves the architecture test | `gateway/AutoPromoter.cs`, `gateway/Composition/*` (hot), `gateway/Ports/DeliveryShadow*`, `src/Fworker.Workflows/Delivery/{DeliveryShadow,ShadowComparison,ShadowGate,ShadowStore}.cs`, `gateway/Endpoints/AdminDeliveryShadow.cs`, `docs/design/verb-inventory.*`, `config/*` | S | V2.2's event 3 (the first prod delivery by the train) | the `promote` suite; the architecture test with five exceptions | the next release: no shadow in status, `/api/v1/delivery-shadow` 404, a promotion still made by the train |
+| **V3.1** (W9.11a) the tests on one engine | v2 the only engine of the harness; the v1 `tier1` matrix removed, the `v2` matrix renamed Tier 1; `v2-claims.txt`, `V2_BLOCKING`, `-Engine` removed; the v1-only suites and scenarios deleted; the script parity tests retired; goldens frozen as C# fixtures; `leader` on the SQL lease; `CLAUDE.md`'s Test section | `tests/*`, `.github/workflows/tests.yml` (the local addition of the kit; hot: the main session), `CLAUDE.md` | M | Gate V1, V2.3 | the whole Tier 1 on the one engine green on master (`gh workflow run Tests --ref master`); the coverage job | none (tests only); CI wall clock recorded |
+| **V3.2** (W9.11b, first half) the gateway without v1 | the sweep, the Runner's script half and pool, the hybrid fallbacks, the ref lease and ref snapshot, `FACTORY_V2_OFF` and shadow mode, the adoption break detection, the v1-only settings (section 4); `FACTORY_HALT` added (D1); the state-directory files into the database or memory (a DbUp script for the refusal counter, expand-only); the architecture test's allow-list down to router forwards only | `gateway/*` (one subagent, last), `src/Fworker.Workflows/Adoption/*`, `src/Fworker.Database/scripts/Update/*`, `config/instance.json`, `config/deploy.overrides.json` | L | V3.1; the cmdemo1 session has renamed `FACTORY_V2_OFF` to `FACTORY_HALT` in cmdemo1-system (unset) | the Gateway, Workflow and src tests; the whole Tier 1; the image-start job; a `FACTORY_HALT` scenario (nothing started, merged or promoted; status `halted`) | the release check with `leader.sql` (no `leader.role` of the ref); `restore.how` sql; one lease rollover with one acting node; no `pwsh` process started by the gateway in an hour (status `runner` absent) |
+| **V3.3** (W9.11b, second half) the plugin without server scripts | the server libraries and `runner-host.ps1` deleted; `factory.ps1` client only; `Core.ps1` split; the author suite's checks of the plugin kept green; `GET /api/v1/plugin` serves the smaller tree | `plugin/scripts/*`, `tests/smoke.ps1`, `tests/scenarios/author.ps1` | M | V3.2 | smoke, `author`, `workers`, `owner`, `operator` suites; a worker's download unpacks and `factory.ps1` client verbs answer | the `pluginHash` of `/_build` changes; a runtime session (Octopus) downloads the plugin and completes a phase |
+| **V3.4** (W9.11c) the release check and the documents | `CLAUDE.md` (Layout, Release step 6 with `leader.sql` and `restore.how`, Rules: "only one gateway may sweep" becomes the lease rule, the kill switch), `docs/HANDOFF.md` (a v2 section), the operator skill's reading of `waitingFor` and `halted`, the status fields; the W9.11 gate recorded | `CLAUDE.md`, `docs/HANDOFF.md`, `plugin/skills/factory-operator/*`, `gateway/Endpoints/{Health,Status}*` | S | V3.3 | smoke | the W9.11 gate (2026-10-30 text): the release check with the new fields, one lease rollover, a docs item and a feature item to the app's tdd, dead letters 0 |
+| W9.13 | multi-repository, unchanged | | L | V3.4 | | |
+
+Parallel: V1.1, V1.2, V1.3, V1.4 and V2.1 at once (V1.1 and V1.4 share the composition: the main session merges them one after the
+other); V2.2 after V2.1, whatever V1 does; V2.3 after V2.2's first prod delivery; V3.1 after Gate V1 and V2.3; V3.2, V3.3 and V3.4 in
+that order, one at a time.
+
+**Risky points:**
+- **V1.1** turns on v2 for items that v1 runs now: an item in flight under v1 at the merge is adopted with its live claim (W9.10m); the
+  check is that no second runbook session starts for it. A fault here starts sessions for many cards at once; the admission starts at most
+  `intake.wipLimit` items in the AI columns and logs each start.
+- **V2.2** makes the first gateway promotion to the app's uat and prod by the train, likely with all 67 queued items in one release, and
+  answers the prod Sign-off by itself. Merge it when the owner knows the time, and watch events 2 and 3.
+- **V3.2** is large and removes the last rollback to v1; the rollback from it is the previous fworker release (it still has v1 and reads
+  the state comment). Keep the v1-format state comment through the W9.11 gate.
+- **The reconciler's GitHub cost** (395 requests an hour now): it falls when the sweep's extra pass goes (V3.2); until then it is read on
+  every tdd check.
+- **The app's tdd deployments are failing** (since at least release 2.4.1228). That is the app's, not the factory's, but it blocks every
+  promotion in either engine and so blocks V2.2's events; the factory's items keep moving to the Release Queue meanwhile.
+
+**Decisions still needed** (each has a default; the work goes on with the default unless the owner says otherwise):
+- **D1, the stop after v1:** default `FACTORY_HALT=1` in the cmdemo1-system entry that held `FACTORY_V2_OFF` (it halts new side effects,
+  keeps reads and status). The alternative is no switch at all (stop = revert or redeploy the previous release).
+- **D2, the W5 gate:** default as restated in section 3 (the shadow's evidence as recorded, the unexplained rows explained, the train's
+  dead letters closed, the acting `promote` suite green, then the live events after the switch) instead of "3 live releases matched",
+  which the shadow cannot produce.
+- **D3, a person's `hotfix` label:** default it starts the hotfix plan (top rank, no design step), as the incident's hotfix item does.
 
 ## Revision 2026-10-30 (audit)
 
