@@ -12,9 +12,12 @@ interface IOperatorReleaseLoader
     bool IsLoaded { get; }
 }
 
-// A hosted service only to start the read with the host: the read is never gated by leadership and, as before, is not stopped with the host.
-sealed class OperatorReleaseLoader : IOperatorReleaseLoader, IHostedService
+// A hosted service only to start the read with the host: the read is never gated by leadership and, as before, is not stopped with the host
+// (StopAsync). It ends when the service provider is disposed: a loop that outlived its host went on calling the rule script every pause for the
+// rest of the process, and in the gateway tests (one process, many hosts, the environment shared) it ran against the next test's stub.
+sealed class OperatorReleaseLoader : IOperatorReleaseLoader, IHostedService, IDisposable
 {
+    readonly CancellationTokenSource disposed = new();
     readonly Func<string, string, TimeSpan, Task<(int Code, string Output)>> run;
     readonly Action<DateTime, int, string> addRelease;
     readonly TaskCompletionSource loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -45,14 +48,17 @@ sealed class OperatorReleaseLoader : IOperatorReleaseLoader, IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+    public void Dispose() => disposed.Cancel();
+
     async Task ReadLoop()
     {
-        while (true)
+        while (!disposed.IsCancellationRequested)
         {
             try
             {
                 var day = DateTime.UtcNow;
                 var (code, output) = await run("operator-releases", new JsonObject { ["day"] = Day(day) }.ToJsonString(), TimeSpan.FromSeconds(120));
+                if (disposed.IsCancellationRequested) return;
                 if (code == 0 && JsonNode.Parse(output)?["releases"] is JsonArray list)
                 {
                     foreach (var r in list)
@@ -62,7 +68,7 @@ sealed class OperatorReleaseLoader : IOperatorReleaseLoader, IHostedService
                 Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"operatorReleases\":\"not-loaded\",\"exit\":{code}}}");
             }
             catch (Exception e) { Console.Error.WriteLine($"operator releases: {e.Message}"); }
-            await Task.Delay(TimeSpan.FromSeconds(PauseSeconds));
+            try { await Task.Delay(TimeSpan.FromSeconds(PauseSeconds), disposed.Token); } catch (OperationCanceledException) { return; }
         }
     }
 }

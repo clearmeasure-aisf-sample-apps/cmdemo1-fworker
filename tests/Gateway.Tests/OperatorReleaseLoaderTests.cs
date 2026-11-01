@@ -143,4 +143,19 @@ public sealed class OperatorReleaseLoaderTests
         await l.Loaded.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(2, scripts.Calls.Count);
     }
+
+    [Fact]
+    public async Task Dispose_EndsTheRead_NoCallAfterIt()
+    {
+        var (l, scripts, _) = Make(pause: 0.1);
+        scripts.Answer = _ => (1, "{}");   // every read fails: without the dispose the loop would go on for ever
+        await l.StartAsync(CancellationToken.None);
+        await Until(() => scripts.Calls.Count >= 2);
+        l.Dispose();
+        await Task.Delay(300);   // a call in flight at the dispose may still finish
+        var n = scripts.Calls.Count;
+        await Task.Delay(500);
+        Assert.Equal(n, scripts.Calls.Count);
+        Assert.False(l.IsLoaded);
+    }
 }

@@ -202,7 +202,7 @@ public static class C7cPins
         s = Regex.Replace(s, @"\bm-[0-9a-f]{8}-(\d{4,})", "m-<run>-$1");
         s = Regex.Replace(s, @"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)?", "<time>");
         s = Regex.Replace(s, "\"(token|nonce)\":\"[^\"]*\"", "\"$1\":\"<masked>\"");
-        s = Regex.Replace(s, "\"(retryAfterSeconds|ageSeconds|seconds|secondsAgo|ticket)\":\\d+(\\.\\d+)?", "\"$1\":\"<n>\"");
+        s = Regex.Replace(s, "\"(retryAfterSeconds|ageSeconds|lastHeardSeconds|seconds|secondsAgo|ticket)\":\\d+(\\.\\d+)?", "\"$1\":\"<n>\"");
         return s;
     }
 
