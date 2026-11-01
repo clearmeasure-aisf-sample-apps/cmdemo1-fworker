@@ -362,6 +362,40 @@ public class MergeTests
     }
 
     [Fact]
+    public async Task Merge_A403OnTheReadOfThePullRequest_IsGithubForbidden_NotRemembered_AndThePurgeDropsSuchARow()
+    {
+        // the outage's first call was the GET of the pull request
+        var fake = new Fake().On("GET " + PrPath, HttpStatusCode.Forbidden, """{"message":"Request forbidden by administrative rules."}""").On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.OK, OkMerge);
+        var ledger = new InMemoryIdempotencyLedger();
+        var h = new MergePullRequestHandler(ledger, Direct(fake).Item1);
+        var first = await h.Process(Cmd());
+        Assert.Equal((MergeStatus.Failed, "github-forbidden", FailureKind.Permanent), (first.Status, first.Reason, first.Kind));
+        Assert.Null(ledger.TryGet(Cmd().IdempotencyKey));
+        Assert.True((await h.Process(Cmd())).Merged);
+
+        // a row stored by the earlier code: merge-refused with the HTTP 403 of the read
+        ledger.Record("old", new MergeOutcome(MergeStatus.Failed, "merge-refused", "read of PR #9: HTTP 403 Request forbidden", Kind: FailureKind.Permanent).ToResult());
+        ledger.Record("final", new MergeOutcome(MergeStatus.Failed, "merge-refused", "merge of PR #9: HTTP 404 Not Found", Kind: FailureKind.Permanent).ToResult());
+        Assert.Equal(1, ledger.PurgeAuthFaults());
+        Assert.Null(ledger.TryGet("old")); Assert.NotNull(ledger.TryGet("final"));
+    }
+
+    [Fact]
+    public void AuthFaults_AlsoMatchTheTokenMintAndTheOctopusForms()
+    {
+        foreach (var e in new[]
+        {
+            "WriteJournalLine: GitHub answered 403 when minting the App installation token",
+            "Octopus refused promoting 1.0.3 (403, missing permission DeploymentCreate); the owner grants it to the gateway's Octopus account",
+            "Octopus refused the rollback (403); the owner grants it to the gateway's Octopus account",
+            "Octopus answered 401 to promoting 1.0.3",
+            "runbook-run-403 (missing permission X)",
+        }) Assert.True(AuthFaults.Is(CommandResult.Failed(FailureKind.Permanent, e)), e);
+        foreach (var e in new[] { "Octopus answered 404 to promoting 1.0.3", "runbook-run-422", "project 'p' not found in Default", "runbook-not-published" })
+            Assert.False(AuthFaults.Is(CommandResult.Failed(FailureKind.Permanent, e)), e);
+    }
+
+    [Fact]
     public async Task Merge_ARealFinalRefusal_IsStillAnsweredFromTheLedger()
     {
         var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(mergeable: "false")).On(Merge, HttpStatusCode.OK, OkMerge);

@@ -94,7 +94,12 @@ public abstract class IntegrationCommandHandler<TCommand> where TCommand : Integ
 /// </summary>
 public static class AuthFaults
 {
-    static readonly System.Text.RegularExpressions.Regex Text = new(@"^[A-Za-z]+: GitHub (401|403) on |^[A-Za-z]+: 401 after a token refresh", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    // the real forms: the journal store ("WriteJournalLine: GitHub 403 on POST ..."), the App token mint (GitHubTokenException), the Octopus commands (OctopusPromoter, RollbackExecutor: "Octopus refused ... (403",
+    // "Octopus answered 401 to ...") and the runbook runtime ("runbook-run-403")
+    static readonly System.Text.RegularExpressions.Regex Text = new(
+        @"^[A-Za-z]+: GitHub (401|403) on |answered (401|403) when minting the App installation token|^Octopus refused .{0,200}?\((401|403)\b|^Octopus answered 401 to |^runbook-run-(401|403)\b",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    static readonly System.Text.RegularExpressions.Regex RefusedRead = new(@"\bHTTP (401|403)\b", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     public static bool Is(CommandResult r)
     {
@@ -102,7 +107,13 @@ public static class AuthFaults
         var e = r.Error ?? "";
         if (e.StartsWith("merge/", StringComparison.Ordinal))
         {
-            try { return System.Text.Json.Nodes.JsonNode.Parse(e["merge/".Length..])?["Reason"]?.GetValue<string>() == "github-forbidden"; }
+            try
+            {
+                var w = System.Text.Json.Nodes.JsonNode.Parse(e["merge/".Length..]);
+                var reason = w?["Reason"]?.GetValue<string>();
+                // rows stored before reads were mapped: a merge-refused whose detail is a 401 or 403 of GitHub (a 422 says "HTTP 422")
+                return reason == "github-forbidden" || (reason == "merge-refused" && RefusedRead.IsMatch(w?["Detail"]?.GetValue<string>() ?? ""));
+            }
             catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException) { return false; }
         }
         return Text.IsMatch(e);
@@ -166,7 +177,7 @@ public interface IPurgeableLedger
     int PurgeSuccesses(TimeSpan retention, DateTimeOffset now);
 }
 
-/// <summary>The cleanup of the rows an outage left (run by the hourly ledger purge; a no-op once they are gone): permanent failures that are <see cref="AuthFaults"/>. Since the handler no longer records them, every such row is from before that change.</summary>
+/// <summary>The cleanup of the rows an outage left (run by the ledger purge job, at start and every 6 hours; a no-op once they are gone): permanent failures that are <see cref="AuthFaults"/>. Since the handler no longer records them, every such row is from before that change.</summary>
 public interface IAuthFaultPurgeable
 {
     /// <summary>Forgets the recorded failures that are credential or permission faults; the number forgotten.</summary>
