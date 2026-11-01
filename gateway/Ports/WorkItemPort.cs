@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Catalog;
+using Fworker.Contracts.Commands;
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
 using Fworker.Domain;
@@ -289,7 +290,7 @@ static class MergeTrainSettingsReader
 
 /// <summary>What the docs plan needs of GitHub (W6.6). Every reader is null without a credential (GH_TOKEN or the author App): the merge then answers "merge-unavailable" (a wait), the card stays where it is, nothing is read for the intake.</summary>
 sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, DocsProjection Projection, IMergeFactsReader? Facts, IBoardReader? Boards, PullRequestHeads? Heads, Func<BoardRef?> Board,
-    IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null, SagaStateProjection? State = null, PromotionStateWriter? Promotions = null)
+    IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null, SagaStateProjection? State = null, PromotionStateWriter? Promotions = null, CloseIssueHandler? Close = null)
 {
     /// <summary>The intake job; null when it cannot read the board and the items. The caller brings the plant's facts (free slots, whether a design waits) and the lease.</summary>
     public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow) =>
@@ -356,7 +357,9 @@ static class WorkItemWiring
         Action<string, string?, string?, string?> observe = (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
         var clients = new GitHubClientFactory(http, creds, new Fworker.Integrations.GitHub.GitHubBudget());
         var claimNode = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
-        var merge = new MergePullRequestHandler(new SqlCommandStores(connectionString, owner: () => new Fworker.Integrations.Commands.ClaimOwner(claimNode, c.Leader?.ClaimEpoch ?? 0)).Ledger, new MergeDirect(clients));
+        var ledger = new SqlCommandStores(connectionString, owner: () => new Fworker.Integrations.Commands.ClaimOwner(claimNode, c.Leader?.ClaimEpoch ?? 0)).Ledger;
+        var merge = new MergePullRequestHandler(ledger, new MergeDirect(clients));
+        var close = new CloseIssueHandler(ledger, clients);   // (the close of a finished item's issue: the same ledger, its own keys)
         var facts = new HttpMergeFactsReader(http, creds, Str("name", "factory-worker"), Str("videoLabel", "video"), observe);
         BoardColumnProjection? card = null;
         BoardColumnProjection? Card() => card ??= boardRef() is { } board ? new BoardColumnProjection(http, creds, board, versions, echo) : null;
@@ -365,7 +368,7 @@ static class WorkItemWiring
             ? new StateCommentProjection(new LazyJournalStore(async ct => new GitHubJournalStore(await clients.For(home, ct), JournalCommandWiring.Identity(c, env, http, tokens))), versions, echo, locks: locks) : null;
         var promotions = comment is not null && c.Instance.Home is { } promotionHome ? new PromotionStateWriter(comment, promotionHome) : null;
         return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low, queue.Busy), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef, versions, echo, facts,
-            new SagaStateProjection(() => comment, store, settings, stateSettings), promotions);
+            new SagaStateProjection(() => comment, store, settings, stateSettings), promotions, close);
     }
 
     public static FactoryDbContext Open(string connectionString) => new(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(connectionString).Options);
@@ -384,6 +387,8 @@ static class WorkItemWiring
             // the docs plan's merge (MergeRequested, answered with MergeAttempted) and the card that follows the saga's decisions
             services.AddSingleton(parts.Docs.Merge);
             services.AddSingleton(parts.Docs.Projection);
+            // the issue of a finished item is closed as v1's settle closes it (the Completed decision becomes CloseWorkItemIssue, a durable queue of its own, tried again for ever on a fault)
+            services.AddSingleton(new IssueCloseService(parts.Docs.Close));
             // W9.10i: the state comment follows the saga's decisions in the format v1 reads (the rollback path)
             if (parts.Docs.State is { } stateProjection) services.AddSingleton(stateProjection);
             // W7.3: the feature plan's slot requests (the saga's SlotWanted becomes the scheduler's RequestSlot) and the notice of a fix-forward round to the owner session
@@ -403,6 +408,9 @@ static class WorkItemWiring
             w.Discovery.IncludeType(typeof(MergeTrainPortHandler));
             w.Discovery.IncludeType(typeof(MergeTrainHistoryHandler));
             w.Discovery.IncludeType(typeof(DocsProjectionHandler));
+            w.Discovery.IncludeType(typeof(IssueCloseHandler));
+            w.PublishMessage<CloseWorkItemIssue>().ToLocalQueue(IssueCloseHandler.Queue);
+            w.LocalQueue(IssueCloseHandler.Queue).Sequential().UseDurableInbox();
             if (parts.Docs.State is not null)
             {
                 // W9.10i: one at a time on a queue of its own, durable: a decision that was published is projected after a restart too, and GitHub being slow holds up nothing else

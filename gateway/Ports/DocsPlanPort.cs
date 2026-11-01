@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Fworker.Workflows.Delivery;
 using Fworker.Contracts.Catalog;
+using Fworker.Contracts.Commands;
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
 using Fworker.Integrations.GitHub;
@@ -233,6 +234,9 @@ public sealed class DocsProjection(Func<BoardColumnProjection?> boardOf, DocsPla
             _ => null,
         };
     }
+
+    /// <summary>The close of the item's issue that the completion wants (v1's settle closes it with the move to Done): the same decisions that put the card in Done, whichever way the item completed; null for any other.</summary>
+    public CloseWorkItemIssue? CloseFor(WorkItemDecided d) => WorkItemIssueClose.For(d, settings.CarriesFeature);
 
     /// <summary>Projects the decision. False when it gave up after the tries (the next decision projects again); true when the card is where the decision wants it or the decision wants nothing.</summary>
     public async Task<bool> Project(WorkItemDecided d, CancellationToken ct)
