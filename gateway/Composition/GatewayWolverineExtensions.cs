@@ -30,6 +30,7 @@ static class GatewayWolverineExtensions
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
+        Func<bool>? leaseHold = null;   // V1.4: set where the jobs are made; while true the timer of an expired lease waits for the term's gap renewal
         var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
         AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
         // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
@@ -74,7 +75,7 @@ static class GatewayWolverineExtensions
                 // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
                 // W7.3: a fix-forward round of the feature plan reaches the owner session as the trigger v1's sweep sends (the plant is resolved when the trigger is sent, not here: building the plant needs the host)
                 var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board,
-                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>(), readoption: readoption);
+                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>(), readoption: readoption, holdLeaseTimers: () => leaseHold?.Invoke() == true);
                 WorkItemWiring.Attach(host, workItems);
                 workItemParts = workItems;
                 v2Ownership = workItems.Ownership;
@@ -194,6 +195,26 @@ static class GatewayWolverineExtensions
                     jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));
                     jobs.Add(RecurringJobSlots.Replenish, ct => steps.Replenish(ct));
                     jobs.Add(RecurringJobSlots.BacklogLow, ct => steps.BacklogLow(ct));
+                    // (the timer of a lease that ran out in the gap would relaunch the item before the renewal ran: it waits for the restore, the adoption and the renewal of the term, at most 10 minutes from the start of the leader term)
+                    long termEpoch = -1; var termAt = DateTime.UtcNow;   // (the window counts from the start of each leader term: a lease taken back later has a gap of its own)
+                    leaseHold = () =>
+                    {
+                        if (!c.Leader.MayAct) return false;
+                        lock (c) { var e = c.Leader.ClaimEpoch; if (e != termEpoch) { termEpoch = e; termAt = DateTime.UtcNow; } if (DateTime.UtcNow - termAt >= TimeSpan.FromMinutes(10)) return false; }
+                        return !plantRestored() || adoptionGate.Settled() is null || c.SweepGap.PeekRenew() != null;
+                    };
+                    // V1.4: what only the sweep did: the gap renewal of the saga's owners' claims, the base update fallback after a missed webhook, the flag of a Release Queue card with no merge record (SweepLeftoverJobs.cs; the sweep leaves them to these jobs)
+                    if (workItems.Ownership is { } leftoverOwnership)
+                    {
+                        Fworker.Workflows.Reconcilers.ReleaseQueueFlags? rqFlags = null;
+                        var holdColumns = (c.Instance.Root?["columns"]?["hold"] as System.Text.Json.Nodes.JsonArray)?.Select(x => x?.ToString() ?? "").Where(x => x.Length > 0).ToList() ?? ["Release Queue"];
+                        var leftovers = new SweepLeftoverJobs(() => c.Leader.MayAct, () => plantRestored() && adoptionGate.Settled() is not null, leftoverOwnership, c.SweepGap, n => sp.GetService<Plant>()?.OwnerNameOf(n), (code, item, column) => sp.GetService<Plant>()?.OperatorPlantEvent(code, item, "", column), c.GitHubBudget,
+                            async renewal => { if (!await host.PublishAsync(renewal)) throw new InvalidOperationException("the Wolverine host did not take the renewal of a lease"); },
+                            () => sp.GetRequiredService<BaseWatch>().AfterSweep(), () => rqFlags ??= KeeperWiring.MakeReleaseQueueFlags(sp), () => c.BoardReconciler?.LastCards ?? [], home, holdColumns);
+                        jobs.Add(RecurringJobSlots.GapRenew, ct => leftovers.GapRenew(ct));
+                        jobs.Add(RecurringJobSlots.BaseWatchFallback, ct => leftovers.BaseWatchFallback(ct));
+                        jobs.Add(RecurringJobSlots.ReleaseQueueFlag, ct => leftovers.ReleaseQueueFlag(ct));
+                    }
                     // W9.9b: the adoption of v1's items, pending Sign-offs and merges, once per term of the lease and after the plant is restored (the job asks AdoptionJob, whose heartbeat is the engine's marker)
                     var adopting = AdoptionWiring.Make(c, workItems, cs, host, () => sp.GetService<ISystemCatalog>(), mergedDeriver, plantRestored, new Fworker.Workflows.Merge.SqlMergeTrainStore(() => ItemMergedWiring.Open(cs)),
                         new Fworker.Workflows.Delivery.SqlTrainStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Capacity.SqlCapacityStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Qc.SqlQcEnvironmentStore(() => ItemMergedWiring.Open(cs)), Environment.GetEnvironmentVariable, readoption: readoption);
