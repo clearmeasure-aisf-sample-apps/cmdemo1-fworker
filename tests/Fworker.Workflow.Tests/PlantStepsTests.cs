@@ -257,6 +257,20 @@ public sealed class PlantStepsTests
     }
 
     [Fact]
+    public async Task Replenish_AnOlderItemThatFinishedToday_IsReachedBehindMoreThanTwelveNewerCardsThatDoNotQualify()
+    {
+        // v2 finishes an item pulled from Todo whose number is below the replenished chain's: the newest 12 cards of Done are all replenished or old, and must not hide it
+        var r = new Rig(On);
+        r.Finished(50);
+        for (var n = 60; n < 75; n++) { if (n % 2 == 0) r.Finished(n, replenished: Ps.Iso(r.World.Clock)); else r.Finished(n, hoursAgo: 30); }
+        var first = await r.Steps.Replenish(0, 1);
+        Assert.Empty(first.Replenish!["created"]!.AsArray());   // the first pass read the newest 12 and found none
+        var second = await r.Steps.Replenish(0, 1);             // they are not read again: the pass goes on to the older cards
+        var made = Assert.Single(second.Replenish!["created"]!.AsArray()).GetValue<int>();
+        Assert.Contains("work item #50 finished", r.World.Issues[made].Body);
+    }
+
+    [Fact]
     public async Task Replenish_IsOffByDefault_AndAnswersNothing()
     {
         var r = new Rig();

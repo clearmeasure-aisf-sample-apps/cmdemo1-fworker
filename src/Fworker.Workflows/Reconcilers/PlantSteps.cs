@@ -242,6 +242,9 @@ public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphan
 
     // ---- the keeper's replenishment ---------------------------------------------------------------------------------------------------------
 
+    // The cards of the last column that Replenish read and found not eligible, with the time before which they are not read again (DateTime.MaxValue: never, for the life of the process).
+    readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> notEligible = new();
+
     /// <summary>
     /// <c>Invoke-Replenish</c>: when an item the gateway owns reached the last column (Done, delivered to production) within the last 24 hours and has not been replenished, ONE new, small, docs-only item is created in the keeper's
     /// column; the finished item's state records <c>replenished</c> first, so a failure after the issue exists never makes a second one. Never above <c>targetOpen</c> open factory items or <c>maxPerDay</c> in 24 hours; with
@@ -276,14 +279,17 @@ public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphan
         foreach (var d in finished)
         {
             if (open >= rc.TargetOpen) { r["skipped"] = "target-open"; break; }
+            // a card read before and found not to qualify (replenished, done more than 24 h ago, no done_at yet) costs no read this time: the newest 12 cards of the column must not hide an older one that finished today
+            // (an item pulled from Todo is older in number than the replenished chain, and v2 finishes it; the script, which reads the newest 12 every time, never reaches it)
+            if (notEligible.TryGetValue(d.Number, out var recheck) && cx.Now < recheck) continue;
             if (reads >= 12) break;
             reads++;
             Fence();
             var st = await cx.State.Read(d.Number); var s = st.State;
-            if (!(s["merge"] is JsonObject merge && Ps.Has(merge, "done_at") && Ps.Truthy(merge["done_at"]))) continue;
+            if (!(s["merge"] is JsonObject merge && Ps.Has(merge, "done_at") && Ps.Truthy(merge["done_at"]))) { notEligible[d.Number] = cx.Now.AddMinutes(30); continue; }
             var doneAt = Ps.FromIso(merge["done_at"]);
-            if (doneAt is null || (cx.Now - doneAt.Value).TotalHours > 24) continue;
-            if (Ps.Has(s, "replenished") && Ps.Truthy(s["replenished"])) continue;
+            if (doneAt is null || (cx.Now - doneAt.Value).TotalHours > 24) { notEligible[d.Number] = DateTime.MaxValue; continue; }
+            if (Ps.Has(s, "replenished") && Ps.Truthy(s["replenished"])) { notEligible[d.Number] = DateTime.MaxValue; continue; }
             if (issues is null)
             {
                 issues = await FactoryIssues();
