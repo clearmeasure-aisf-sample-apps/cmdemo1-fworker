@@ -419,3 +419,103 @@ $SagaScenarios['saga: adoption: a start with v1 items in flight adopts them (the
         foreach ($n in $items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
     }
 }
+
+# ---- V1.1: the admission (v2 only) -----------------------------------------------------------------------------------------------------------------------------------------------------------------
+# docs/design/fworker-wolverine-implementation.md "Revision 2026-11-01 (v2 only)", row V1.1: every open card in a step column has a saga, whoever put it there. After every pass of the board reconciler the admission starts the saga of a
+# card that has none: the one at the step of its column when the card has no state comment (a card a person moves, an item whose start was lost), v1's mapping when it has one (the scenario 'adoption: a start' and AdmissionTests).
+# Replenish starts the saga of the item it creates itself, in the pass that creates it. v1 has neither (its sweep runs these items), so both scenarios are v2 only. The reconciler is set to its fastest pass (30 s) in the configuration of the scenario.
+function Adm-Park([int[]]$Items) {
+    foreach ($n in $Items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
+}
+# the history of the item's saga: "action reason reason ..." for each decision
+function Adm-History([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return '' }; (@($v.history | ForEach-Object { "$($_.action) $(@($_.reasons) -join ' ')" }) -join ' | ') }
+function Adm-Status { try { return (Invoke-RestMethod "$(Get-GatewayBase)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5).v2.admission } catch { return $null } }
+
+$SagaScenarios['saga: admission: a replenished item starts its saga in the pass that creates it, at Technical Design, and the admission has counted its passes'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1''s sweep runs a replenished item (suite keeper)' $true; return }
+    Saga-NumbersAbove 120
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $items = @()
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        $cfg.keeper.replenish = @{ enabled = $true; maxPerDay = 2; targetOpen = 4 }
+        if (-not $cfg.ContainsKey('recurringJobs')) { $cfg.recurringJobs = @{} }
+        $cfg.recurringJobs.boardReconcilerSeconds = 30
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        # no owner session is left to be offered the items
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        # an item that reached Done today, as v1 and v2 leave one: closed, with merge.done_at in its state comment
+        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+        $d = New-Item-Fake 'Admission finished' 'Done in production.' $OwnerLabels 'Done'
+        $items += $d
+        $state = @{ item = $d; merge = @{ sha = 'abc1234'; merged_at = (Get-Date).ToUniversalTime().ToString('o'); done_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = $null } }
+        $cbody = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+        [void](Invoke-RestMethod "$gh/issues/$d/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $cbody } | ConvertTo-Json))
+        [void](Invoke-RestMethod "$gh/issues/$d" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
+        Restart-Gateway
+        Check 'the Wolverine host runs' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        $made = { @((Get-FakeState).issues | Where-Object { "$($_.body)" -match '<!-- keeper-replenish -->' -and "$($_.body)" -match "work item #$d " }) }
+        $created = Wait-Until -Seconds 150 { @(& $made).Count -eq 1 -and @(& $made)[0].column -eq 'Technical Design' }
+        Check "Replenish creates one item for the finished #$d and places it in Technical Design" $created ((Get-FakeState).issues | ForEach-Object { "#$($_.number) $($_.column)" } | Out-String)
+        if (-not $created) { return }
+        $m = [int]@(& $made)[0].number
+        $items += $m
+        $started = Wait-Until -Seconds 90 { $null -ne (Saga-View $m) }
+        Check "#$m has a saga" $started "view $((Saga-View $m) | ConvertTo-Json -Compress -Depth 4)"
+        if (-not $started) { return }
+        $v = Saga-View $m
+        Check "the saga of #$m is on the feature plan, at Design, and was started by Replenish (source replenish), not adopted" ("$($v.step)" -eq 'Design' -and "$($v.plan)" -eq 'feature' -and (Adm-History $m) -match 'started replenish' -and (Adm-History $m) -notmatch 'adopted') "view $($v | ConvertTo-Json -Compress -Depth 4); history $(Adm-History $m)"
+        Check "the card of #$m is still in Technical Design" ((Saga-Col $m) -eq 'Technical Design') "column $(Saga-Col $m)"
+        # a pass of the board reconciler and its admission after that: nothing is started twice
+        $passes = [int](Adm-Status).passes
+        $more = Wait-Until -Seconds 90 { $s = Adm-Status; $null -ne $s -and [int]$s.passes -gt $passes }
+        $s = Adm-Status
+        Check 'the admission ran again after a later pass of the board reconciler (v2.admission.passes)' $more ($s | ConvertTo-Json -Compress -Depth 4)
+        Check "and started nothing for #$m (one decision 'started', v2.admission.started 0)" ((@(Saga-Actions $m) -eq 'started').Count -eq 1 -and [int]$s.started -eq 0 -and [int]$s.errors -eq 0) "#${m}: $((Saga-Actions $m) -join ','); $($s | ConvertTo-Json -Compress -Depth 4)"
+    } finally {
+        Adm-Park $items
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    }
+}
+
+$SagaScenarios['saga: admission: a card a person moves from Todo into Development gets a saga that begins at Develop, and a card in Todo gets none'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1''s sweep runs the card a person moves (suites auto and owner)' $true; return }
+    Saga-NumbersAbove 140
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $items = @()
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        if (-not $cfg.ContainsKey('recurringJobs')) { $cfg.recurringJobs = @{} }
+        $cfg.recurringJobs.boardReconcilerSeconds = 30
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        # no owner session: the intake has no free slot, so it pulls nothing and the card stays where the person puts it
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        $stay = New-Item-Fake 'Admission stays in Todo' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $moved = New-Item-Fake 'Admission moved by a person' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $items += $stay, $moved
+        Restart-Gateway
+        Check 'the Wolverine host runs' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        $passes = Wait-Until -Seconds 120 { $s = Adm-Status; $null -ne $s -and [int]$s.passes -ge 1 }
+        Check 'the admission has made a pass (v2.admission.passes)' $passes ((Adm-Status) | ConvertTo-Json -Compress -Depth 4)
+        Check "neither card has a saga while both are in Todo" ($null -eq (Saga-View $stay) -and $null -eq (Saga-View $moved)) "views $((Saga-View $stay) | ConvertTo-Json -Compress -Depth 3) / $((Saga-View $moved) | ConvertTo-Json -Compress -Depth 3)"
+        # the person moves the card into Development
+        [void](Fake 'move' @{ number = $moved; column = 'Development' })
+        $admitted = Wait-Until -Seconds 150 { $null -ne (Saga-View $moved) }
+        Check "the card moved into Development gets a saga within the next passes" $admitted "view $((Saga-View $moved) | ConvertTo-Json -Compress -Depth 4); $((Adm-Status) | ConvertTo-Json -Compress -Depth 4)"
+        if (-not $admitted) { return }
+        $v = Saga-View $moved
+        # (v1's sweep may have written a state comment for the card before the admission's pass: then the admission adopts it, with the same step; both are the rule)
+        Check "the saga begins at Develop on the feature plan, started by the admission from the board or adopted from the state comment v1 wrote" ("$($v.step)" -eq 'Develop' -and "$($v.plan)" -eq 'feature' -and (Adm-History $moved) -match '(started board|adopted)') "view $($v | ConvertTo-Json -Compress -Depth 4); history $(Adm-History $moved)"
+        Check "the card stays in Development" ((Saga-Col $moved) -eq 'Development') "column $(Saga-Col $moved)"
+        Check "the card left in Todo has still no saga" ($null -eq (Saga-View $stay)) ((Saga-View $stay) | ConvertTo-Json -Compress -Depth 3)
+        $s = Adm-Status
+        Check 'the status counts the start or the adoption' (([int]$s.started + [int]$s.adopted) -ge 1 -and [int]$s.errors -eq 0) ($s | ConvertTo-Json -Compress -Depth 4)
+    } finally {
+        Adm-Park $items
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    }
+}

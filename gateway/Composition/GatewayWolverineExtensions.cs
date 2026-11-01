@@ -163,12 +163,29 @@ static class GatewayWolverineExtensions
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever
                     jobs.Add(RecurringJobSlots.IngressDedupPurge, _ => { dedup.Purge(IngressDedupRetention); return Task.CompletedTask; });
                     // W4.3: the board reconciler publishes what the board shows into the inbox as source "poll", the message a webhook sends. W9.10g: its memory is in SQL (BoardSeen) and its GitHub cost is measured (status v2.reconciler)
-                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable, seen: new Fworker.Workflows.Reconcilers.SqlBoardSeenStore(() => ItemMergedWiring.Open(cs)), interval: intervals.BoardReconciler) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, reconcile);
+                    var admissionLogged = 0;   // (the admission is logged when its counts moved, not at every pass)
+                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable, seen: new Fworker.Workflows.Reconcilers.SqlBoardSeenStore(() => ItemMergedWiring.Open(cs)), interval: intervals.BoardReconciler) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, async ct =>
+                    {
+                        await reconcile(ct);
+                        // V1.1: after every pass the cards in a step column that have no saga get one (Admission; it waits for the adoption of the term). `adoption` is made below, before the first run.
+                        if (adoption?.Admission is { } admission && c.BoardReconciler is { } passed)
+                        {
+                            try { var did = await admission.Run(passed.LastCards, ct); var moved = admission.Report.Started + admission.Report.Adopted + admission.Report.Reopened + admission.Report.Errors; if (did is not ("not-leader" or "waiting: adoption") && !did.StartsWith("off") && moved != admissionLogged) { admissionLogged = moved; Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["admission"] = admission.Report.ToJson() }.ToJsonString()); } }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception e) { Console.Error.WriteLine($"admission: {e.GetType().Name}"); }
+                        }
+                    });
                     // W9.10g: the plant-wide steps of the sweep as jobs of the leader (PlantStepJobs.cs; the sweep leaves them out where this exists), and the retention prune
                     var restoredSince = DateTime.UtcNow;
+                    // V1.1: Replenish starts the saga of the item it creates, when the engine carries the plan (intake.v2Plans names it); else v1 runs the item as before
+                    Func<Fworker.Workflows.WorkItem.StartWorkItem, Task> StartOnReplenish = async m =>
+                    {
+                        if (!workItems.Intake.IsV2Plan(m.Plan)) return;
+                        if (!await host.PublishAsync(m)) throw new InvalidOperationException("the Wolverine host is not up");
+                    };
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
                     Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
-                    var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
+                    var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct, start: StartOnReplenish), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
                         () => plantRestored() && adoptionGate.Settled() is not null, c.Gateway.OwnerMode, excluded: () => adoptionGate.Excluded());   // (the plant-wide steps wait for the adoption of the term as the sweep does, and leave out what it could not fence)
                     jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
                     jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
@@ -272,7 +289,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; });   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), admission: () => adoption?.Admission.Report.ToJson(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; });   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

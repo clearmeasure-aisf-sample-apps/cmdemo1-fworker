@@ -69,7 +69,7 @@ sealed class ProjectedSequences(IProjectionVersions versions) : IProjectedSequen
 }
 
 /// <summary>What the gateway builds for the adoption: the runner (the run of one try), the job (when it runs) and the markers.</summary>
-sealed record AdoptionParts(AdoptionRunner Runner, AdoptionJob Job, IEngineMarkers Markers);
+sealed record AdoptionParts(AdoptionRunner Runner, AdoptionJob Job, IEngineMarkers Markers, Admission Admission);
 
 static class AdoptionWiring
 {
@@ -109,7 +109,11 @@ static class AdoptionWiring
         var runner = new AdoptionRunner(options, ports, gate: readoption);
         var node = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
         var job = new AdoptionJob(runner, markers, () => c.Leader.MayAct, () => c.Leader.ClaimEpoch, () => restored() && !c.GitHubBudget.Low().Low, node, readoption: readoption);
-        return new AdoptionParts(runner, job, markers);
+        // V1.1: the admission, after every pass of the board reconciler: the cards in a step column with no saga get one (it waits for the adoption of the term). It starts at most intake.wipLimit sagas of its own per pass.
+        var intake = parts.Intake;
+        var admitting = new AdmissionConfig(intake.FactoryLabel, intake.RivalLabel, intake.DemoLabel, Fworker.Workflows.Keeper.FactoryRules.EnvLabelOf(root, env), settings.DocsMarker, mapping.Policy, Math.Max(1, intake.WipLimit));
+        var admission = new Admission(options, admitting, runner, ports, () => c.Leader.MayAct, () => job.IsDone(c.Leader.ClaimEpoch), async (id, ct) => (await issues.ReadIssue(id, ct))?.Closed == true);
+        return new AdoptionParts(runner, job, markers, admission);
     }
 
     // octopus.url, .space, .project and OCTOPUS_API_KEY, as the watcher reads them; null when any is missing (the Sign-offs are then not adopted)

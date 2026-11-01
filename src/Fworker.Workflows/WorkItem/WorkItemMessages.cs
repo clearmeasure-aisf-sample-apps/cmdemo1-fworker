@@ -23,10 +23,11 @@ public interface IKeyedInput { string Key { get; } }
 
 /// <summary>
 /// Starts the item's saga: the first generation, or, for an item whose last instance completed, the next. A start for an item that is open does nothing (the answer says so). <paramref name="Plan"/> names
-/// the plan (the docs plan for an item the intake knows to be docs-only); without one the hotfix flag chooses between the hotfix and the feature plan.
+/// the plan (the docs plan for an item the intake knows to be docs-only); without one the hotfix flag chooses between the hotfix and the feature plan. V1.1: <paramref name="Step"/> is the step the item
+/// begins at, for a card that stands in the column of a step already (a person moved it there, or the replenish placed it): the plan's first step when null or when the plan has no such step.
 /// </summary>
 [MessageIdentity("workitem.start")]
-public sealed record StartWorkItem(ItemId Item, string Source, string? Plan = null, bool Hotfix = false) : WorkItemInput(Item);
+public sealed record StartWorkItem(ItemId Item, string Source, string? Plan = null, bool Hotfix = false, StepKind? Step = null) : WorkItemInput(Item);
 
 /// <summary>A closed item was reopened (a person moved it back, or a delivered item was rolled back): a completed saga starts the next generation on the plan it had; an open one ignores it.</summary>
 [MessageIdentity("workitem.reopen")]

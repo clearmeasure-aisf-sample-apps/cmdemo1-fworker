@@ -21,6 +21,8 @@ public sealed class PlantStepsTests
         public readonly KeeperWorld World = new();
         public readonly InMemoryClaimOrphans Orphans = new();
         public bool May = true;
+        public bool StartFails;
+        public readonly List<Fworker.Workflows.WorkItem.StartWorkItem> Started = [];
         public PlantSteps Steps;
         public VerbContext Cx;
 
@@ -29,7 +31,8 @@ public sealed class PlantStepsTests
             var r = FactoryRules.From(JsonNode.Parse(rules), n => n == "FACTORY_ENVIRONMENT" ? "tdd" : null);
             World.Rules = r;
             Cx = new VerbContext(r, World, World, World, World, () => World.Clock);
-            Steps = new PlantSteps(Cx, World, Orphans, new PlantStepSettings(lease, replenish ?? ReplenishSettings.Off), () => May);
+            Steps = new PlantSteps(Cx, World, Orphans, new PlantStepSettings(lease, replenish ?? ReplenishSettings.Off), () => May,
+                m => StartFails ? throw new InvalidOperationException("the host is not up") : Task.Run(() => Started.Add(m)));
         }
 
         public KeeperWorld.Issue Add(int n, string title, string column = "Technical Design", bool open = true, params string[] labels)
@@ -254,6 +257,28 @@ public sealed class PlantStepsTests
         Assert.Equal(1, r.World.IntakeLocks);
         Assert.Empty((await r.Steps.Replenish(0, 1)).Replenish!["created"]!.AsArray());   // the next pass does not repeat it
         Assert.Equal(1, r.World.IntakeLocks);   // a pass that creates nothing takes no lock
+    }
+
+    [Fact]
+    public async Task Replenish_StartsTheSagaOfTheItemItCreated_AtDesign_AfterTheCardIsInTheKeepersColumn()
+    {
+        var r = new Rig(On);
+        r.Finished(70);
+        var res = await r.Steps.Replenish(0, 1);
+        var made = Assert.Single(res.Replenish!["created"]!.AsArray()).GetValue<int>();
+        var start = Assert.Single(r.Started);
+        Assert.Equal((made, "replenish", "feature", Fworker.Workflows.WorkItem.StepKind.Design), (start.Item.Number, start.Source, start.Plan, start.Step));
+        Assert.Equal("acme/work", start.Item.Repository.ToString());
+    }
+
+    [Fact]
+    public async Task Replenish_AStartThatFails_IsNoFailureOfTheReplenishment()
+    {
+        var r = new Rig(On) { StartFails = true };
+        r.Finished(70);
+        var res = await r.Steps.Replenish(0, 1);
+        Assert.Single(res.Replenish!["created"]!.AsArray());
+        Assert.Empty(res.Errors);
     }
 
     [Fact]
