@@ -27,8 +27,8 @@ namespace Internal.Generated.WolverineHandlers
             // The actual message body
             var workItemDecided = (Fworker.Workflows.WorkItem.WorkItemDecided)context.Envelope.Message;
 
-            System.Diagnostics.Activity.Current?.SetTag("message.handler", "MergeFactsHandler, Fworker.Workflows.WorkItem.WorkItemHistoryHandler, DocsProjectionHandler, SagaStateProjectionHandler, FeatureNoticeHandler, Fworker.Workflows.Incident.IncidentRouting");
-            System.Diagnostics.Activity.Current?.SetTag("handler.type", "MergeFactsHandler, Fworker.Workflows.WorkItem.WorkItemHistoryHandler, DocsProjectionHandler, SagaStateProjectionHandler, FeatureNoticeHandler, Fworker.Workflows.Incident.IncidentRouting");
+            System.Diagnostics.Activity.Current?.SetTag("message.handler", "MergeFactsHandler, Fworker.Workflows.WorkItem.WorkItemHistoryHandler, DocsProjectionHandler, IssueCloseHandler, SagaStateProjectionHandler, FeatureNoticeHandler, Fworker.Workflows.Incident.IncidentRouting");
+            System.Diagnostics.Activity.Current?.SetTag("handler.type", "MergeFactsHandler, Fworker.Workflows.WorkItem.WorkItemHistoryHandler, DocsProjectionHandler, IssueCloseHandler, SagaStateProjectionHandler, FeatureNoticeHandler, Fworker.Workflows.Incident.IncidentRouting");
             
             // The actual message execution
             var outgoing1 = MergeFactsHandler.Handle(workItemDecided);
@@ -43,7 +43,11 @@ namespace Internal.Generated.WolverineHandlers
 
             
             // The actual message execution
-            var outgoing2 = SagaStateProjectionHandler.Handle(workItemDecided);
+            var outgoing2 = IssueCloseHandler.Handle(workItemDecided, _docsProjection);
+
+            
+            // The actual message execution
+            var outgoing3 = SagaStateProjectionHandler.Handle(workItemDecided);
 
             
             // The actual message execution
@@ -51,7 +55,7 @@ namespace Internal.Generated.WolverineHandlers
 
             
             // The actual message execution
-            var outgoing3 = await Fworker.Workflows.Incident.IncidentRouting.Handle(workItemDecided, _incidentRouter, cancellation).ConfigureAwait(false);
+            var outgoing4 = await Fworker.Workflows.Incident.IncidentRouting.Handle(workItemDecided, _incidentRouter, cancellation).ConfigureAwait(false);
 
             
             // Outgoing, cascaded message
@@ -64,6 +68,10 @@ namespace Internal.Generated.WolverineHandlers
             
             // Outgoing, cascaded message
             await context.EnqueueCascadingAsync(outgoing3).ConfigureAwait(false);
+
+            
+            // Outgoing, cascaded message
+            await context.EnqueueCascadingAsync(outgoing4).ConfigureAwait(false);
         }
     }
 

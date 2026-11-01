@@ -1,3 +1,4 @@
+using Fworker.Contracts.Commands;
 using Fworker.Domain;
 using Fworker.Workflows.WorkItem;
 using Xunit;
@@ -252,6 +253,49 @@ public class DocsPlanTests
         Assert.Null(fx.State.MergeRequest);
         // the merge the delivery train derives afterwards finds no open instance and ends quietly
         Assert.Equal(WorkItemOutcome.NotFound, (await fx.Send(new MergeSeen(Item, "merged|" + Merged, Merged, 11))).Decision.Outcome);
+    }
+
+    // ---- the issue is closed at Done (v1's settle does it; item #556 stayed open on tdd after a person's merge) ----------------------------------------------------
+
+    static CloseWorkItemIssue? Close(IEnumerable<WorkItemDecided> decisions, bool carriesFeature = false) =>
+        decisions.Select(d => WorkItemIssueClose.For(d, carriesFeature)).SingleOrDefault(c => c is not null);
+
+    [Fact]
+    public async Task TheMergeOfTheSaga_ClosesTheIssueOnce_ByTheKeyOfTheItemAndGeneration()
+    {
+        var fx = await AtMerge();
+        var r = await fx.Attempted(new MergeResult(MergeResultKind.Merged, "merged", Commit: Merged));
+        var close = Assert.IsType<CloseWorkItemIssue>(Close(r.Decisions));
+        Assert.Equal((Item, 1, CloseWorkItemIssue.KeyFor(Item, 1)), (close.Item, close.Generation, close.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task TheMergeOfAPerson_ClosesTheIssueToo_WhereverTheItemWas()
+    {
+        // while it is validated, with the PASS recorded and the merge asked of the gateway, and before the pull request existed: the merge fact completes the docs item whichever step it was on
+        var merging = await AtMerge();
+        var seen = await merging.Send(new MergeSeen(Item, "merged|" + Merged, Merged, 11));
+        Assert.Equal(WorkItemStatus.Completed, merging.State.Status);
+        Assert.Equal(CloseWorkItemIssue.KeyFor(Item, 1), Assert.IsType<CloseWorkItemIssue>(Close(seen.Decisions)).IdempotencyKey);
+
+        var early = new SagaFixture();
+        await early.Start(plan: "docs");
+        var earlySeen = await early.Send(new MergeSeen(Item, "merged|" + Merged, Merged, 11));
+        Assert.Equal(WorkItemStatus.Completed, early.State.Status);
+        Assert.NotNull(Close(earlySeen.Decisions));
+    }
+
+    [Fact]
+    public async Task OnlyTheCompletion_ClosesTheIssue_NotTheMergeDecision_NotAHandBack_NorAPlanTheEngineDoesNotCarry()
+    {
+        var fx = await AtMerge();
+        var r = await fx.Attempted(new MergeResult(MergeResultKind.Merged, "merged", Commit: Merged));
+        Assert.Null(WorkItemIssueClose.For(r.Decisions.Single(d => d.Action == WorkItemActions.Merged), true));
+        // a code plan's completion is closed only where the engine carries the code plans (the card follows the same rule)
+        var completed = r.Decisions.Single(d => d.Action == WorkItemActions.Completed);
+        Assert.Null(WorkItemIssueClose.For(completed with { Plan = "feature" }, carriesFeature: false));
+        Assert.NotNull(WorkItemIssueClose.For(completed with { Plan = "feature" }, carriesFeature: true));
+        Assert.Null(WorkItemIssueClose.For(completed with { Action = WorkItemActions.HandedBack }, carriesFeature: true));
     }
 
     [Fact]

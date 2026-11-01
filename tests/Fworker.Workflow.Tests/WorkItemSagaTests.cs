@@ -325,7 +325,9 @@ public class WorkItemSagaTests
         var fx = new SagaFixture(WorkItemPolicy.Default with { FinalEnvironment = "tdd" });
         await fx.Start(); await fx.Merged();
         var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
-        Assert.Equal([WorkItemActions.Completed], (await fx.Send(window)).Decisions.Select(d => d.Action));
+        var ended = await fx.Send(window);
+        Assert.Equal([WorkItemActions.Completed], ended.Decisions.Select(d => d.Action));
+        Assert.NotNull(WorkItemIssueClose.For(ended.Decisions.Single(), carriesFeature: true));   // (v1 closes a delivered item at Done)
     }
 
     [Fact]
@@ -352,6 +354,8 @@ public class WorkItemSagaTests
         Assert.Equal([WorkItemActions.SettleCapExpired, WorkItemActions.Completed], end.Decisions.Select(d => d.Action));
         Assert.Contains("cap", end.Decisions[0].Reasons[0]);
         Assert.Equal("1.0.5", end.Decisions[0].Reasons[1]);   // (the release that stayed behind)
+        // v1 has no settle cap and closes the issue only when the item is delivered: the completion at the cap closes nothing
+        Assert.All(end.Decisions, d => Assert.Null(WorkItemIssueClose.For(d, carriesFeature: true)));
     }
 
     [Fact]

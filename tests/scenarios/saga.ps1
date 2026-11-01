@@ -115,6 +115,16 @@ function Saga-CheckMerged($x, [string]$Plan) {
         Check 'v1: the merge is recorded on the item once (the rule script''s comment and merge record)' ((Wait-Until -Seconds 30 { (Saga-MergeComments $x.n $x.pr) -eq 1 })) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
         Check 'v1: the state comment holds the merge record' ((Pm-State $x.n).ContainsKey('merge')) ((Pm-State $x.n) | ConvertTo-Json -Compress -Depth 4)
     }
+    # The issue is closed when the docs item is done, on both engines (v1's settle closes it; the pull request has no closing keyword, so nothing else does). The golden files held this write as a tail line that
+    # v2-differences.txt removed for v2, so a v2 that never closed the issue passed the comparison: the state of the issue is asserted here, and the write is the gateway's (CloseWorkItemIssue), once.
+    if ($Plan -eq 'docs') {
+        $closed = Wait-Until -Seconds 90 { $i = Get-FakeIssue $x.n; $null -ne $i -and -not $i.open }
+        Check "the issue of #$($x.n) is closed when the docs item is done" $closed "issue open: $((Get-FakeIssue $x.n).open), column $(Saga-Col $x.n)"
+        if ($script:GoldenEngine -eq 'v2' -and $null -ne ($w2 = Saga-Writes)) {
+            $closes = @(Saga-WritesOf $w2 'gateway' 'PATCH' "/issues/$($x.n)$" | Where-Object { "$(Get-RecField $_ 'body')" -match 'closed' })
+            Check 'v2: the close is one write of the gateway, none is the rule script''s' ($closes.Count -eq 1 -and @(Saga-WritesOf $w2 'rule' 'PATCH' "/issues/$($x.n)$" | Where-Object { "$(Get-RecField $_ 'body')" -match 'closed' }).Count -eq 0) "gateway closes: $($closes.Count)"
+        }
+    }
 }
 
 $SagaScenarios = [ordered]@{}
