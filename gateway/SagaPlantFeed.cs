@@ -58,6 +58,7 @@ sealed class SagaPlantFeed(V2Ownership ownership, Func<int, string?> ownerOf, Fu
     {
         var owned = new JsonObject(); var owners = new JsonObject(); var pins = new JsonObject(); var priorities = new JsonObject(); var runtimes = new JsonObject(); var profiles = new JsonObject();
         var parks = new JsonArray(); var queue = new JsonArray(); var holds = new JsonArray();
+        var parkedAt = ParkedSince();
         foreach (var s in ownership.States.OrderBy(s => s.ItemId.Number))
         {
             if (!s.IsOpen) continue;
@@ -77,12 +78,23 @@ sealed class SagaPlantFeed(V2Ownership ownership, Func<int, string?> ownerOf, Fu
                 owned[key] = new JsonObject { ["holder"] = holder, ["column"] = column, ["lease_until"] = s.LeaseDue is null ? null : Iso(s.LeaseDue), ["heartbeat"] = null, ["parked"] = s.Parked };
             }
             if (s.Parked)
-                parks.Add(new JsonObject { ["item"] = n, ["column"] = column, ["code"] = SweepParks.CodeOf(s.ParkReason), ["since"] = null, ["until"] = s.ParkUntil is null ? null : Iso(s.ParkUntil) });
+                parks.Add(new JsonObject { ["item"] = n, ["column"] = column, ["code"] = SweepParks.CodeOf(s.ParkReason), ["since"] = parkedAt.TryGetValue(n, out var since) ? Iso(since) : null, ["until"] = s.ParkUntil is null ? null : Iso(s.ParkUntil) });
             // the Deliver step with a merge: waiting for the delivery train. The release is the newest the item reached (tdd, uat, prod), or none yet.
             if (s.Status == WorkItemStatus.Open && s.Step == StepKind.Deliver && s.MergeCommit.Length > 0 && !s.Parked)
                 queue.Add(new JsonObject { ["item"] = n, ["release"] = ReleaseOf(s), ["since"] = null });
         }
         return new JsonObject { ["owned"] = owned, ["owners"] = owners, ["pins"] = pins, ["priorities"] = priorities, ["runtimes"] = runtimes, ["profiles"] = profiles, ["parks"] = parks, ["release_queue"] = queue, ["holds"] = holds };
+    }
+
+    // V1.4: when each parked item was parked, as v1's sweep said it (the unowned list of the status shows it): the newest "parked" decision of the item's history, else its last update, from the last read of the views
+    // (null before the first read: the plant then has no time for the park, as before)
+    Dictionary<int, DateTimeOffset> ParkedSince()
+    {
+        var since = new Dictionary<int, DateTimeOffset>();
+        if (views?.Latest?.Set is not { } set) return since;
+        foreach (var v in set.Items)
+            if (v.IsOpen && v.Parked) since[v.Number] = v.History.FirstOrDefault(h => h.Action == WorkItemActions.Parked)?.At ?? v.UpdatedAt;
+        return since;
     }
 
     static string ReleaseOf(WorkItemState s) => new[] { "prod", "uat", "tdd" }.Select(e => s.Delivered.GetValueOrDefault(e, "")).FirstOrDefault(r => r.Length > 0) ?? "";

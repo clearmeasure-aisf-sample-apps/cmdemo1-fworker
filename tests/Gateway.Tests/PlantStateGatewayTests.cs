@@ -335,6 +335,18 @@ public sealed class PlantStateGatewayTests
     }
 
     [Fact]
+    public async Task AParkedItemsFeedEntryCarriesSinceWhenItWasParked_AfterTheViewsWereRead()
+    {
+        var source = new Source { Set = () => new WorkItemViewSet([Item("acme/orders", 13, parked: true, parkReason: "merge-blocked: checks red", history: [Line(DateTimeOffset.UtcNow.AddMinutes(-50), WorkItemActions.Parked, "Merge")])], false) };
+        var ownership = await Owned(State(13, StepKind.Merge, s => { s.Parked = true; s.ParkReason = "merge-blocked: checks red"; }));
+        var feed = new SagaPlantFeed(ownership, _ => null, _ => null, Rules, new V2ItemViews(source));
+        Assert.Null(Assert.Single(feed.Build()["parks"]!.AsArray())!["since"]);   // (before the first read of the views the time is not known, as it was not)
+        await feed.RefreshViewsAsync();
+        var since = DateTime.Parse(Assert.Single(feed.Build()["parks"]!.AsArray())!["since"]!.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal);
+        Assert.InRange((DateTime.UtcNow - since).TotalMinutes, 49, 52);
+    }
+
+    [Fact]
     public async Task TheReleaseCheck_CountsAMergeTheSagaAskedFor_AndASlotWhoseSessionThePlantDoesNotHoldYet()
     {
         var ownership = await Owned(
