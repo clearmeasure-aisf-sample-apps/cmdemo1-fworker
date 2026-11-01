@@ -104,7 +104,8 @@ $CopilotScenarios = [ordered]@{
         $row = @((Get-Plant).plant.workers | Where-Object { $_.name -like "cop-$n-*" })
         Check 'its worker shows type copilot-cloud, mode api' ($row.Count -eq 1 -and $row[0].mode -eq 'api' -and $row[0].type -eq 'copilot-cloud' -and $row[0].execution -eq $t.id) ($row | ConvertTo-Json -Compress -Depth 4)
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
-        Check 'session_end ends the task for the runtime' (Wait-Until -Seconds 15 { (Cop-Status).running -eq 0 })
+        # the end of this task, not the runtime's count: the end re-offers the open item and the runtime launches a second execution for it (below), so running can be 0 and 1 again between two polls
+        Check 'session_end ends the task for the runtime' (Wait-Until -Seconds 15 { @((Cop-Status).executions | Where-Object { $_.execution -eq $t.id }).Count -eq 0 })
         Check 'status: last[] carries the url' (Wait-Until -Seconds 15 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id -and $_.url -eq $link }).Count -eq 1 })
         Check 'the launch comment on the issue names the task and links its Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*started **cop-$n-* (task *$($t.id)*). Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")
         Check 'the accepted comment links the Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*cop-$n-* accepted*Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")
