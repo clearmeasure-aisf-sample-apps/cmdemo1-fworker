@@ -277,7 +277,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                     }
                 // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on); not on a
                 // low budget, and only after a full sweep
-                if (baseWatch != null && scope == null && !low) _ = Task.Run(baseWatch.AfterSweep);
+                if (baseWatch != null && scope == null && !low && !PlantJobs) _ = Task.Run(baseWatch.AfterSweep);   // (V1.4: where the engine acts the job base-watch-fallback does it)
                 Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{j["offers"]!.AsArray().Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count},\"kind\":\"{kind}\",\"items\":{items?.Count ?? -1},\"lowBudget\":{(low ? "true" : "false")},\"elapsedMs\":{(j["elapsed_ms"]?.ToString() ?? "null")},\"steps\":{(j["steps"]?.ToJsonString() ?? "null")},\"skipped\":{(j["skipped"]?.ToJsonString() ?? "[]")}}}}}");
             }
             else

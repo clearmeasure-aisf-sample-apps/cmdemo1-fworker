@@ -10,7 +10,7 @@ sealed record RecurringJobSlot(string Name, TimeSpan Every, TimeSpan? First = nu
 /// The intervals of the recurring jobs that are not fixed (W9.10g). The board reconciler runs every 2 minutes (owner default of 2026-10-30, instead of a projects_v2_item webhook; recurringJobs.boardReconcilerSeconds, 30 to 600). The plant-wide
 /// steps run at the sweep's own interval (FACTORY_SWEEP_SECONDS, 180; not faster than every 5 seconds) as they did inside it, the QC sync at most every minute (a sweep asked for by a webhook ran after 60 s at the earliest), and the retention prune once a day.
 /// </summary>
-sealed record RecurringJobIntervals(TimeSpan BoardReconciler, TimeSpan PlantSteps, TimeSpan QcSync, TimeSpan Retention)
+sealed record RecurringJobIntervals(TimeSpan BoardReconciler, TimeSpan PlantSteps, TimeSpan QcSync, TimeSpan Retention, TimeSpan BaseWatch = default)
 {
     public static RecurringJobIntervals Default => From(null, 180);
 
@@ -20,7 +20,7 @@ sealed record RecurringJobIntervals(TimeSpan BoardReconciler, TimeSpan PlantStep
         int Num(string key, int fallback, int min, int max) => block?[key] is { } n && int.TryParse(n.ToString(), out var v) ? Math.Clamp(v, min, max) : fallback;
         // (never faster than every 5 seconds: the Tier 1 tests sweep every 2 seconds, and five script passes every 2 seconds on top of the sweep would load a CI machine for nothing)
         var plant = Num("plantStepsSeconds", Math.Max(5, sweepSeconds), 5, 3600);
-        return new(TimeSpan.FromSeconds(Num("boardReconcilerSeconds", 120, 30, 600)), TimeSpan.FromSeconds(plant), TimeSpan.FromSeconds(Math.Min(plant, Num("qcSyncSeconds", 60, 1, 3600))), TimeSpan.FromHours(Num("retentionHours", 24, 1, 168)));
+        return new(TimeSpan.FromSeconds(Num("boardReconcilerSeconds", 120, 30, 600)), TimeSpan.FromSeconds(plant), TimeSpan.FromSeconds(Math.Min(plant, Num("qcSyncSeconds", 60, 1, 3600))), TimeSpan.FromHours(Num("retentionHours", 24, 1, 168)), TimeSpan.FromSeconds(Num("baseWatchSeconds", 300, 5, 3600)));
     }
 }
 
@@ -28,6 +28,8 @@ sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
 {
     public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks", SagaRearm = "saga-rearm", LedgerPurge = "ledger-purge", IncidentHealth = "incident-health", ItemSteps = "item-steps", CapacityReap = "capacity-reap", Adoption = "adoption";
     // W9.10g: the plant-wide steps of the sweep, the retention prune
+    // V1.4: what only the sweep did (the gap renewal of the owners' claims, the base update fallback after a missed webhook, the flag of a Release Queue card without a merge record)
+    public const string GapRenew = "gap-renew", BaseWatchFallback = "base-watch-fallback", ReleaseQueueFlag = "release-queue-flag";
     public const string ClaimRefReap = "claim-ref-reap", BoardGuard = "board-guard", QcSync = "qc-sync", Replenish = "replenish", BacklogLow = "backlog-low", RetentionPrune = "retention-prune";
     public IReadOnlyList<RecurringJobSlot> Slots { get; } = slots;
     // W7.3: the watcher of the checks of the feature items runs every minute too, and is filled only when the engine carries the feature plan
@@ -38,7 +40,8 @@ sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
         TimeSpan Soon(TimeSpan every) => TimeSpan.FromSeconds(Math.Min(every.TotalSeconds, 3));   // the first run of a plant-wide step: as soon as the leader may act (the job itself waits, a little, for the restore and the first read of the saga's items)
         return new([new(BoardReconciler, i.BoardReconciler), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6)), new(IncidentHealth, TimeSpan.FromMinutes(1)), new(ItemSteps, TimeSpan.FromMinutes(1)),
             new(ClaimRefReap, i.PlantSteps, Soon(i.PlantSteps)), new(BoardGuard, i.PlantSteps, Soon(i.PlantSteps)), new(QcSync, i.QcSync, Soon(i.QcSync)), new(Replenish, i.PlantSteps, Soon(i.PlantSteps)), new(BacklogLow, i.PlantSteps, Soon(i.PlantSteps)),
-            new(RetentionPrune, i.Retention, TimeSpan.FromMinutes(10)), new(CapacityReap, TimeSpan.FromMinutes(5)), new(Adoption, TimeSpan.FromMinutes(1), Soon(TimeSpan.FromMinutes(1)))]);
+            new(RetentionPrune, i.Retention, TimeSpan.FromMinutes(10)), new(CapacityReap, TimeSpan.FromMinutes(5)), new(Adoption, TimeSpan.FromMinutes(1), Soon(TimeSpan.FromMinutes(1))),
+            new(GapRenew, TimeSpan.FromMinutes(1), Soon(TimeSpan.FromMinutes(1))), new(BaseWatchFallback, i.BaseWatch == default ? TimeSpan.FromMinutes(5) : i.BaseWatch, Soon(i.BaseWatch == default ? TimeSpan.FromMinutes(5) : i.BaseWatch)), new(ReleaseQueueFlag, i.PlantSteps, Soon(i.PlantSteps))]);
     }
 
     /// <summary>Adds the slots and the registry of their jobs to the host's services and the queue the runs travel on. Returns the slots registered.</summary>

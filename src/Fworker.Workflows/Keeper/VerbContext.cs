@@ -9,13 +9,15 @@ namespace Fworker.Workflows.Keeper;
 /// The helpers that the keeper and the manager verbs share, each the port of a helper of the rule scripts of the same meaning: <c>Assert-Open</c>, <c>Add-Comment</c> and its session footer, <c>Find-ItemPr</c>,
 /// <c>Get-Park</c>, <c>Test-ClaimLive</c>, <c>Test-OwnedClaim</c>. One per process: it holds the rules, the ports and the clock.
 /// </summary>
-public sealed class VerbContext(FactoryRules rules, IKeeperGitHub github, IItemStateStore state, IVerbLocks locks, IKeeperSaga saga, Func<DateTime>? clock = null)
+public sealed class VerbContext(FactoryRules rules, IKeeperGitHub github, IItemStateStore state, IVerbLocks locks, IKeeperSaga saga, Func<DateTime>? clock = null, KeeperDailyCap? keeperCap = null)
 {
     public FactoryRules Rules { get; } = rules;
     public IKeeperGitHub GitHub { get; } = github;
     public IItemStateStore State { get; } = state;
     public IVerbLocks Locks { get; } = locks;
     public IKeeperSaga Saga { get; } = saga;
+    /// <summary>V1.4: the keeper's limit of new items in 24 hours; null where none is kept (a test, the verbs of the manager).</summary>
+    public KeeperDailyCap? KeeperCap { get; } = keeperCap;
     readonly Func<DateTime> clock = clock ?? (() => DateTime.UtcNow);
 
     /// <summary><c>Get-UtcNow</c>.</summary>

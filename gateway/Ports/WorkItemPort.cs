@@ -323,13 +323,13 @@ static class DocsOnlySettingsReader
 static class WorkItemWiring
 {
     /// <summary>The saga's parts on the database of the host. The docs-only test is D4's, with the settings of the configuration; the docs plan's rules are those of <see cref="DocsPlanSettingsReader"/>.</summary>
-    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null, IItemLock? locks = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null)
+    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null, IItemLock? locks = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null, Func<bool>? holdLeaseTimers = null)
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var root = c.Instance.Root;
         var settings = DocsPlanSettingsReader.From(root, env);
         var store = new SqlWorkItemStore(open);
-        var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy), readoption: readoption);
+        var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy), readoption: readoption, holdLeaseTimers: holdLeaseTimers);
         var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf, readoption) : null;
         var train = MergeTrainSettingsReader.From(root, w => Console.Error.WriteLine("merge train: " + w));
         var merge = new MergeTrainParts(new MergeTrainService(new SqlMergeTrainStore(open), train), new MergeTrainHistory(open), train);
