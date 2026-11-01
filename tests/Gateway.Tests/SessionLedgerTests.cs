@@ -181,6 +181,41 @@ public sealed class SessionLedgerTests
         Assert.NotEqual("", m.ExistingFor(7));
     }
 
+    // V1.3: a worker: pin that no connected session can honour (the bot re-pins items to the runtime worker that ran them; a worker that is gone or not connected) must not keep the slot waiting for ever
+    [Theory]
+    [InlineData("oct-1048-abc123", false)]   // a runtime worker that is not alive
+    [InlineData("alice", false)]             // a worker the plant does not know
+    [InlineData("oct-1048-abc123", true)]    // a runtime worker of another item that is connected: it takes only the item it was started for
+    public async Task APinThatNoConnectedSessionCanHonour_IsIgnored_AndTheSessionStartsOnTheSlot(string pin, bool registerRuntimeWorker)
+    {
+        var rt = new PlainRuntime(); var m = await Manager(rt);
+        var tickets = new List<RuntimeManager.Ticket>();
+        m.DispatchStart = t => { lock (tickets) tickets.Add(t); return Task.CompletedTask; };
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30) { Cursor = m };
+        m.Plant = plant;
+        if (registerRuntimeWorker) plant.Register(pin, "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0, runtime: "cursor-cloud");
+        var node = Offer(7, "s4", "cursor-cloud", "1.3"); node["pin"] = pin;
+        plant.PlanSagaOffers(new JsonArray(node), [7]);
+        await Until(() => { lock (tickets) return tickets.Count == 1; });
+        Assert.Equal((7, "s4"), (tickets[0].Item, tickets[0].Slot));
+    }
+
+    [Fact]
+    public async Task APinToAConnectedLocalSession_IsHonoured_NoRuntimeSessionIsStarted()
+    {
+        var rt = new PlainRuntime(); var m = await Manager(rt);
+        var started = 0;
+        m.DispatchStart = _ => { started++; return Task.CompletedTask; };
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30) { Cursor = m };
+        m.Plant = plant;
+        plant.Register("alice", "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0);
+        var node = Offer(7, "s4", "cursor-cloud", "1.3"); node["pin"] = "alice";
+        plant.PlanSagaOffers(new JsonArray(node), [7]);
+        await Task.Delay(150);
+        Assert.Equal(0, started);
+        Assert.Equal("", m.ExistingFor(7));
+    }
+
     [Fact]
     public async Task AnOfferWithNoSlot_IsRoutedAsBefore_TheLedgerIsNotInvolved()
     {

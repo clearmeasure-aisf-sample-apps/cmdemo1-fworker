@@ -18,22 +18,23 @@ public sealed class SessionStartPort
     readonly Func<IReadOnlyCollection<int>, List<JsonObject>> offersOf;
     readonly Action<JsonArray, IReadOnlyCollection<int>> plan;
     readonly Func<ItemId, CancellationToken, Task<string?>>? pinOf;
+    readonly Func<bool>? budgetLow;
 
     /// <summary>
     /// <paramref name="pinOf"/> (V1.3) reads the worker an item's <c>worker:</c> label pins it to, from the issue: the labels of the reconciler's cards (V2Ownership.PinOf) may be older than the label, and the offer made here is
     /// the first the plant sees of the item. A read that fails offers the item without the pin (the sweep's full pass repeats the offer with the cards' pins).
     /// </summary>
-    internal SessionStartPort(V2Ownership ownership, Func<Plant?> plant, Func<ItemId, CancellationToken, Task<string?>>? pinOf = null)
+    internal SessionStartPort(V2Ownership ownership, Func<Plant?> plant, Func<ItemId, CancellationToken, Task<string?>>? pinOf = null, Func<bool>? budgetLow = null)
     {
-        this.pinOf = pinOf;
+        this.pinOf = pinOf; this.budgetLow = budgetLow;
         refresh = ownership.RefreshAsync;
         offersOf = only => plant() is { } p ? ownership.OfferNodes(p.HasOwner, only) : [];
         plan = (nodes, items) => (plant() ?? throw new InvalidOperationException("the gateway has no plant yet")).PlanSagaOffers(nodes, items);
     }
 
     /// <summary>For a test: the three seams as given.</summary>
-    internal SessionStartPort(Func<CancellationToken, Task<bool>> refresh, Func<IReadOnlyCollection<int>, List<JsonObject>> offersOf, Action<JsonArray, IReadOnlyCollection<int>> plan, Func<ItemId, CancellationToken, Task<string?>>? pinOf = null)
-    { this.refresh = refresh; this.offersOf = offersOf; this.plan = plan; this.pinOf = pinOf; }
+    internal SessionStartPort(Func<CancellationToken, Task<bool>> refresh, Func<IReadOnlyCollection<int>, List<JsonObject>> offersOf, Action<JsonArray, IReadOnlyCollection<int>> plan, Func<ItemId, CancellationToken, Task<string?>>? pinOf = null, Func<bool>? budgetLow = null)
+    { this.refresh = refresh; this.offersOf = offersOf; this.plan = plan; this.pinOf = pinOf; this.budgetLow = budgetLow; }
 
     public async Task<string> Run(SessionStartRequested m, CancellationToken ct)
     {
@@ -43,9 +44,10 @@ public sealed class SessionStartPort
         if (nodes.Count == 0) return "no-offer";   // the item has an owner, is parked, or its saga moved on: the slot is the saga's to end
         // (a slot that is no longer the item's: the saga holds a newer grant, whose own request follows)
         if (nodes[0]["slot"]?.ToString() != m.SlotId) return "stale-slot";
-        if (pinOf is not null && nodes[0]["pin"] is null)
+        // the issue's pin wins over the card's (the card may be older than the label); below the GitHub budget's reserve the card's stands
+        if (pinOf is not null && budgetLow?.Invoke() != true)
         {
-            try { if (await pinOf(m.Item, ct) is { Length: > 0 } pin) nodes[0]["pin"] = pin; }
+            try { if (await pinOf(m.Item, ct) is { Length: > 0 } pin) nodes[0]["pin"] = pin; else nodes[0].Remove("pin"); }
             catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"session start for {m.Item}: the pin could not be read ({e.GetType().Name}); offered without it"); }
         }
         plan(new JsonArray(nodes.Select(n => (JsonNode)n).ToArray()), [item]);

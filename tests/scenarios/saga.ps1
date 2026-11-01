@@ -393,7 +393,7 @@ function Lbl-Leave($Saved, [int[]]$Items, [string[]]$Clients) {
     try { [void](Fake 'octo-reset') } catch { }
 }
 
-$SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the runtime''s free capacity (never past maxConcurrent), a runtime: label routes its slot, a hotfix label starts the hotfix plan'] = {
+$SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the runtime''s free capacity (never past maxConcurrent), a runtime: label with no capacity passes the item over, a hotfix label starts the hotfix plan'] = {
     if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the scheduler''s capacity, the slot request and the plan of the saga are the v2 engine''s (v1''s intake counts owner sessions only)' $true; return }
     Saga-NumbersAbove 100
     $items = @(); $clients = @()
@@ -409,12 +409,9 @@ $SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the
         if ((Slots-Runs $a).Count -lt 1) { return }
         $clients += (Slots-Take $a (Slots-Runs $a)[0])
         Check "#$a was not held for a runtime" ((Slots-Reasons $a) -notmatch 'runtime-off') (Slots-Reasons $a)
-        # V1.3: the label names copilot-cloud, which is off in this environment: the scheduler holds the slot, the Octopus runtime is not used for it
+        # V1.3: the label names copilot-cloud, which is off in this environment: the intake has no capacity for that runtime and passes the item over, while octopus has room (the hotfix below is pulled after it)
         $b = New-Item-Fake 'Label routes to copilot' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'runtime:copilot-cloud') 'Todo'
         $items += $b
-        Check "the intake pulls #$b from Todo" (Slots-WaitFor 200 { (Saga-Col $b) -eq 'Technical Design' }) "column $(Saga-Col $b); $(Slots-Reasons $b)"
-        Check "the scheduler holds #$b for the runtime it asked for (runtime-off)" (Slots-WaitFor 60 { (Slots-Reasons $b) -match 'runtime-off' }) "decisions: $(Slots-Reasons $b)"
-        Check "no Octopus session was started for #$b" ((Slots-Runs $b).Count -eq 0) "runs: $((Slots-Runs $b).Count)"
         # V1.3 (D3): a person's hotfix label starts the hotfix plan: no design step, and the card goes to Development
         $h = New-Item-Fake 'Hotfix by a person' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'hotfix') 'Todo'
         $items += $h
@@ -429,6 +426,7 @@ $SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the
         $pulledD = Slots-WaitFor 75 { (Saga-Col $d) -ne 'Todo' }
         Check "#$d stays in Todo while the runtime runs its two sessions (maxConcurrent 2)" (-not $pulledD) "column $(Saga-Col $d)"
         Check "no third session is started" ((Slots-AllRuns).Count -eq 2) "runs: $((Slots-AllRuns).Count)"
+        Check "#$b, whose runtime has no capacity, was passed over all the time (still in Todo, no session)" ((Saga-Col $b) -eq 'Todo' -and (Slots-Runs $b).Count -eq 0) "column $(Saga-Col $b)"
     } finally { Lbl-Leave $saved $items $clients }
 }
 

@@ -313,7 +313,7 @@ public static class DocsProjectionHandler
 /// the body only chooses the plan the item starts on; the design still decides (a design without the marker switches the item to the feature plan, which hands it to v1). Off unless intake is enabled and names the docs plan.
 /// </summary>
 public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, WorkItemIntake intake, Func<BoardRef?> board, RepoId home, DocsPlanSettings settings, IReadOnlyList<string> aiColumns,
-    Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, IItemIssueReader? issues = null, Func<CancellationToken, Task<int>>? capacitySlots = null)
+    Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, IItemIssueReader? issues = null, Func<IReadOnlyList<string>, string?, CancellationToken, Task<int>>? capacitySlots = null)
 {
     const int Looked = 10;
 
@@ -345,20 +345,26 @@ public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, 
             // W9.10h (D1): the items it depends on are met, or the intake passes the item over ("depends-on"), as v1's does (W9.10e left the items that name a dependency to v1; v1's intake now skips every item of the plans the engine takes)
             candidates.Add(new IntakeCandidate(id, true, true, facts.Labels, await DependenciesMet(id, body, homeCards, met, ct), plan));
         }
-        var d = await intake.Run(candidates, await Slots(ct), designWaiting(), inFlight, ct);
+        // V1.2: a candidate is pulled only where a slot is free for it (see Slots); the others stay in the column
+        var owners = Math.Max(0, freeSlots());
+        var pullable = new List<IntakeCandidate>();
+        foreach (var c in candidates) if (await Slots(c, owners, ct) > 0) pullable.Add(c);
+        var d = await intake.Run(pullable, pullable.Count > 0 ? 1 : candidates.Count == 0 ? owners : 0, designWaiting(), inFlight, ct);   // (no candidate at all: the reason is the rule's own)
         return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason;
     }
 
     /// <summary>
-    /// V1.2: the free slots of the intake: the connected owner sessions' (the plant) plus the scheduler's free capacity of the runtime it would grant (concurrency less what runs and waits, bounded by the day's budget and the host room).
-    /// Where no owner session exists (tdd: its sessions are runtime sessions the plant starts) the second term is the only one. A ledger that cannot be read counts none: the intake then waits for the next run.
+    /// V1.2: the free slots for one candidate. An item of a plan that asks the scheduler for a slot (feature, hotfix) needs the scheduler's free capacity of the runtime its labels name (the runtime: label, else the routing, else
+    /// scheduler.runtime): a connected owner session is no slot for it, and an item whose runtime has no room (or is off) is passed over, whatever room octopus has. An item of the docs plan, which the plant places, may take a
+    /// connected owner session's free slot or the runtime's capacity. Where no owner session exists (tdd: its sessions are runtime sessions the plant starts) the capacity is the only term. A ledger that cannot be read counts none.
     /// </summary>
-    async Task<int> Slots(CancellationToken ct)
+    async Task<int> Slots(IntakeCandidate c, int owners, CancellationToken ct)
     {
-        var owners = Math.Max(0, freeSlots());
-        if (capacitySlots is null) return owners;
-        try { return owners + Math.Max(0, await capacitySlots(ct)); }
-        catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"intake: the scheduler's free capacity could not be read ({e.GetType().Name})"); return owners; }
+        var scheduled = c.Plan is { } plan && settings.Policy.Schedules(plan);
+        var own = scheduled ? 0 : owners;
+        if (capacitySlots is null) return own;
+        try { return own + Math.Max(0, await capacitySlots(c.Labels, c.Plan, ct)); }
+        catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"intake: the scheduler's free capacity could not be read ({e.GetType().Name})"); return own; }
     }
 
     /// <summary>

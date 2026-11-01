@@ -298,7 +298,7 @@ sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, Docs
     IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null, SagaStateProjection? State = null, PromotionStateWriter? Promotions = null, CloseIssueHandler? Close = null)
 {
     /// <summary>The intake job; null when it cannot read the board and the items. The caller brings the plant's facts (free slots, whether a design waits) and the lease.</summary>
-    public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, Func<CancellationToken, Task<int>>? capacitySlots = null) =>
+    public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, Func<IReadOnlyList<string>, string?, CancellationToken, Task<int>>? capacitySlots = null) =>
         Boards is null || Facts is null ? null : new DocsIntakeJob(Boards, Facts, intake, Board, home, Settings, aiColumns, freeSlots, designWaiting, mayAct, budgetLow, Issues, capacitySlots);
 }
 
