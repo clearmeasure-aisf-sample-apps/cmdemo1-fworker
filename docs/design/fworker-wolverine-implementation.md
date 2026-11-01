@@ -68,6 +68,15 @@ and later; v2 acts since #609 at 01:28Z):
   the board reconciler made 395 requests in the last hour against the estimate of 150 (79 passes: the 120 s job and the pass that
   `sync-board` adds after every sweep).
 
+**The 6 unexplained shadow rows, explained (V2.1).** They are the prod rows of the releases 2.4.1228, 2.4.1257, 2.4.1264, 2.4.1277,
+2.4.1283 and 2.4.1288: the train of prod says "it has no deployment to uat" (a wait, class `none`) while v1 says nothing of prod.
+`Verbs.Promote.ps1` judges a release only in the first environment it has not reached (`$tk`, the first target whose deployment is not
+`Success`), and those six waited in uat ("its deployment to tdd is Failed"). v2 has one train per environment and each describes the
+release. `ShadowGate` left a v2-only row out of `queue-only-v1` when v1 had judged the release in any environment, so these fell under no
+declared difference. V2.1 declares `chain-position` (a v2-only row of a later environment for a release v1 judges in an earlier
+environment of the same deployable, by rule and not by list); `unexplainedLive` is 0 on that data. The one `v1-only` row (2.4.1261) is
+`newest-only` already.
+
 ### 1. The map: every v1 behaviour, label and setting, and its v2 owner
 
 Sources: `docs/design/verb-inventory.md` and `.json` (74 verbs: 68 routed where v2 acts, 6 never routed), the architecture test of
@@ -335,9 +344,10 @@ that order, one at a time.
   the state comment). Keep the v1-format state comment through the W9.11 gate.
 - **The reconciler's GitHub cost** (395 requests an hour now): it falls when the sweep's extra pass goes (V3.2); until then it is read on
   every tdd check.
-- **The app's tdd deployments are failing** (since at least release 2.4.1228). That is the app's, not the factory's, but it blocks every
-  promotion in either engine; its fix is a precondition of V2.2's live events (D2). The factory's items keep moving to the Release
-  Queue meanwhile.
+- **A tdd deployment of the newest release succeeded** (2.4.1298, SuccessWithWarning, Deployments-57454 on 2026-10-27; releases 2.4.1228
+  to 2.4.1288 failed there from an old step bug, since fixed). Octopus's API gives that task the state `Success` (the warning is
+  `HasWarningsOrErrors`), which v1, the watcher and the train all read, so the deployment is delivered and the health gate is met. The
+  train can promote 2.4.1298, which carries the 67 queued items, and V2.2's live events can be watched.
 
 **Decisions:** D1 to D3 were decided by the owner on 2026-11-01 (top of this revision); none is open.
 
