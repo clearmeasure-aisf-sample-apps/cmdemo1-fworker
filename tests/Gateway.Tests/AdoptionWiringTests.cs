@@ -8,21 +8,20 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// W9.9b: the adoption in a gateway, where it exists and where it must not. Only an engine that acts (with a database, a home repository and a GitHub credential) has the recurring job and the "adoption" block of the v2 status;
-/// tdd's shadow run and v1 have neither (nothing of it is made), and the marker of the kill switch is written only by a process that the switch turned back to v1 in an environment named for v2.
+/// v1 has neither (nothing of it is made).
 /// </summary>
 public sealed class AdoptionWiringTests
 {
     static readonly string Token = "ghp_" + new string('A', 36);   // (composed at run time: a token the gateway takes for a credential)
 
-    static GatewayEnvironment Env(string? mode, bool token = true, bool killSwitch = false)
+    static GatewayEnvironment Env(string? mode, bool token = true)
     {
         var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
         if (token) env.Set("GH_TOKEN", Token);
-        if (killSwitch) env.Set("FACTORY_V2_OFF", "1");
         env.EditConfig = cfg => cfg["engine"] = new JsonObject
         {
-            ["v2Environments"] = new JsonArray(mode == "v2" ? "tdd" : "other"), ["shadowEnvironments"] = new JsonArray(mode == "shadow" ? "tdd" : "other"),
+            ["v2Environments"] = new JsonArray(mode == "v2" ? "tdd" : "other"),
         };
         env.Apply();
         return env;
@@ -61,55 +60,5 @@ public sealed class AdoptionWiringTests
         using var host = Start();
         Assert.False(host.Services.GetRequiredService<RecurringJobRegistry>().Has(RecurringJobSlots.Adoption));
         Assert.False((await host.Services.GetRequiredService<V2Health>().Block(default)).ContainsKey("adoption"));
-    }
-
-    [Fact]
-    public async Task TheShadowRun_HasNoAdoption_AndWritesNoMarker()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = Env("shadow");
-        using var host = Start();
-        Assert.Null(host.Services.GetService<RecurringJobRegistry>());
-        Assert.Null(host.Services.GetRequiredService<WolverineHostService>().BeforeHost);   // (tdd's shadow run holds nothing)
-        Assert.False((await host.Services.GetRequiredService<V2Health>().Block(default)).ContainsKey("adoption"));
-        Assert.DoesNotContain(host.Services.GetServices<IHostedService>(), h => h is KillSwitchMarkerService);
-    }
-
-    [Fact]
-    public void TheKillSwitchMarker_IsRegisteredOnlyForAProcessTurnedBackToV1InAnEnvironmentNamedForV2()
-    {
-        if (!StubPwsh.Supported) return;
-        using (var env = Env("v2", killSwitch: true))
-        {
-            using var host = Start();
-            Assert.Single(host.Services.GetServices<IHostedService>().OfType<KillSwitchMarkerService>());
-            Assert.Null(host.Services.GetService<RecurringJobRegistry>());   // (v1 acts: no engine, no job)
-        }
-        using (var env = Env("v2"))
-        {
-            using var host = Start();
-            Assert.Empty(host.Services.GetServices<IHostedService>().OfType<KillSwitchMarkerService>());
-        }
-        using (var env = Env("shadow", killSwitch: true))
-        {
-            using var host = Start();
-            Assert.Empty(host.Services.GetServices<IHostedService>().OfType<KillSwitchMarkerService>());
-        }
-    }
-
-    [Fact]
-    public async Task TheMarkerServiceWritesV1RanOnce_AndGivesUpQuietlyWhenTheDatabaseDoesNot()
-    {
-        var markers = new InMemoryEngineMarkers();
-        var service = new KillSwitchMarkerService(markers, "node-b", () => new DateTimeOffset(2026, 10, 31, 8, 0, 0, TimeSpan.Zero));
-        await service.StartAsync(default);
-        await service.ExecuteTask!;
-        Assert.Equal(("node-b", "FACTORY_V2_OFF"), (markers.Rows[EngineMarkerNames.V1Ran].Holder, markers.Rows[EngineMarkerNames.V1Ran].Detail));
-        // a database that refuses is tried again, and the service stops with the host
-        var failing = new InMemoryEngineMarkers { BeforeMark = _ => throw new InvalidOperationException("down") };
-        var other = new KillSwitchMarkerService(failing, "node-b");
-        await other.StartAsync(default);
-        await other.StopAsync(default);
-        Assert.Empty(failing.Rows);
     }
 }

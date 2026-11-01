@@ -60,13 +60,11 @@ static class EndpointModuleExtensions
             var v1 = new V1EventIngress(sp.GetRequiredService<EventHub>());
             if (sp.GetService<IngressInboxPort>() is { } inbox)
             {
-                // W4.1: where the engine acts, events also go to the durable inbox. W5.2: in the shadow run they do too, the Octopus watcher's events go to the train, and the history is kept
+                // W4.1: where the engine acts, events also go to the durable inbox, and the Octopus watcher's events go to the train
                 IEventIngress withInbox = new InboxEventIngress(v1, inbox);
-                if (sp.GetService<ShadowOctopusPort>() is not { } octopus) return withInbox;
-                withInbox = new OctopusShadowIngress(withInbox, octopus);
-                return sp.GetService<IShadowHistory>() is { } history ? new ShadowEventIngress(withInbox, history) : withInbox;
+                return sp.GetService<ShadowOctopusPort>() is { } octopus ? new OctopusShadowIngress(withInbox, octopus) : withInbox;
             }
-            return sp.GetService<IShadowHistory>() is { } shadow ? new ShadowEventIngress(v1, shadow) : v1;   // W2.3: shadow history records after v1 has done its part
+            return v1;
         });
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
         services.AddSingleton<IEndpointModule, CopilotEndpoints>();

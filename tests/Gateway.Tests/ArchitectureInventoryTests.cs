@@ -44,7 +44,7 @@ public class ArchitectureInventoryTests
         n["owner"]!.ToString(), n["leaves"]!.ToString(), Exc(n["exception"]))).ToList();
 
     /// <summary>The exceptions that may exist; a new one is a decision, so it is a visible edit of this list.</summary>
-    static readonly string[] DeclaredExceptions = ["auto-promote", "leader-lease", "plant-snapshot", "transcripts", "merge-peer-approved", "merge-hybrid-script"];
+    static readonly string[] DeclaredExceptions = ["leader-lease", "plant-snapshot", "transcripts", "merge-peer-approved", "merge-hybrid-script"];
 
     static readonly string[] Kinds = ["runner", "router"];
 

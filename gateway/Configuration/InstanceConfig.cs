@@ -89,17 +89,6 @@ sealed class InstanceConfig
         }
     }
 
-    // W9.10p: delivery.autoPromote.trainActs, whether the delivery train promotes the app's uat and prod for real where the engine acts. False (the default and the deployed value until W9.12): v1's AutoPromoter keeps
-    // promoting them and the train decides them in shadow (recorded and compared, no PromoteRelease or AnswerSignOff). True (W9.12): the train promotes and the AutoPromoter does not run. Ignored where the engine does not act.
-    public bool TrainActs
-    {
-        get
-        {
-            try { return Root?["delivery"]?["autoPromote"]?["trainActs"] is JsonValue v && v.TryGetValue<bool>(out var b) && b; }
-            catch { return false; }
-        }
-    }
-
     // issue 97: the first column the factory works (columns.ai[0] of the configuration), its intake of new work
     public string IntakeColumn
     {

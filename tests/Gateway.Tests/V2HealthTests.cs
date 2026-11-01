@@ -91,7 +91,7 @@ public sealed class V2HealthTests
     static (V2Health Health, Source Source, Clock Clock) Make(FactorySchemaStatus? schema = null, bool acts = true, RecurringJobRegistry? jobs = null, WorkItemRearm? rearm = null)
     {
         var source = new Source(); var clock = new Clock();
-        var engine = new EngineOptions { Environment = "tdd", Configured = acts ? EngineMode.V2 : EngineMode.Shadow };
+        var engine = new EngineOptions { Environment = "tdd", Configured = acts ? EngineMode.V2 : EngineMode.V1 };
         return (new V2Health(source, schema ?? Good(), engine, () => jobs, () => rearm, () => clock.Now), source, clock);
     }
 
@@ -103,7 +103,7 @@ public sealed class V2HealthTests
         var acting = new V2Health(new Source(), new FactorySchemaStatus(required: true), engine, () => null, () => null, adoption: () => block);
         var o = await acting.Block(default);
         Assert.Equal((false, 2, 1), ((bool)o["available"]!, (int)o["adoption"]!["last"]!["adopted"]!, (int)o["adoption"]!["last"]!["skippedBy"]!["settled"]!));
-        var shadow = new V2Health(new Source(), Good(), new EngineOptions { Environment = "tdd", Configured = EngineMode.Shadow }, () => null, () => null, adoption: () => block);
+        var shadow = new V2Health(new Source(), Good(), new EngineOptions { Environment = "tdd", Configured = EngineMode.V1 }, () => null, () => null, adoption: () => block);
         Assert.False((await shadow.Block(default)).ContainsKey("adoption"));
         var none = new V2Health(new Source(), Good(), engine, () => null, () => null, adoption: () => null);
         Assert.False((await none.Block(default)).ContainsKey("adoption"));

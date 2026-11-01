@@ -323,20 +323,13 @@ public sealed class IncidentInertTests
     public void WhereTheEngineDoesNotAct_ThereIsNoIncidentSaga()
     {
         if (!StubPwsh.Supported) return;
-        foreach (var kind in new[] { "v1", "shadow", "kill-switch" })
+        foreach (var kind in new[] { "v1" })
         {
             using var env = new GatewayEnvironment();
-            if (kind != "v1") env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
-            if (kind == "shadow") WolverineHostTestSupport.Shadow(env);
-            if (kind == "kill-switch")
-            {
-                env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
-                env.Set("FACTORY_V2_OFF", "1");
-            }
             env.Apply();
             using var host = new GatewayHost();
             _ = host.Server;
-            Assert.DoesNotContain(host.Captured!, d => d.ServiceType == typeof(ShadowOctopusPort) && kind != "shadow");
+            Assert.DoesNotContain(host.Captured!, d => d.ServiceType == typeof(ShadowOctopusPort));
             Assert.DoesNotContain(host.Captured!, d => d.ServiceType.Namespace == "Fworker.Workflows.Incident");
         }
     }
@@ -392,7 +385,7 @@ public sealed class IncidentWiringTests
         try
         {
             using var env = new GatewayEnvironment();
-            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             env.Set("FACTORY_DB_CONNECTION", cs); env.Set("FACTORY_SWEEP_SECONDS", "3600");
             env.Apply();
             var cfg = JsonNode.Parse(File.ReadAllText(Path.Combine(env.Dir, "instance.test.json")))!;

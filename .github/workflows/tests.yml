@@ -17,8 +17,8 @@
 # exists; each Tier 1 job uploads its records as the artifact writes-<job>-<attempt> (tests/scenarios/golden/README.md says how to re-record).
 # The jobs unit (tests/Gateway.Tests, the gateway in process: routes and their guards, start and stop, in 4 shards) and src (the smoke test and the
 # test projects of src/) run the quick tests in minutes. SQL Server is a service of those two and of the Tier 1 shards: every Tier 1 process makes a database of its own on it.
-# The job "Image starts without a database" builds the image and starts it with no FACTORY_DB_CONNECTION three ways (uat; tdd with v2 configured; tdd with the kill switch): /ready must answer 200, 503 "database"
-# (v2 inert, up), 200.
+# The job "Image starts without a database" builds the image and starts it with no FACTORY_DB_CONNECTION two ways (uat; tdd with v2 configured): /ready must answer 200, 503 "database"
+# (v2 inert, up).
 name: Tests
 
 on:
@@ -39,7 +39,7 @@ env:
 jobs:
   # Tier 1: the scenario suites against the fake GitHub, on the v2 engine, the only engine (V3.1 of the v2-only plan removed v1's shards and the second run of the claims). A matrix entry lists its
   # suites after `suites:` (name, name@g/n, name@all/n: see the header of this file). The gateway under test runs with engine.v2Environments naming FACTORY_ENVIRONMENT (v2ci, or the suite's own name where it
-  # sets one: tdd for copilot, promote, envscope), so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own
+  # sets one: tdd for copilot, envscope), so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own
   # on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the database name per process). The suite saga runs each of its scenarios on a gateway profile of its own (run-all.ps1 $ProfiledSuites).
   # golden/v2-differences.txt declares where the engine writes differently from the golden files on purpose.
   tier1:
@@ -163,16 +163,6 @@ jobs:
           - name: octopus
             suites: octopus,copilot-manager
             parallel: 2
-          # promote (tdd, slot 28): 667 s of scenarios in one process on a development machine, 3 shards as in tier1 above
-          - name: promote-0
-            suites: promote@0/3
-            parallel: 1
-          - name: promote-1
-            suites: promote@1/3
-            parallel: 1
-          - name: promote-2
-            suites: promote@2/3
-            parallel: 1
           # qc-worker: 494 s of scenarios in one process on a development machine, 4 shards as in tier1 above
           - name: qc-worker-0
             suites: qc-worker@0/4
@@ -429,13 +419,12 @@ jobs:
             dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
           done
 
-  # The image starts without a database (issue 459, the kill-switch case of W2.0; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
-  # image job is a sibling of this workflow's caller, not an input of it) and run three times with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
+  # The image starts without a database (issue 459; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
+  # image job is a sibling of this workflow's caller, not an input of it) and run twice with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
   # placeholder unset, so it does not wait for revocations) and with the secrets it requires at start and owner mode (the deployed settings need it; the secrets are made at run time):
   #  1. as uat (FACTORY_ENVIRONMENT=uat, where uat and prod run v1 with no database): /ready answers 200 within two minutes;
   #  2. as tdd with v2 configured (engine.v2Environments names tdd: the file of the image with that one setting made, so that the run means the same before and after the cutover reached the overrides) and no database:
   #     the container stays up, /health answers 200 and /ready answers 503 {"waitingFor":"database"} for at least 30 seconds: v2 is inert, it does not crash and v1 does not take its place (EngineOptions.NoDatabase);
-  #  3. as tdd with v2 configured, no database and the kill switch FACTORY_V2_OFF=1: /ready answers 200 (v1 runs).
   # Any other answer fails the job with the container's log.
   image-start:
     name: Image starts without a database
@@ -447,7 +436,7 @@ jobs:
       - name: Build the image
         run: docker build --file Dockerfile --build-arg VERSION=0.0.0 --tag fworker-start-check:ci .
 
-      - name: Run it without FACTORY_DB_CONNECTION as uat, as tdd with v2 configured, and as tdd with the kill switch
+      - name: Run it without FACTORY_DB_CONNECTION as uat and as tdd with v2 configured
         run: |
           set -euo pipefail
           dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"; token_secret="$(openssl rand -hex 24)"
@@ -456,7 +445,7 @@ jobs:
           docker create --name fworker-config fworker-start-check:ci >/dev/null
           docker cp fworker-config:/app/config/instance.json "$RUNNER_TEMP/instance.image.json"
           docker rm fworker-config >/dev/null
-          jq '.engine = ((.engine // {}) + {v2Environments: ["tdd"], shadowEnvironments: []})' "$RUNNER_TEMP/instance.image.json" > "$RUNNER_TEMP/instance.v2.json"
+          jq '.engine = ((.engine // {}) + {v2Environments: ["tdd"]})' "$RUNNER_TEMP/instance.image.json" > "$RUNNER_TEMP/instance.v2.json"
           chmod 644 "$RUNNER_TEMP/instance.v2.json"
 
           # start NAME [docker args...]: FACTORY_OWNER_MODE=1 and FACTORY_TOKEN_SECRET are what the deployed app is given (system.json): the image's configuration turns messaging and
@@ -509,13 +498,9 @@ jobs:
           done
           docker rm --force fworker-start-v2 >/dev/null
 
-          echo "== 3. tdd, v2 configured, no database, kill switch"
-          start fworker-start-off -e FACTORY_ENVIRONMENT=tdd -e FACTORY_V2_OFF=1 -v "$RUNNER_TEMP/instance.v2.json:/app/config/instance.v2.json:ro" -e FACTORY_CONFIG=/app/config/instance.v2.json
-          ready_200 fworker-start-off
-
       - name: Stop the containers
         if: always()
-        run: docker rm --force fworker-start-uat fworker-start-v2 fworker-start-off fworker-config || true
+        run: docker rm --force fworker-start-uat fworker-start-v2 fworker-config || true
 
   # Every scenario of every suite runs in exactly one shard: the scenarios each matrix entry lists (run.ps1 -ListScenarios -Suite s, with
   # -Groups n -Group g for a shard, every group of an @all/n), added up, are exactly those of run.ps1 -ListScenarios (the full tier), none

@@ -12,7 +12,7 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// The three safety problems the review of the tdd cutover (W9.9c) found:
-/// 1. the kill switch FACTORY_V2_OFF must not turn v1's intake on (intake.enabled is true for the image so that the engine's intake runs, and v1's intake leaves nothing in Todo once it is not told the engine's plans);
+/// 1. an environment outside engine.v2Environments must not turn v1's intake on (intake.enabled is true for the image so that the engine's intake runs, and v1's intake leaves nothing in Todo once it is not told the engine's plans);
 /// 2. tdd with v2 configured and no database must stay up and inert, not crash and not fall back to v1;
 /// 3. v1's sweep must not run beside the adoption of the term (no per-item lock between them).
 /// </summary>
@@ -30,17 +30,16 @@ public sealed class CutoverSafetyTests
     }
 
     // The configuration of the cutover: v2 for tdd, v1's intake switched on for the image and told which plans the engine takes.
-    static void Cutover(GatewayEnvironment env, bool database, bool killSwitch, string environment = "tdd", string? connection = null)
+    static void Cutover(GatewayEnvironment env, bool database, string environment = "tdd", string? connection = null)
     {
         env.Set("FACTORY_ENVIRONMENT", environment);
         env.Set("FACTORY_SWEEP_SECONDS", "1"); env.Set("FACTORY_SWEEP_MIN_SECONDS", "1");
         if (database) env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
         else if (connection is not null) env.Set("FACTORY_DB_CONNECTION", connection);
         else env.Set("FACTORY_DB_CONNECTION", null);
-        if (killSwitch) env.Set("FACTORY_V2_OFF", "1"); else env.Set("FACTORY_V2_OFF", null);
         env.EditConfig = cfg =>
         {
-            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             cfg["intake"] = new JsonObject { ["enabled"] = true, ["v2Plans"] = new JsonArray("docs", "feature") };
         };
     }
@@ -55,7 +54,7 @@ public sealed class CutoverSafetyTests
         return SyncBoardCalls(env);
     }
 
-    // ---- 1. the kill switch and v1's intake ----------------------------------------------------------------------------------------------------------
+    // ---- 1. an environment outside v2 and v1's intake ----------------------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task SweeperWithIntakeOff_GivesTheScriptNoIntakeBlock_TheControlGivesIt()
@@ -92,15 +91,14 @@ public sealed class CutoverSafetyTests
     }
 
     [Theory]
-    [InlineData("tdd", true, "kill switch")]
-    [InlineData("uat", false, "uat: the image has intake.enabled true and v1 acts")]
-    [InlineData("prod", false, "prod: the same")]
-    public async Task WhereTheEngineDoesNotAct_V1TakesNoTodoItem(string environment, bool killSwitch, string why)
+    [InlineData("uat", "uat: the image has intake.enabled true and v1 acts")]
+    [InlineData("prod", "prod: the same")]
+    public async Task WhereTheEngineDoesNotAct_V1TakesNoTodoItem(string environment, string why)
     {
         _ = why;
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        Cutover(env, database: true, killSwitch: killSwitch, environment: environment);
+        Cutover(env, database: true, environment: environment);
         env.Apply(); WriteAnswer(env);
         using var host = new GatewayHost();
         _ = host.Server;
@@ -137,7 +135,7 @@ public sealed class CutoverSafetyTests
     {
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        Cutover(env, database: false, killSwitch: false, connection: connection);
+        Cutover(env, database: false, connection: connection);
         env.Apply(); WriteAnswer(env);
         using var host = new GatewayHost();
         var started = Task.Run(() => host.Server);
@@ -145,11 +143,9 @@ public sealed class CutoverSafetyTests
         var services = host.Services.GetServices<IHostedService>();
         var sweeper = services.OfType<Sweeper>().Single();
         Assert.True(sweeper.V2!.Unavailable); Assert.False(sweeper.V2.Loaded);
-        Assert.Contains(services, s => s is AutoPromoter);
         // nothing that acts on items acts (the lease is off in this test, so MayAct of the leader is true: only the inert rule says no), and a verb that changes anything is refused
         Assert.False(services.OfType<PlantTicker>().Single().MayAct!());
         Assert.False(services.OfType<BaseWatch>().Single().MayAct!());
-        Assert.True(services.OfType<AutoPromoter>().Single().MayAct!());
         Assert.True(host.Services.GetRequiredService<ILeadership>().MayAct); Assert.False(new InertLeadership(host.Services.GetRequiredService<ILeadership>()).MayAct);
         var router = host.Services.GetRequiredService<IVerbRouter>();
         Assert.IsType<InertVerbRouter>(router);
@@ -243,7 +239,7 @@ public sealed class CutoverSafetyTests
     {
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        Cutover(env, database: false, killSwitch: false);
+        Cutover(env, database: false);
         env.Apply(); WriteAnswer(env);
         using var host = new GatewayHost();
         _ = host.Server;
@@ -252,21 +248,6 @@ public sealed class CutoverSafetyTests
         var log = File.Exists(env.StubLog + ".in") ? File.ReadAllText(env.StubLog + ".in") : "";
         Assert.DoesNotContain("qc-report", log);          // (the stub rule script was never asked)
         Assert.DoesNotContain("qc-", log);
-    }
-
-    [Fact]
-    public async Task V2WithoutADatabase_AndTheKillSwitch_IsReady_AndV1Sweeps()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        Cutover(env, database: false, killSwitch: true);
-        env.Apply(); WriteAnswer(env);
-        using var host = new GatewayHost();
-        _ = host.Server;
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromSeconds(30) && (await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status != 200) await Task.Delay(100);
-        Assert.Equal(200, (await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status);
-        Assert.NotEmpty(await WaitForSweeps(env, 40));
     }
 
     // ---- 3. no sweep before the term's adoption ---------------------------------------------------------------------------------------------------

@@ -235,7 +235,7 @@ public sealed class SweeperV2ArgumentsTests
         if (v2)
         {
             env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
-            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
         }
         env.Apply();
         File.WriteAllText(Path.Combine(env.Dir, "answer-sync-board.json"), new JsonObject { ["ok"] = true, ["actions"] = new JsonArray(), ["offers"] = new JsonArray() }.ToJsonString() + "\n");
@@ -255,7 +255,7 @@ public sealed class SweeperV2ArgumentsTests
     }
 }
 
-/// <summary>Nothing of the saga exists outside the engine that acts: a gateway in the shadow run (tdd today) registers no ownership and no saga service, and its sweeper has no filter.</summary>
+/// <summary>Nothing of the saga exists outside the engine that acts: a gateway outside engine.v2Environments registers no ownership and no saga service, and its sweeper has no filter.</summary>
 public sealed class WorkItemInertTests
 {
     [Fact]
@@ -263,7 +263,7 @@ public sealed class WorkItemInertTests
     {
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); env.Apply();
+        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Apply();
         using var host = new GatewayHost();
         _ = host.Server;
         foreach (var t in new[] { typeof(V2Ownership), typeof(WorkItemService), typeof(WorkItemHistory), typeof(WorkItemParts) })
@@ -280,7 +280,7 @@ public sealed class WorkItemInertTests
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
         env.Apply();
         using var host = new GatewayHost();
         var started = Task.Run(() => host.Server);
@@ -362,7 +362,7 @@ public sealed class WorkItemWiringTests
             using var env = new GatewayEnvironment();
             env.Set("FACTORY_DB_CONNECTION", cs);
             env.Set("FACTORY_SWEEP_SECONDS", "1"); env.Set("FACTORY_SWEEP_MIN_SECONDS", "1");
-            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             env.Apply();
             // v1's sweep offers two items; no worker is connected, so the plant leaves whatever it is given waiting (replenish_waiting counts them)
             File.WriteAllText(Path.Combine(env.Dir, "answer-sync-board.json"), new JsonObject

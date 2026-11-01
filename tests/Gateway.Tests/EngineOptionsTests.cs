@@ -2,7 +2,7 @@ using Xunit;
 
 namespace Gateway.Tests;
 
-/// <summary>The engine switch and the FACTORY_V2_OFF kill switch (task W0.0, gateway/Configuration/EngineOptions.cs): the effective mode for each environment.</summary>
+/// <summary>The engine switch (task W0.0, gateway/Configuration/EngineOptions.cs): the effective mode for each environment.</summary>
 public sealed class EngineOptionsTests : IDisposable
 {
     readonly string dir = Directory.CreateTempSubdirectory("engine-options-").FullName;
@@ -17,8 +17,8 @@ public sealed class EngineOptionsTests : IDisposable
         return InstanceConfig.Load(path, Env());
     }
 
-    internal static string BlockFor(string v2, string shadow) => Block(v2, shadow);
-    static string Block(string v2, string shadow) =>"{\"engine\":{\"v2Environments\":[" + v2 + "],\"shadowEnvironments\":[" + shadow + "]}}";
+    internal static string BlockFor(string v2, string unused = "") => Block(v2);
+    static string Block(string v2) => "{\"engine\":{\"v2Environments\":[" + v2 + "]}}";
 
     static string RepoRoot()
     {
@@ -36,28 +36,26 @@ public sealed class EngineOptionsTests : IDisposable
             var e = EngineOptions.From(cfg, name, Env());
             Assert.Equal(EngineMode.V1, e.Mode);
             Assert.Equal(EngineMode.V1, e.Configured);
-            Assert.False(e.KillSwitch);
             Assert.False(e.V2Acts);
-            Assert.False(e.ShadowRuns);
         }
     }
 
     [Fact]
-    public void ShippedDefaults_BothListsAreDeclaredAndEmpty()
+    public void ShippedDefaults_TheListIsDeclaredAndEmpty()
     {
         var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")))!;
         Assert.Empty(root["engine"]!["v2Environments"]!.AsArray());
-        Assert.Empty(root["engine"]!["shadowEnvironments"]!.AsArray());
+        Assert.Null(root["engine"]!["shadowEnvironments"]);
     }
 
     [Fact]
-    public void DeployOverrides_PutTddInV2AndNothingInShadow()
+    public void DeployOverrides_PutTddInV2()
     {
-        // W9.9c "the tdd cutover": the deployed image merges engine.v2Environments = [tdd] over the empty default and the shadow list is empty; uat and
+        // W9.9c "the tdd cutover": the deployed image merges engine.v2Environments = [tdd] over the empty default ; uat and
         // prod stay v1. Changing this pin is a protected-area change (deploy.overrides.json) and needs its own pull request.
         var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")), File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
         Assert.Equal(new[] { "tdd" }, merged["engine"]!["v2Environments"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
-        Assert.Empty(merged["engine"]!["shadowEnvironments"]!.AsArray());
+        Assert.Null(merged["engine"]!["shadowEnvironments"]);
         var cfg = Config(merged["engine"]!.ToJsonString() is var j ? "{\"engine\":" + j + "}" : "");
         Assert.Equal(EngineMode.V2, EngineOptions.From(cfg, "tdd", Env()).Mode);
         Assert.Equal(EngineMode.V1, EngineOptions.From(cfg, "uat", Env()).Mode);
@@ -85,19 +83,18 @@ public sealed class EngineOptionsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("tdd", "shadow")]
+    [InlineData("tdd", "v1")]
     [InlineData("uat", "v1")]
     [InlineData("prod", "v1")]
     [InlineData("local", "v2")]
     public void OverridesApplied_EachEnvironmentResolvesOwnEntry(string environment, string label)
     {
-        var expected = label switch { "v2" => EngineMode.V2, "shadow" => EngineMode.Shadow, _ => EngineMode.V1 };
-        var cfg = Config(Block("\"local\"", "\"tdd\""));
+        var expected = label == "v2" ? EngineMode.V2 : EngineMode.V1;
+        var cfg = Config(Block("\"local\""));
         var e = EngineOptions.From(cfg, environment, Env());
         Assert.Equal(expected, e.Mode);
         Assert.Equal(expected, e.Configured);
         Assert.Equal(expected == EngineMode.V2, e.V2Acts);
-        Assert.Equal(expected == EngineMode.Shadow, e.ShadowRuns);
     }
 
     [Theory]
@@ -105,47 +102,9 @@ public sealed class EngineOptionsTests : IDisposable
     [InlineData("Tdd")]
     public void EnvironmentAndListsAreTrimmedAndCaseInsensitive(string environment)
     {
-        var e = EngineOptions.From(Config(Block("", "\" Tdd\"")), environment, Env());
-        Assert.Equal(EngineMode.Shadow, e.Mode);
+        var e = EngineOptions.From(Config(Block("\" Tdd\"")), environment, Env());
+        Assert.Equal(EngineMode.V2, e.Mode);
         Assert.Equal("tdd", e.Environment);
-    }
-
-    [Fact]
-    public void V2WinsWhereAnEnvironmentIsInBothLists() =>
-        Assert.Equal(EngineMode.V2, EngineOptions.From(Config(Block("\"tdd\"", "\"tdd\"")), "tdd", Env()).Mode);
-
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData(" yes ", true)]
-    [InlineData("on", true)]
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("", false)]
-    [InlineData("  ", false)]
-    [InlineData("off", false)]
-    [InlineData(null, false)]
-    public void KillSwitch_ReadsFactoryV2Off(string? value, bool on)
-    {
-        Assert.Equal(on, EngineOptions.IsKillSwitch(value));
-        Assert.Equal(on, EngineOptions.From(Config(Block("", "")), "tdd", Env(("FACTORY_V2_OFF", value))).KillSwitch);
-    }
-
-    [Theory]
-    [InlineData("tdd", "v2")]      // v2Environments
-    [InlineData("local", "shadow")]
-    [InlineData("uat", "v1")]
-    public void KillSwitchOn_PutsEveryEnvironmentOnV1WithNoShadow(string environment, string configured)
-    {
-        var cfg = Config(Block("\"tdd\"", "\"local\""));
-        var off = EngineOptions.From(cfg, environment, Env());
-        Assert.Equal(configured, EngineOptions.Label(off.Mode));
-        var on = EngineOptions.From(cfg, environment, Env(("FACTORY_V2_OFF", "1")));
-        Assert.Equal(EngineMode.V1, on.Mode);
-        Assert.Equal(configured, EngineOptions.Label(on.Configured));   // what the file names is still reported
-        Assert.False(on.V2Acts);
-        Assert.False(on.ShadowRuns);
     }
 
     [Theory]
@@ -153,8 +112,9 @@ public sealed class EngineOptionsTests : IDisposable
     [InlineData("not json")]
     [InlineData("{}")]
     [InlineData("{\"engine\":[1]}")]
-    [InlineData("{\"engine\":{\"v2Environments\":\"tdd\",\"shadowEnvironments\":{\"tdd\":true}}}")]
-    [InlineData("{\"engine\":{\"v2Environments\":[1,null,true,\"\"],\"shadowEnvironments\":null}}")]
+    [InlineData("{\"engine\":{\"v2Environments\":\"tdd\"}}")]
+    [InlineData("{\"engine\":{\"v2Environments\":[1,null,true,\"\"]}}")]
+    [InlineData("{\"engine\":{\"shadowEnvironments\":[\"tdd\"]}}")]   // (the shadow list is no setting any more)
     public void MissingOrMalformedConfiguration_IsV1(string? json)
     {
         var e = EngineOptions.From(Config(json), "tdd", Env());
@@ -164,10 +124,10 @@ public sealed class EngineOptionsTests : IDisposable
     [Fact]
     public void Status_Block()
     {
-        var s = EngineOptions.From(Config(Block("", "\"tdd\"")), "tdd", Env(("FACTORY_V2_OFF", "1"))).Status();
-        Assert.Equal("v1", (string?)s["mode"]);
-        Assert.Equal("shadow", (string?)s["configured"]);
-        Assert.True((bool?)s["killSwitch"]);
+        var s = EngineOptions.From(Config(Block("\"tdd\"")), "tdd", Env()).Status();
+        Assert.Equal("v2", (string?)s["mode"]);
+        Assert.Equal("v2", (string?)s["configured"]);
+        Assert.Null(s["killSwitch"]);
         Assert.Equal("tdd", (string?)s["environment"]);
     }
 }
@@ -191,10 +151,9 @@ public sealed class EngineStatusTests(TwoPortGateway gw) : IClassFixture<TwoPort
     [Fact]
     public void Reported_OnlyWhereNotPlainV1()
     {
-        var shadow = EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("", "\"tdd\"")), _ => null), "tdd", _ => null);
-        Assert.True(shadow.Reported);
-        Assert.False(EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("", "\"tdd\"")), _ => null), "uat", _ => null).Reported);
-        Assert.True(EngineOptions.From(InstanceConfig.Load(Write("{}"), _ => null), "uat", n => n == "FACTORY_V2_OFF" ? "1" : null).Reported);
+        var v2 = EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("\"tdd\"")), _ => null), "tdd", _ => null);
+        Assert.True(v2.Reported);
+        Assert.False(EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("\"tdd\"")), _ => null), "uat", _ => null).Reported);
     }
 
     static string Write(string json) { var p = Path.Combine(Path.GetTempPath(), "engine-status-" + Guid.NewGuid().ToString("N") + ".json"); File.WriteAllText(p, json); return p; }

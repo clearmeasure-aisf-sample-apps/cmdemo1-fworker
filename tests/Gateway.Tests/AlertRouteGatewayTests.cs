@@ -14,32 +14,10 @@ static class AlertRouteGateway
     public const string Uri = "/webhooks/azure-monitor?deployable=ui&environment=tdd&secret=" + Secret;
 }
 
-/// <summary>A gateway of the shadow environment tdd (v1 acts, v2 beside it) with the Azure Monitor secret set.</summary>
-public sealed class ShadowAlertGateway : GatewayFixture
-{
-    protected override void Configure(GatewayEnvironment env)
-    {
-        env.Set("FACTORY_WEBHOOK_SECRET_AZURE_MONITOR", AlertRouteGateway.Secret);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray(), ["shadowEnvironments"] = new JsonArray("tdd") };
-    }
-}
-
 /// <summary>A gateway on v1 (the default configuration) with the Azure Monitor secret set.</summary>
 public sealed class V1AlertGateway : GatewayFixture
 {
     protected override void Configure(GatewayEnvironment env) => env.Set("FACTORY_WEBHOOK_SECRET_AZURE_MONITOR", AlertRouteGateway.Secret);
-}
-
-public sealed class AlertRouteInTheShadowRunTests(ShadowAlertGateway gw) : IClassFixture<ShadowAlertGateway>
-{
-    [Fact]
-    public async Task TheRouteAnswers404_WithTheRightSecret()
-    {
-        if (!StubPwsh.Supported) return;
-        var status = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
-        Assert.Equal("shadow", status.Json?["engine"]?["mode"]?.ToString());
-        Assert.Equal(404, (await gw.Host.SendAsync("POST", AlertRouteGateway.Uri, GatewayEnvironment.HookPort, body: "{}")).Status);
-    }
 }
 
 public sealed class AlertRouteInV1Tests(V1AlertGateway gw) : IClassFixture<V1AlertGateway>

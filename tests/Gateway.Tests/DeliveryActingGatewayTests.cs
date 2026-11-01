@@ -100,7 +100,7 @@ public sealed class DeliveryActingGatewayTests
         env.Set("OCTOPUS_API_KEY", "API-" + new string('R', 20));
         env.EditConfig = cfg =>
         {
-            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             var oct = (JsonObject)cfg["octopus"]!;
             oct["url"] = stub.Base + "/octopus";
             cfg["delivery"] = new JsonObject { ["autoPromote"] = new JsonObject { ["enabled"] = true, ["environments"] = new JsonArray("uat", "prod"), ["gatewayEnvironment"] = "tdd" } };
@@ -152,8 +152,8 @@ public sealed class DeliveryActingGatewayTests
             Assert.Contains(stub.Seen, r => r.Method == "PUT" && r.Path.EndsWith("/interruptions/Interruptions-3/responsible"));
             Assert.Equal("Proceed", JsonNode.Parse(stub.Seen.Single(r => r.Path.EndsWith("/submit")).Body)!["Result"]!.ToString());
             Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
-            // the engine acts for tdd; the shadow of the environments v1's AutoPromoter still promotes (uat and prod, W9.10p) is there, so the status shows its comparison
-            Assert.NotNull((await Get(host, "/api/v1/status")).Json!["deliveryShadow"]);
+            // nothing is decided in shadow any more (v1's AutoPromoter is gone): the status has no comparison
+            Assert.Null((await Get(host, "/api/v1/status")).Json!["deliveryShadow"]);
         });
     }
 }

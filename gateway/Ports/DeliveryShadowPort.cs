@@ -37,9 +37,8 @@ static class DeliveryShadowSettings
             // v1 promotes only where autoPromote is on and names this gateway's environment (AutoPromoteHere); otherwise the train observes
             var acts = cfg.AutoPromoteHere;
             var named = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
-            // W9.10p: where the engine acts the train promotes the named environments only when delivery.autoPromote.trainActs is on (W9.12). Until then v1's AutoPromoter promotes them and the train decides them in shadow
-            // (policy.Shadow: the decisions are recorded and compared with the AutoPromoter's, the commands are not executed). In the shadow run itself (the engine does not act) every named environment is v1's and recorded as before.
-            var shadowed = engineActs && !cfg.TrainActs ? named : [];
+            // The train promotes the named environments (v1's AutoPromoter is gone: V3.2); nothing is decided in shadow any more.
+            List<string> shadowed = [];
             var environments = shadowed.Count > 0 ? [] : named;
             var names = new Dictionary<string, string>(); var urls = new Dictionary<string, string>();
             foreach (var k in DeliveryPolicy.Chain)
