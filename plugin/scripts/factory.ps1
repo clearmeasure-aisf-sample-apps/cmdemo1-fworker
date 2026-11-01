@@ -31,9 +31,9 @@ $here = $PSScriptRoot
 $script:FactoryCause = $null
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
-    'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'auto-promote', 'ingest-event', 'check-secrets',
+    'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
     'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'backlog', 'amend-criteria', 'split-item', 'create-item', 'set-priority', 'link-dependency', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action', 'git-credential', 'park-item', 'resettle-item', 'plant-snapshot-await', 'leader-lease', 'item-pr', 'ci-release', 'copilot-settle', 'copilot-owner', 'transcript-save', 'transcript-load', 'transcript-prune')
-$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'auto-promote', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'backlog', 'git-credential', 'plant-snapshot-await', 'leader-lease', 'item-pr', 'ci-release', 'transcript-save', 'transcript-load', 'transcript-prune')
+$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'backlog', 'git-credential', 'plant-snapshot-await', 'leader-lease', 'item-pr', 'ci-release', 'transcript-save', 'transcript-load', 'transcript-prune')
 
 function Write-Out($obj, [int]$code) {
     $obj.exit = $code
@@ -47,7 +47,7 @@ function Write-Out($obj, [int]$code) {
 function Add-GhReport($o) { try { $g = Get-GhRateReport; if ($g -and $o -is [System.Collections.IDictionary]) { $o['_github'] = $g } } catch { } }
 if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
     $verb = $Rest[1]
-    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Promote', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager', 'Verbs.Keeper', 'Replenish', 'Leader') { . (Join-Path $here "lib/$f.ps1") }
+    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager', 'Verbs.Keeper', 'Replenish', 'Leader') { . (Join-Path $here "lib/$f.ps1") }
     $ErrorActionPreference = 'Stop'
     try {
         if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }

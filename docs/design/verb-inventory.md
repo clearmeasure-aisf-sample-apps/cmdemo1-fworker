@@ -7,9 +7,7 @@ fails when the three disagree: the `$ServerVerbs` list of `factory.ps1`, the JSO
 `gateway/Policies/VerbPolicy.cs`, and the `$NoLockVerbs` list and `UseEndpointReason` for the two flags of the JSON). Adding or removing a verb
 means a row here and an entry in the JSON in the same pull request.
 
-**Count: 74, not 73.** The refactor design says 73. The code has 74: the table of R9 does not name `auto-promote` (the automatic promotion of a
-release to uat and prod, `lib/Verbs.Promote.ps1`, run by `gateway/AutoPromoter.cs`). It goes to the DeliveryTrainSaga with `settle` and
-`publish-demo`; the row of R9 gets the verb in the same pull request. The design's counts stay at 73 until its owner reconciles them (follow-up).
+**Count: 73.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan.
 
 ## Columns
 
@@ -63,7 +61,6 @@ release to uat and prod, `lib/Verbs.Promote.ps1`, run by `gateway/AutoPromoter.c
 | `copilot-settle` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | admin only |
 | `copilot-owner` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | admin only |
 | `private-build` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | owner |
-| `auto-promote` | `Verbs.Promote.ps1` | DeliveryTrainSaga | saga | admin only |
 | `sync-board` | `Verbs.Sweep.ps1` | BoardReconciler | coordinator | admin only |
 | `ingest-event` | `Verbs.Sweep.ps1` | S3EventIngress | coordinator | admin only |
 | `journal` | `Journal.ps1` | HistoryProjection | handler | admin only |
