@@ -382,7 +382,7 @@ t. **Done (2026-10-14): SSE keepalive** (enhancement 11). Every event stream (wo
    writes a `: ping` comment every 25 s, busy or idle (`FACTORY_SSE_PING_SECONDS`); before, a ping came only after 15 s without an event.
    The stream clients (`Client.Subscribe.ps1`, `Client.Own.ps1`) ignore comment lines and print `stream.error` only from the third failed
    attempt in a row (after a drop by error: the drop and 2 failed reconnects; after a clean end of the stream: 3 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
-u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, `gateway/PlantSnapshot.cs`, `plugin/scripts/lib/PlantSnapshot.ps1`).
+u. **Done (2026-10-14): the plant survives a graceful restart** (**V3.2, 2026-11-01: the snapshot ref and its rule scripts are gone; the plant is kept in the database only, restored from it by the process that takes the SQL lock, `restore.how` sql; the text below is the history**) (enhancement 5, `gateway/PlantSnapshot.cs`, `plugin/scripts/lib/PlantSnapshot.ps1`).
    At SIGTERM the gateway writes its offers, assignments (not QC environments), owners and leases as the message of a parentless commit held by
    `refs/factory/<instance>/plant-snapshot`; the next start reads it back before its first sweep and restores it (an unanswered offer gets a fresh
    window and is pushed again when its worker reconnects, or at once to a worker already reconnected). The start removes the ref after reading it,
@@ -393,7 +393,7 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, 
    claims before the first sweep (`restore.corrected`). tdd, in the shadow run, keeps the ref.) Messages,
    questions and presence are still in memory only. That was the behaviour without the leader lease (`FACTORY_LEADER_LEASE=0`); with it,
    entry x.
-x. **Done (2026-10-14, issue 94): one acting gateway across releases** (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
+x. **Done (2026-10-14, issue 94): one acting gateway across releases** (**V3.2, 2026-11-01: the ref lease is gone; the SQL application lock `fworker:leader` is the only lease. `/api/v1/status` `leader` keeps `role`, `holder`, `epoch` (now the SQL term), `supersededBy` and `sql` (`held`, `epoch`, `lost`, `yielded`, ...); `predecessor`, `renewedAt`, `until`, `renewals`, `checks` and the lease seconds are removed; `timing.leaderLeaseSeconds`, `leaderRenewSeconds`, `leaderCheckSeconds` and `leaderHandoverSeconds` are removed; the text below is the history**) (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
    mode the new revision starts before the old one stops: before, both swept, the new one restored nothing (the old one's snapshot came at its
    SIGTERM, later) and sessions kept their stream on the old process while their calls reached the new one (#68).
    - The leader lease is the ref `refs/factory/<instance>/gateway-leader`: a commit whose message is the record (epoch, holder, version,

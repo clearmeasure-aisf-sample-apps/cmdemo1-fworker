@@ -913,7 +913,8 @@ $OwnerScenarios['pass-merge: a hand-made two-parent merge pushed by a worker whi
 $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
     # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
     # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
-    # The suites run with the snapshot off (run.ps1); it is on for this scenario's gateways.
+    # The suites run with the plant off (run.ps1); it is on for this scenario's gateways. Since V3.2 the plant is kept in the database only, so a gateway without one (the engine of the v1 matrix) keeps none.
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the plant is kept in the database, and the gateway of this engine has none (the engine with a database runs this scenario)' $true; return }
     $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; $oldSnap = $env:FACTORY_PLANT_SNAPSHOT; $env:FACTORY_PLANT_SNAPSHOT = '1'; Restart-Gateway
     try {
         Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
@@ -925,15 +926,15 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         $before = Get-Plant
         Restart-Gateway -Graceful
         $logs = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | ForEach-Object { Get-Content $_.FullName } | Where-Object { $_ -match '"gateway":"plant-(snapshot|restore)"' }
-        # (v1 writes the snapshot ref through a rule script: exit 0; where the engine acts the plant is a row in SQL: "store":"sql","saved":true)
-        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and ($_ -match '"exit":0' -or $_ -match '"store":"sql".*"saved":true') }
-        Check 'at SIGTERM the gateway wrote its plant to GitHub (v2: to SQL): exit 0' (@($saved).Count -ge 1) (($logs -join "`n") + ' ' + (((Get-FakeState).refs) -join ' '))
+        # (the plant is rows of SQL: "store":"sql","saved":true)
+        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and $_ -match '"store":"sql".*"saved":true' }
+        Check 'at SIGTERM the gateway wrote its plant to the database' (@($saved).Count -ge 1) ($logs -join "`n")
         # the restore runs in the background after the start (gateway/Program.cs): /ready and the status answer before it, and until it has run the
         # status has no plantSnapshot.restore, which StrictMode would throw on; wait for the field itself
         [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.PSObject.Properties['restore'] })
         $st = Get-Plant; $rs = $st.plantSnapshot.restore
         Check 'the next start restored it before its first sweep: assignments and the owner' ($rs.skipped -eq '' -and $rs.assignments -ge 2 -and $rs.owners -ge 1) ($rs | ConvertTo-Json -Compress)
-        Check 'the snapshot is used once: the start removed the ref after reading it' ((Wait-Until -Seconds 30 { @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' }).Count -eq 0 })) (((Get-FakeState).refs) -join ' ')
+        Check 'the restore came from the database' ($rs.how -eq 'sql') ($rs | ConvertTo-Json -Compress)
         Check 'the owner of the accepted item is the same' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$a" -and $_.Value -eq 'sara' }).Count -eq 1) ($st.plant.owners | ConvertTo-Json -Compress)
         $ra = @($st.plant.assignments | Where-Object { $_.item -eq $a }); $rb = @($st.plant.assignments | Where-Object { $_.item -eq $b })
         Check 'the accepted assignment keeps its id and stays accepted' ($ra.Count -eq 1 -and $ra[0].id -eq $ea.assignment -and $ra[0].accepted -eq $true -and $ra[0].worker -eq 'sara') ($ra | ConvertTo-Json -Compress)
@@ -952,10 +953,6 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         Check 'the client does not accept a resent item again' (@(Get-WorkerEvents 'sara' | Where-Object { $_.event -eq 'item.accepted' -and $_.item -eq $a }).Count -le 1) (@(Get-WorkerEvents 'sara' | Where-Object { $_.item -eq $a }) | ConvertTo-Json -Compress)
     } finally {
         Stop-OwnerClient 'sara'
-        # the next restart of this suite must not restore this scenario's plant
-        foreach ($ref in @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' })) {
-            try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/$ref" -Method DELETE -Headers @{ Authorization = 'Bearer fake-operator' } | Out-Null } catch { }
-        }
         $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; $env:FACTORY_PLANT_SNAPSHOT = $oldSnap; Restart-Gateway
     }
 }
@@ -1671,6 +1668,6 @@ $OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
     'base update: a verdict recorded between the trigger and the delayed update stops the gateway''s update'   # (baseupdate.ps1) Bu-Worker starts the sessions it needs
     'base update (conflict mode): master moves; a clean branch that is behind is left alone, and the owner of a conflicting one is told once, reason conflict'   # (baseupdate.ps1) restarts the gateway, its own sessions bc1 and bc2, new items
     'runner gate: at most runner.maxProcesses rule scripts at once; a freed slot goes to the sweep first, the journal last; a verb that waits too long is runner-busy'   # (runner-gate.ps1) restarts the gateway
-    'leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch'   # (leader.ps1)
+    'leader: two gateways overlap: the newer takes the lease, the older stops acting, writes its final snapshot and hands its streams over; the newer restores it before its first sweep'   # (leader.ps1) restarts the gateway first
     'journal fold: repeated matched, waiting and reassigned lines edit one comment per kind; another line ends the fold; folds do not count against the cap'   # (journal-fold.ps1) an item no sweep touches
 ) | ForEach-Object { [void]$OwnerBarriers.Add($_) }

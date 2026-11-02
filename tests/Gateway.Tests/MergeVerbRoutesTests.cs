@@ -285,7 +285,7 @@ public sealed class MergeVerbRoutesTests
     [Fact]
     public async Task TheBranchIsNotMoved_ByAGatewayThatDoesNotHoldTheLeaderLease()
     {
-        var leader = new GatewayLeader(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");   // (starting: it has not taken the lease)
+        var leader = new GatewayLeader(new LeaderSettings { On = true });   // (starting: it has not taken the lease)
         Assert.False(leader.MayAct);
         var handlers = MergeVerbHandlers.For(new ServiceCollection().AddSingleton(leader).BuildServiceProvider());
         var a = await handlers.BaseUpdateBranch("{\"item\":7,\"pr\":11,\"expected\":\"h\"}", Timeout);

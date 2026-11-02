@@ -126,7 +126,10 @@ public sealed class SqlIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger,
     /// <summary>
     /// One batch, one transaction: the claim is taken (an expired one is overwritten with this owner, a missing one inserted under a range lock) and only then is the ledger read, because a handling that
     /// records deletes its claim in the same transaction as it inserts its result: whoever gets the claim afterwards sees the result. The outcome is the first column: 1 claimed, 2 taken over,
-    /// 0 a live claim of another (owner and expiry follow), 3 a result is recorded (its columns follow).
+    /// 0 a live claim of another (owner and expiry follow), 3 a result is recorded (its columns follow), 4 refused: a newer term holds the leadership (the term follows).
+    /// The claim-epoch guard (V3.2, item 5 of #578): the SQL application lock is the only fence, and the epoch of its term is the one on factory.Leadership. A process whose own term is older than the one on the
+    /// row (it lost the lock and has not noticed yet) takes no claim at all: a key it would hold could be held by the newer term meanwhile. A live claim of an older term is still waited for until it runs out, not taken
+    /// over at once: its handling may still be inside the call while the node leaves (the overlap of a release), and a second call would double the effect.
     /// </summary>
     public ClaimOutcome Claim(string key)
     {
@@ -137,23 +140,31 @@ public sealed class SqlIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger,
             BEGIN TRANSACTION;
             DECLARE @now datetime2 = SYSUTCDATETIME();
             DECLARE @state int;
-            UPDATE factory.IdempotencyClaims WITH (UPDLOCK, HOLDLOCK) SET OwnerNode = @n, OwnerEpoch = @e, ClaimedAt = @now, ExpiresAt = DATEADD(MILLISECOND, @ttl, @now)
-                WHERE [Key] = @k AND ExpiresAt <= @now;
-            IF @@ROWCOUNT > 0 SET @state = 2;
+            DECLARE @newer bigint = NULL;
+            IF @e > 0 AND OBJECT_ID(N'factory.Leadership', N'U') IS NOT NULL
+                SELECT @newer = Epoch FROM factory.Leadership WHERE Id = 1 AND Epoch > @e;
+            IF @newer IS NOT NULL SET @state = 4;
             ELSE
             BEGIN
-                INSERT INTO factory.IdempotencyClaims ([Key], OwnerNode, OwnerEpoch, ClaimedAt, ExpiresAt)
-                SELECT @k, @n, @e, @now, DATEADD(MILLISECOND, @ttl, @now)
-                WHERE NOT EXISTS (SELECT 1 FROM factory.IdempotencyClaims WITH (UPDLOCK, HOLDLOCK) WHERE [Key] = @k);
-                IF @@ROWCOUNT > 0 SET @state = 1; ELSE SET @state = 0;
-            END
-            IF @state IN (1, 2) AND EXISTS (SELECT 1 FROM factory.IdempotencyLedger WHERE [Key] = @k)
-            BEGIN
-                DELETE FROM factory.IdempotencyClaims WHERE [Key] = @k;
-                SET @state = 3;
+                UPDATE factory.IdempotencyClaims WITH (UPDLOCK, HOLDLOCK) SET OwnerNode = @n, OwnerEpoch = @e, ClaimedAt = @now, ExpiresAt = DATEADD(MILLISECOND, @ttl, @now)
+                    WHERE [Key] = @k AND ExpiresAt <= @now;
+                IF @@ROWCOUNT > 0 SET @state = 2;
+                ELSE
+                BEGIN
+                    INSERT INTO factory.IdempotencyClaims ([Key], OwnerNode, OwnerEpoch, ClaimedAt, ExpiresAt)
+                    SELECT @k, @n, @e, @now, DATEADD(MILLISECOND, @ttl, @now)
+                    WHERE NOT EXISTS (SELECT 1 FROM factory.IdempotencyClaims WITH (UPDLOCK, HOLDLOCK) WHERE [Key] = @k);
+                    IF @@ROWCOUNT > 0 SET @state = 1; ELSE SET @state = 0;
+                END
+                IF @state IN (1, 2) AND EXISTS (SELECT 1 FROM factory.IdempotencyLedger WHERE [Key] = @k)
+                BEGIN
+                    DELETE FROM factory.IdempotencyClaims WHERE [Key] = @k;
+                    SET @state = 3;
+                END
             END
             COMMIT TRANSACTION;
             IF @state = 3 SELECT 3, Ok, Failure, Error, Execution, Url FROM factory.IdempotencyLedger WHERE [Key] = @k;
+            ELSE IF @state = 4 SELECT 4, NULL, @newer, NULL, NULL, NULL;
             ELSE IF @state = 0 SELECT 0, OwnerNode, OwnerEpoch, ExpiresAt, NULL, NULL FROM factory.IdempotencyClaims WHERE [Key] = @k;
             ELSE SELECT @state, NULL, NULL, NULL, NULL, NULL;
             """, c);
@@ -170,6 +181,7 @@ public sealed class SqlIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger,
                 case 1: return new(ClaimState.Claimed);
                 case 2: return new(ClaimState.TakenOver);
                 case 3: return new(ClaimState.Done, new CommandResult(r.GetBoolean(1), (FailureKind)r.GetInt32(2), r.GetString(3), r.GetString(4), r.GetString(5)));
+                case 4: return new(ClaimState.Pending, Holder: new ClaimOwner("newer-term", r.GetInt64(2)));   // a newer term acts: this handling ends as a pending one and is asked again (by a node that is leaving anyway)
                 default: return new(ClaimState.Pending, Holder: new ClaimOwner(r.GetString(1), r.GetInt64(2)), ExpiresAt: DateTime.SpecifyKind(r.GetDateTime(3), DateTimeKind.Utc));
             }
         }
