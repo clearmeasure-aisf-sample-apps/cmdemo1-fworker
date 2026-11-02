@@ -144,6 +144,7 @@ function Stop-TestEnv { Stop-ClientHost; foreach ($p in $script:Procs) { try { S
 
 # $script:WaitScale lengthens every wait (default 1): the promote suite on v2 sets it, because the delivery train looks again at the scheduled-message poll of the Wolverine host (5 s at the least in a test gateway), where v1 passed every 3 s
 $script:WaitScale = 1
+$script:BeforeScenario = $null   # a suite's hook that runs after the fake's reset of each scenario (Run-Scenario)
 function Wait-Until([scriptblock]$Cond, [int]$Seconds = 30, [string]$Message = 'condition') {
     $end = (Get-Date).AddSeconds($Seconds * $script:WaitScale)
     while ((Get-Date) -lt $end) { if (& $Cond) { return $true }; Start-Sleep -Milliseconds 400 }
