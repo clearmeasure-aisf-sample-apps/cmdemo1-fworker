@@ -382,7 +382,6 @@ function Lbl-Leave($Saved, [int[]]$Items, [string[]]$Clients) {
 }
 
 $SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the runtime''s free capacity (never past maxConcurrent), a runtime: label with no capacity passes the item over, a hotfix label starts the hotfix plan'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the scheduler''s capacity, the slot request and the plan of the saga are the v2 engine''s (v1''s intake counts owner sessions only)' $true; return }
     Saga-NumbersAbove 100
     $items = @(); $clients = @()
     # the runtime runs two sessions at most; the plans of the intake name the hotfix plan too (as config/deploy.overrides.json does)
@@ -419,7 +418,6 @@ $SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the
 }
 
 $SagaScenarios['saga: intake: a worker: pin is honoured on the saga''s offer (only the pinned session is offered the item)'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the offers of saga items are the v2 engine''s' $true; return }
     Saga-NumbersAbove 160
     if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
     Start-OwnerClient 'pn1' 'persistent-local' '--capacity 1 --no-auto-accept'
@@ -514,7 +512,6 @@ function Adm-History([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return ''
 function Adm-Status { try { return (Invoke-RestMethod "$(Get-GatewayBase)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5).v2.admission } catch { return $null } }
 
 $SagaScenarios['saga: admission: a replenished item starts its saga in the pass that creates it, at Technical Design, and the admission has counted its passes'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1''s sweep runs a replenished item (suite keeper)' $true; return }
     Saga-NumbersAbove 120
     $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
     $items = @()
@@ -564,7 +561,6 @@ $SagaScenarios['saga: admission: a replenished item starts its saga in the pass 
 }
 
 $SagaScenarios['saga: admission: a card a person moves from Todo into Development gets a saga that begins at Develop, and a card in Todo gets none'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1''s sweep runs the card a person moves (suites auto and owner)' $true; return }
     Saga-NumbersAbove 140
     $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
     $items = @()
@@ -604,7 +600,6 @@ $SagaScenarios['saga: admission: a card a person moves from Todo into Developmen
 }
 
 $SagaScenarios['saga: admission: an item whose issue a person closed and then reopened gets a second generation (a reopened item), and v1''s sweep does nothing to a card of its own that has no saga'] = {
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1''s sweep runs these items (suites auto and owner)' $true; return }
     Saga-NumbersAbove 160
     $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
     $oldGrace = [Environment]::GetEnvironmentVariable('FACTORY_ADMISSION_REOPEN_GRACE_SECONDS')

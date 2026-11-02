@@ -37,7 +37,7 @@ function Ld-StartSuiteGateway {
 }
 function Ld-SuiteLog { $f = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | Sort-Object LastWriteTime | Where-Object { $_.Name -notmatch 'gateway-ld' }; if ($f) { "$(@($f)[-1].FullName)" } else { '' } }
 # (a gateway without a database has no lease, so the scenarios below say so on the engine that has none and pass)
-function Ld-V2Only { if ($script:GoldenEngine -eq 'v2') { return $true }; Check 'v2 only: a gateway without a database has no lease (the SQL application lock is the lease); the engine with one runs this scenario' $true; return $false }
+function Ld-V2Only { return $true }
 
 $LeaderScenarios = [ordered]@{}
 

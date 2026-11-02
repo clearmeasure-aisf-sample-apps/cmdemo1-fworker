@@ -809,7 +809,6 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
     # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
     # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
     # The suites run with the plant off (run.ps1); it is on for this scenario's gateways. Since V3.2 the plant is kept in the database only, so a gateway without one (the engine of the v1 matrix) keeps none.
-    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the plant is kept in the database, and the gateway of this engine has none (the engine with a database runs this scenario)' $true; return }
     $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; $oldSnap = $env:FACTORY_PLANT_SNAPSHOT; $env:FACTORY_PLANT_SNAPSHOT = '1'; Restart-Gateway
     try {
         Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
