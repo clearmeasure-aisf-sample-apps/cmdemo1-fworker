@@ -291,7 +291,7 @@ function Check([string]$Name, [bool]$Ok, $Detail = '') {
     if ($Ok) { Write-Host "    ok    $Name"; return }
     # V3.2a diagnostic: an item that is not offered is either not admitted (no saga yet) or not offered by its saga; the status says which (v2.admission and the rest of v2). It goes into the failure line, which the job log keeps.
     if ($Name -match 'offered' -and (Get-Command Get-Plant -ErrorAction SilentlyContinue)) {
-        try { $st = Get-Plant; $dg = [ordered]@{ admission = $st.v2.admission; v2 = ($st.v2 | Select-Object -Property * -ExcludeProperty admission); waiting = $st.plant.waiting; unowned = $st.plant.unowned } | ConvertTo-Json -Compress -Depth 5; if ($dg.Length -gt 2500) { $dg = $dg.Substring(0, 2500) }; $Detail = "$Detail DIAG $dg" } catch { $Detail = "$Detail DIAG status unreadable: $($_.Exception.Message)" }
+        try { $st = Get-Plant; $pick = { param($o, $n) if ($o -and $o.PSObject.Properties[$n]) { $o.$n } else { $null } }; $v2 = & $pick $st 'v2'; $pl = & $pick $st 'plant'; $dg = [ordered]@{ admission = (& $pick $v2 'admission'); v2keys = $(if ($v2) { @($v2.PSObject.Properties.Name) } else { @() }); waiting = (& $pick $pl 'waiting'); unowned = (& $pick $pl 'unowned') } | ConvertTo-Json -Compress -Depth 5; if ($dg.Length -gt 2500) { $dg = $dg.Substring(0, 2500) }; $Detail = "$Detail DIAG $dg" } catch { $Detail = "$Detail DIAG status unreadable: $($_.Exception.Message)" }
     }
     Write-Host "    FAIL  $Name  $Detail"; [void]$script:Failures.Add("$($script:Current): $Name $Detail")
 }
