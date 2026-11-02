@@ -136,6 +136,18 @@ public sealed class OwnerReleaseTests
     }
 
     [Fact]
+    public async Task AtTheMerge_AFaultOfTheVerbs_IsLoggedNotRetried_WhileTheIdleReleaseStillRetries()
+    {
+        var down = new Router((_, _) => new VerbAnswer(20, "{}"));
+        var calls = new List<string>();
+        Assert.Equal("unreadable", await new OwnerRelease(() => down, null, i => calls.Add("merged " + i)).Run(Of(OwnerReleaseKinds.Merged), default));
+        Assert.Equal(["merged 7"], calls);
+        var noRelease = new Router((verb, _) => verb == "get-item" ? Claimed("worker-1") : new VerbAnswer(20, "{}"));
+        Assert.Equal("unreadable", await new OwnerRelease(() => noRelease).Run(Of(OwnerReleaseKinds.Completed), default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new OwnerRelease(() => down).Run(Request(), default));
+    }
+
+    [Fact]
     public async Task APlantThatCannotForget_DoesNotUndoTheRelease()
     {
         var router = new Router((verb, _) => verb == "get-item" ? Claimed("worker-1") : Ok(new JsonObject { ["ok"] = true }));

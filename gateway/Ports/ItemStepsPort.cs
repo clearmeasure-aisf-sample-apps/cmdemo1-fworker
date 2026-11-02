@@ -35,12 +35,15 @@ public sealed class OwnerRelease(Func<IVerbRouter?> router, Action<int, string>?
         var got = await verbs.RunAsync("get-item", new JsonObject { ["item"] = item }.ToJsonString(), Timeout);
         // an item that is not there (or not this gateway's) has no owner to release; any other refusal is tried again by the host
         if (got.Code is 11 or 12 or 10) return "no-item";
+        // an item that is over keeps its claim at worst until the lease runs out; the plant has let the owner go already, so a fault here is logged, not tried again into the dead letters
+        if (got.Code != 0 && over) { Console.Error.WriteLine($"owner release of {m.Item} ({m.Kind}): get-item answered {got.Code}; the claim is left"); return "unreadable"; }
         if (got.Code != 0) throw new InvalidOperationException($"get-item answered {got.Code}");
         var claim = Parse(got.Output)?["state"]?["claim"] as JsonObject;
         var holder = claim?["holder"]?.ToString() ?? "";
         if (holder.Length == 0) return "no-claim";
         var released = await verbs.RunAsync("release", new JsonObject { ["item"] = item, ["holder"] = holder, ["reason"] = m.Reason }.ToJsonString(), Timeout);
         if (released.Code == 40) return "other-owner";   // claim-not-held: someone took the item meanwhile
+        if (released.Code != 0 && over) { Console.Error.WriteLine($"owner release of {m.Item} ({m.Kind}): release answered {released.Code}; the claim is left"); return "unreadable"; }
         if (released.Code != 0) throw new InvalidOperationException($"release answered {released.Code}");
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = over ? $"owner-released-{m.Kind}" : "owner-released-idle", ["item"] = item, ["holder"] = holder, ["reason"] = m.Reason }.ToJsonString());
         if (!over) try { forget?.Invoke(item, holder); } catch (Exception e) { Console.Error.WriteLine($"owner release of {m.Item}: the plant could not forget {holder}: {e.GetType().Name}"); }
