@@ -182,6 +182,7 @@ static class MergeSteps
             case MergeResultKind.Merged:
                 if (r.Commit.Length > 0) s.MergeCommit = r.Commit.ToLowerInvariant();
                 c.Decide(WorkItemActions.Merged, r.Commit.Length > 0 ? $"commit {Short(r.Commit)}" : "merged", r.Reason);
+                c.ReleaseOwner(OwnerReleaseKinds.Merged, "the pull request was merged");
                 c.Advance("merged");
                 return StepAnswer.Applied;
             case MergeResultKind.HeadMoved:

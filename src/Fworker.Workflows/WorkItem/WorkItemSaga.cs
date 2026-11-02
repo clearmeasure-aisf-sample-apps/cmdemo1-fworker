@@ -313,7 +313,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 StartSession st => new SessionStartRequested(item, state.Generation, st.ArmId, st.Key, st.SlotId, st.Runtime, st.Host, st.Phase),
                 ChangeFootprint f => new Capacity.FootprintChanged(item, f.Key, f.Files, state.Generation),
                 LeaveTrain l => new Merge.MergeTrainLeft(item.Repository.ToString(), item, l.Reason, state.Generation),
-                ReleaseOwner r => new OwnerReleaseRequested(item, r.Key, r.Reason, state.Generation),
+                ReleaseOwner r => new OwnerReleaseRequested(item, r.Key, r.Reason, state.Generation, r.Kind),
                 _ => throw new InvalidOperationException($"no message for the command {c.GetType().Name}"),
             });
         if (state.MergeRequestEmitted && state.MergeRequest is { } m && state.Status == WorkItemStatus.Open && !state.Parked)
