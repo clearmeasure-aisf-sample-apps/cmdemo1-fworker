@@ -468,12 +468,16 @@ static class KeeperWiring
     /// W9.10g: the plant steps (claim-ref reap, board guard, replenishment, the keeper's count) over the same ports as the verbs, for the recurring jobs: null without the instance configuration, its home repository or a GitHub
     /// identity. <paramref name="mayAct"/> is the lease: a step that finds it ended stops before its next write. The claim refs' first-seen memory is the file of the rule script (claim-orphans.json of the state directory).
     /// </summary>
-    public static PlantSteps? MakePlantSteps(IServiceProvider services, Func<bool> mayAct, Func<string, string?>? env = null, HttpClient? http = null, IClaimOrphanMemory? orphans = null)
+    public static PlantSteps? MakePlantSteps(IServiceProvider services, Func<bool> mayAct, Func<string, string?>? env = null, HttpClient? http = null, IClaimOrphanMemory? orphans = null, Func<Fworker.Workflows.WorkItem.StartWorkItem, string, Task>? start = null)
     {
         env ??= Environment.GetEnvironmentVariable;
         if (Build(services, env, http) is not { } p) return null;
-        return new PlantSteps(p.Cx, p.GitHub, orphans ?? new FileClaimOrphans(p.Locks.StateDir), PlantStepSettings.From(p.Root, env), mayAct);
+        return new PlantSteps(p.Cx, p.GitHub, orphans ?? new FileClaimOrphans(p.Locks.StateDir), PlantStepSettings.From(p.Root, env), mayAct, start);
     }
+
+    /// <summary>V1.4: the flag of a Release Queue card without a merge record, over the same ports as the verbs; null without the instance configuration, its home repository or a GitHub identity.</summary>
+    public static ReleaseQueueFlags? MakeReleaseQueueFlags(IServiceProvider services, Func<string, string?>? env = null, HttpClient? http = null) =>
+        Build(services, env ?? Environment.GetEnvironmentVariable, http) is { } p ? new ReleaseQueueFlags(p.Cx) : null;
 
     sealed record Parts(VerbContext Cx, KeeperGitHub GitHub, KeeperFileLocks Locks, JsonNode Root);
 
@@ -504,7 +508,7 @@ static class KeeperWiring
         var ownership = services.GetService<WorkItemParts>()?.Ownership;
         IKeeperSaga saga = host is null || ownership is null ? new NoSaga() : new KeeperSagaPort(ownership, home, m => host.PublishAsync(m));
         var locks = new KeeperFileLocks(itemLocks, env);
-        return new Parts(new VerbContext(rules, github, new KeeperStateStore(store, ledger), locks, saga), github, locks, root);
+        return new Parts(new VerbContext(rules, github, new KeeperStateStore(store, ledger), locks, saga, null, services.GetService<Plant>()?.KeeperCap), github, locks, root);   // (V1.4: the keeper's limit of new items a day is the plant's record, the one the pipeline checks)
     }
 
     // the secrets catalogue and the waiting minutes of the journal, from the configuration the rule scripts read

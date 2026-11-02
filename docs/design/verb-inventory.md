@@ -176,3 +176,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.
 - **merge-peer-approved** (until W9.11b): The peer-approved merge policy is dropped (decision 4 of 2026-10-30), not ported; its suites go with v1 (W9.11a). Every environment runs mergePolicy auto.
 - **merge-hybrid-script** (until W9.11b): The adoption (W9.9b) gives the saga every open item, and W9.11b deletes the branch with the router of v1.
+
+## Labels that no verb reads
+
+`agent:<name>` (for example `agent:cursor`) is not a label of the factory: no verb of v1 or v2 reads it. The agent of a runtime is runtime configuration (`runtimes...octopus.agent`, `runtimes...caeJob.agent`); the label of an item that names a runtime is `runtime:<kind>` (V1.3 of the v2-only plan reads it in the slot request, `SlotRequestSettings.RuntimeFor`).

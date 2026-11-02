@@ -10,7 +10,7 @@ public sealed class WorkItemConflictException(string item) : Exception($"the wor
 /// again to the state that won; the input is never applied twice, because only the winning save counts. Delivery is at least once, so what the saga answers for a repeated input is already in
 /// <see cref="WorkItemSaga"/>: the same decisions again for a redelivery, nothing for a repeated key. The messages and timers of the result are published by the caller after this returns.
 /// </summary>
-public sealed class WorkItemService(IWorkItemStore store, WorkItemSaga saga, Func<DateTimeOffset>? clock = null, ReadoptionGate? readoption = null)
+public sealed class WorkItemService(IWorkItemStore store, WorkItemSaga saga, Func<DateTimeOffset>? clock = null, ReadoptionGate? readoption = null, Func<bool>? holdLeaseTimers = null)
 {
     readonly Func<DateTimeOffset> clock = clock ?? (() => DateTimeOffset.UtcNow);
     const int Attempts = 5;
@@ -26,6 +26,13 @@ public sealed class WorkItemService(IWorkItemStore store, WorkItemSaga saga, Fun
             readoption.Refused();
             var s = held.State;
             return WorkItemResult.Quiet(new WorkItemDecision(WorkItemOutcome.NotFound, s.Generation, s.Plan, s.Status == WorkItemStatus.Completed ? null : s.Step.ToString(), s.ArmId.Length == 0 ? null : s.ArmId, "the item awaits its re-adoption after a break"));
+        }
+        // V1.4: a lease that ran out while no gateway was up is renewed by the gap renewal (SagaGapRenew), not relaunched: until that has run for the term, the timer of an expired lease waits (it is dropped; the re-arm job
+        // sends an overdue one again, WorkItemRearm, and by then a renewed lease has made it stale)
+        if (input is PhaseLeaseExpired && holdLeaseTimers?.Invoke() == true && await store.Load(key, ct) is { } waiting)
+        {
+            var w = waiting.State;
+            return WorkItemResult.Quiet(new WorkItemDecision(WorkItemOutcome.NotFound, w.Generation, w.Plan, w.Status == WorkItemStatus.Completed ? null : w.Step.ToString(), w.ArmId.Length == 0 ? null : w.ArmId, "the lease timer waits for the gap renewal of the term"));
         }
         for (var attempt = 0; attempt < Attempts; attempt++)
         {

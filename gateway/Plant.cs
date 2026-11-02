@@ -1992,6 +1992,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
                 if (kind == "own-item" && OwnerRuntime(item) != null) pin = null;   // an item a Copilot task or Cursor agent owns goes to that task only (Plant.Runtimes.cs)
+                // V1.3: an item of the scheduler holds a slot (the offer carries it); a pin that no connected session of the plant can honour is ignored, so that RouteRuntime starts the session on the slot. A pin to a runtime worker
+                // (the bot re-pins items to the worker that ran them: it takes only the item it was started for), to a worker that is gone or to one that is not connected would keep the slot, and the offer waiting for it, for ever
+                if (kind == "own-item" && !string.IsNullOrEmpty(pin) && (o["slot"]?.ToString() ?? "").Length > 0 && !(workers.TryGetValue(pin, out var pinned) && pinned.Connected && !RuntimeWorker(pinned))) pin = null;
                 if (assignments.TryGetValue(key, out var ex))
                 {
                     // the offer predates the acceptance: the sweep read the board before the accept (issue 75: a sweep takes tens of seconds and reads

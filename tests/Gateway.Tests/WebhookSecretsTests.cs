@@ -57,7 +57,7 @@ public sealed class WebhookSecretsTests
         Assert.Null(host.RuntimeCommands);   // v1 and shadow: Attach is not called, so the host is as W2.3 left it
         var slots = RecurringJobSlots.Attach(host);
         Assert.Equal([RecurringJobSlots.BoardReconciler, RecurringJobSlots.CatalogReread, RecurringJobSlots.IngressDedupPurge, RecurringJobSlots.DocsIntake, RecurringJobSlots.FeatureChecks, RecurringJobSlots.SagaRearm, RecurringJobSlots.LedgerPurge, RecurringJobSlots.IncidentHealth, RecurringJobSlots.ItemSteps,
-            RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune, RecurringJobSlots.CapacityReap, RecurringJobSlots.Adoption], slots.Slots.Select(x => x.Name).ToArray());
+            RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune, RecurringJobSlots.CapacityReap, RecurringJobSlots.Adoption, RecurringJobSlots.GapRenew, RecurringJobSlots.BaseWatchFallback, RecurringJobSlots.ReleaseQueueFlag], slots.Slots.Select(x => x.Name).ToArray());
         var services = new ServiceCollection();
         host.RuntimeCommands!(services, new WolverineOptions());
         Assert.Same(slots, services.BuildServiceProvider().GetRequiredService<RecurringJobSlots>());

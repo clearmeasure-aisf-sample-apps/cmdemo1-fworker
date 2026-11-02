@@ -20,7 +20,8 @@ public sealed record IntakeSettings(
     string V2Label,
     string FactoryLabel,
     string RivalLabel,
-    string DemoLabel)
+    string DemoLabel,
+    string EnvLabel = "")
 {
     public const string DefaultV2Label = "engine:v2";
 
@@ -45,7 +46,8 @@ public sealed record IntakeSettings(
         }
         catch { }
         return new IntakeSettings(enabled, wip, Text(i, "fromColumn") ?? "Todo", Strings(i, "holdLabels"), perRepo, Strings(i, "v2Plans").Select(p => p.ToLowerInvariant()).ToList(),
-            Text(i, "v2Label") ?? DefaultV2Label, Text(root, "label") ?? "", Text(root, "rivalLabel") ?? "", Text(root, "demoLabel") ?? "");
+            Text(i, "v2Label") ?? DefaultV2Label, Text(root, "label") ?? "", Text(root, "rivalLabel") ?? "", Text(root, "demoLabel") ?? "",
+            Fworker.Workflows.Keeper.FactoryRules.EnvLabelOf(root, env));
     }
 
     static bool Bool(JsonNode? n, string name) { try { return n?[name] is JsonValue v && v.TryGetValue<bool>(out var b) && b; } catch { return false; } }
@@ -106,7 +108,7 @@ public static class IntakeRule
         return new IntakeDecision(null, NoCandidate, passed);
     }
 
-    // Left in the column: a closed issue, one without the factory label or with the rival or the demo label, a hold label (hold:* or intake.holdLabels), a worker:* pin, one without a card, one whose dependencies are not met
+    // Left in the column: a closed issue, one without the factory label or with the rival or the demo label, a hold label (hold:* or intake.holdLabels), a worker:* pin, an item outside the environment's scope, one without a card, one whose dependencies are not met
     static string? Ineligible(IntakeCandidate c, IntakeSettings s)
     {
         if (!c.Open) return "closed";
@@ -114,6 +116,12 @@ public static class IntakeRule
         if (s.RivalLabel.Length > 0 && Has(c.Labels, s.RivalLabel)) return "rival-label";
         if (s.DemoLabel.Length > 0 && Has(c.Labels, s.DemoLabel)) return "demo-label";
         if (c.Labels.Any(l => l.StartsWith("hold:", StringComparison.OrdinalIgnoreCase) || l.StartsWith("worker:", StringComparison.OrdinalIgnoreCase) || s.HoldLabels.Contains(l, StringComparer.OrdinalIgnoreCase))) return "held-or-pinned";
+        // V1.2: with env scoping on, an item is this gateway's only when it carries exactly one env: label and it is this environment's (Test-ItemInScope); another environment's item stays in the column
+        if (s.EnvLabel.Length > 0)
+        {
+            var envs = c.Labels.Where(l => l.StartsWith("env:", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (envs.Count != 1 || !string.Equals(envs[0], s.EnvLabel, StringComparison.OrdinalIgnoreCase)) return "out-of-scope";
+        }
         if (!c.HasCard) return "no-card";
         if (!c.DependenciesMet) return "depends-on";
         return null;

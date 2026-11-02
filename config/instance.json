@@ -144,9 +144,10 @@
     "shadowEnvironments": []
   },
   "recurringJobs": {
-    "comment": "W9.10g: the intervals of the engine's recurring jobs that are not fixed (they exist only where the engine acts). The board reconciler polls every 2 minutes (30 to 600 seconds; owner default of 2026-10-30, instead of a projects_v2_item webhook; /api/v1/status v2.reconciler measures its GitHub cost). The plant-wide steps of the sweep (claim-ref reap, gap renewal, board guard, replenish, the keeper's backlog count) run at plantStepsSeconds, which follows FACTORY_SWEEP_SECONDS when absent (never faster than 5 seconds); the QC sync at qcSyncSeconds or the plant steps' interval, whichever is shorter; the retention prune every retentionHours.",
+    "comment": "W9.10g: the intervals of the engine's recurring jobs that are not fixed (they exist only where the engine acts). The board reconciler polls every 2 minutes (30 to 600 seconds; owner default of 2026-10-30, instead of a projects_v2_item webhook; /api/v1/status v2.reconciler measures its GitHub cost). The plant-wide steps of the sweep (claim-ref reap, gap renewal, board guard, replenish, the keeper's backlog count) run at plantStepsSeconds, which follows FACTORY_SWEEP_SECONDS when absent (never faster than 5 seconds); the QC sync at qcSyncSeconds or the plant steps' interval, whichever is shorter; the retention prune every retentionHours. V1.4: the base update fallback after a missed webhook (job base-watch-fallback) runs every baseWatchSeconds (5 to 3600).",
     "boardReconcilerSeconds": 120,
     "qcSyncSeconds": 60,
+    "baseWatchSeconds": 300,
     "retentionHours": 24
   },
   "retention": {
