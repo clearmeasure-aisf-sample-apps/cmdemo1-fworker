@@ -84,9 +84,13 @@ public static class ShadowGate
     /// <summary>v2 judges the newest qualifying release of a deployable and environment; v1 judges per item, so an older release a newer one superseded is judged by v1 alone.</summary>
     public const string NewestOnly = "newest-only";
 
+    /// <summary>v1 judges a release in the first environment of the chain it has not reached (Verbs.Promote.ps1: <c>$tk</c> is the first target whose deployment is not Success) and says nothing of the later ones; v2 has a train per environment and each describes the release, so while uat waits, prod's train says "it has no deployment to uat".</summary>
+    public const string ChainPosition = "chain-position";
+
     static readonly (string Id, string Reason)[] Declared =
     [
         (QueueOnlyV1, "v1 judges only releases that a Release Queue item names (Get-PromoQueue groups by state.merge.release, set at queue time): a v2-only row for a release no queued item names is not a difference, and it is not a comparison either"),
+        (ChainPosition, "v1 judges a release in the first environment it has not reached and says nothing of the later ones; v2 has a train per environment, and the later ones say they wait for the earlier one: a v2-only row for a release v1 judges in an earlier environment of the same deployable is not a difference"),
         (NewestOnly, "v2 judges the newest qualifying release (#496); v1 judges per item: a v1-only row for an older release that a newer release v2 decided supersedes is not a difference"),
     ];
 
@@ -105,7 +109,11 @@ public static class ShadowGate
 
         var queueOnly = v2Only.Where(x => !v1Named.Contains(x.Release) && !v1Judged.Contains(x.Release)).ToList();
         var newestOnly = v1Only.Where(x => seen.Any(n => n.V2Seen && n.Deployable == x.Deployable && n.Environment == x.Environment && CompareReleases(n.Release, x.Release) > 0)).ToList();
-        var declaredKeys = queueOnly.Concat(newestOnly).Select(x => x.Key).ToHashSet();
+        // (V2.1) v1 saw this release of this deployable in another environment: it is waiting there, and the row of the later environment is v2's description of the same wait. The 6 unexplained rows of tdd on 2026-11-01 were these:
+        // prod rows of the releases 2.4.1228 to 2.4.1288, which v1 judged for uat. (The rule is by rule, not by the list of releases: a later release v1 judges is covered the same way.)
+        var chainPosition = v2Only.Where(x => !queueOnly.Contains(x) && seen.Any(n => n.V1Seen && n.Deployable == x.Deployable && n.Release == x.Release && n.Environment != x.Environment
+            && DeliveryPolicy.Chain.ToList().IndexOf(n.Environment.ToLowerInvariant()) is var ne and >= 0 && ne < DeliveryPolicy.Chain.ToList().IndexOf(x.Environment.ToLowerInvariant()))).ToList();
+        var declaredKeys = queueOnly.Concat(newestOnly).Concat(chainPosition).Select(x => x.Key).ToHashSet();
         var unexplained = differs.Count + v1Only.Count + v2Only.Count - declaredKeys.Count;
         var comparedReleases = compared.Select(x => x.Release).Distinct(StringComparer.Ordinal).Count();
 
@@ -117,7 +125,7 @@ public static class ShadowGate
             ["comparedReleases"] = comparedReleases, ["liveDiffers"] = differs.Count, ["liveV1Only"] = v1Only.Count, ["liveV2Only"] = v2Only.Count,
             ["declared"] = new JsonArray(Declared.Select(d => (JsonNode?)new JsonObject
             {
-                ["id"] = d.Id, ["reason"] = d.Reason, ["releases"] = Releases(d.Id == QueueOnlyV1 ? queueOnly : newestOnly),
+                ["id"] = d.Id, ["reason"] = d.Reason, ["releases"] = Releases(d.Id == QueueOnlyV1 ? queueOnly : d.Id == ChainPosition ? chainPosition : newestOnly),
             }).ToArray()),
             ["unexplainedLive"] = unexplained,
             // per compared release: the outcome (match or differs) and what the sides decided (promote, follow, wait:failed ...): all in a failed class would be no evidence of a good deployment

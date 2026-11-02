@@ -5,32 +5,62 @@
 $PromoteLabels = @('factory worker', 'Auto Merge')
 
 # An item waiting in the Release Queue for release $Ver, as settle leaves it after a gateway merge of a PASS (or, with -NoPass, of a person's merge)
+# -Engine v2: the delivery train keeps its state in the database, across the scenarios of a gateway, and a request, a Sign-off or a release left over from one scenario (the fake is reset for the next, so that a deployment Octopus would have
+# finished never does) is followed, retried or promoted in the next. Each scenario therefore starts on a gateway with a database of its own (as it starts on a fake of its own): the gateway is restarted on a new database after the fake's reset.
+if ($script:GoldenEngine -eq 'v2') {
+    # (every suite file is loaded by every run: the hook is the promote suite's only)
+    $script:BeforeScenario = {
+        if ($script:SuiteName -ne 'promote') { return }
+        $env:FACTORY_DB_CONNECTION = $env:FACTORY_TEST_SQL.Trim().TrimEnd(';') + ';Initial Catalog=fworker_v2ci_promote_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        Restart-Gateway
+    }
+}
+
 function Pm-Sha { ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40) }
 # What runs everywhere before the scenario's releases: release 3.0.0 at commit B, deployed to tdd, uat and prod; master history starts at B.
 # Once per scenario (Pm-Item calls it unless -NoBase).
 function Pm-Base {
     if ((Get-Variable -Scope Script -Name PmBaseFor -ValueOnly -ErrorAction SilentlyContinue) -eq $script:Current) { return }
     $script:PmBaseFor = $script:Current
+    # (on v2 the train keeps its state across the scenarios of a gateway, and keys a release by its version: the base of each scenario has a version of its own. A counter does not do: the scenarios of a run may each have a scope of their own
+    # for script variables, and the base of the second scenario was 3.0.1 again, the same release with another commit; the seconds since a fixed day are one per scenario, as the scenarios take longer than a second)
     $b = Pm-Sha
-    [void](Fake 'octo-release' @{ version = '3.0.0'; sha = $b; also = @('uat', 'prod') })
+    [void](Fake 'octo-release' @{ version = $(if ($script:GoldenEngine -eq 'v2') { "3.0.$([int]((Get-Date).ToUniversalTime() - [datetime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)).TotalSeconds)" } else { '3.0.0' }); sha = $b; also = @('uat', 'prod') })
     [void](Fake 'promote-history' @{ shas = @($b) })
 }
+# -Engine v2: the pull requests the scenario merges are numbered above every item (the fake numbers issues and pull requests apart, GitHub does not: the issue read of a number that is also a pull request answers the pull request,
+# and the deriver of ItemMerged takes it for "no item"). Once per scenario, as Pm-Base.
+function Pm-Numbers {
+    if ($script:GoldenEngine -ne 'v2') { return }
+    if ((Get-Variable -Scope Script -Name PmNumbersFor -ValueOnly -ErrorAction SilentlyContinue) -eq $script:Current) { return }
+    $script:PmNumbersFor = $script:Current
+    $script:WaitScale = 3   # the delivery train looks again at the scheduled-message poll of the Wolverine host (5 s at the least in a test gateway), where v1 passed every 3 s: every wait of the scenarios is three times longer
+    foreach ($i in 1..30) { [void](Fake 'merged-pr' @{ ref = "filler/$i"; title = "filler $i"; sha = (Pm-Sha); files = @('docs/filler.md') }) }
+}
 function Pm-Item([string]$Ver, [string[]]$Labels = $PromoteLabels, [string]$Tdd = 'Success', [switch]$NoPass, [switch]$NoRelease, [string]$Sha = '', [switch]$NoBase) {
+    Pm-Numbers
     if (-not $NoBase) { Pm-Base }
     $sha = if ($Sha) { $Sha } else { Pm-Sha }
     [void](Fake 'promote-history' @{ shas = @($sha) })
     if (-not $NoRelease) { [void](Fake 'octo-release' @{ version = $Ver; sha = $sha; tdd = $Tdd }) }
     $n = New-Item-Fake "Promote $Ver" 'x' $Labels 'Release Queue'
     $now = (Get-Date).ToUniversalTime().ToString('o')
-    $st = @{ schema = 1; item = $n; verdict = @{ passed = $true; pr = 7; processed = $true }; merge = @{ sha = $sha; pr = 7; merged_at = $now; green_at = $now; awaiting = 'release-queue'; release = $Ver; queued_at = $now } }
+    # V2.1 (-Engine v2, the delivery train acts): the item's pull request is a real merged one (the train derives ItemMerged from the merge webhook and reads the pull request). The state names a pull request that is none
+    # (7 on v1, 500 here, where 7 is a pull request of the scenario: the golden files call both "{#old}") for the verdict and the merge, which are equal and so a PASS merged by the gateway, as on v1: the golden writes of the scenarios are the same
+    $pr = 7
+    if ($script:GoldenEngine -eq 'v2') { $pr = 500; $prReal = [int](Fake 'merged-pr' @{ ref = "factory-worker/$n-promote"; title = "Promote $Ver"; sha = $sha; files = @('src/x.cs') }).number }
+    $st = @{ schema = 1; item = $n; verdict = @{ passed = $true; pr = $pr; processed = $true }; merge = @{ sha = $sha; pr = $pr; merged_at = $now; green_at = $now; awaiting = 'release-queue'; release = $Ver; queued_at = $now } }
     if ($NoPass) { $st.merge.by = 'person'; $st.verdict.passed = $false }
     $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n$($st | ConvertTo-Json -Depth 8)`n```````n"
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    # the merge webhook, after the state is there (the deriver reads the item): ItemMerged, a candidate of the train
+    if ($script:GoldenEngine -eq 'v2') { [void](Bu-MergeHook $prReal "factory-worker/$n-promote" $sha) }
     return @{ n = $n; sha = $sha }
 }
 # A factory item in Done whose pull request was merged as a commit before the next release (a docs-only keeper item goes there straight from
 # Functional Testing): its PR is merged as that commit, its state records the merge; -Awaiting leaves the merge unsettled
 function Pm-DoneItem([string]$Awaiting = '') {
+    Pm-Numbers
     Pm-Base
     $sha = Pm-Sha
     $n = New-Item-Fake 'Promote docs item' 'x' $PromoteLabels 'Done'
@@ -101,7 +131,8 @@ $PromoteScenarios = [ordered]@{
     # two full sweeps that read the board with both items before the release exists: none still holds a read with item a alone
     $f0 = [long](Get-Plant).sweep.full
     [void](Wait-Until -Seconds 40 { [long](Get-Plant).sweep.full -ge $f0 + 2 })
-    [void](Fake 'octo-release' @{ version = '3.2.1'; sha = $a.sha; tdd = 'Success' })
+    # (the release is made at the newest commit, as a real release is: the train reads the commits the release adds to what runs, and the item merged by the later commit is in that range)
+    [void](Fake 'octo-release' @{ version = '3.2.1'; sha = $b.sha; tdd = 'Success' })
     Check 'each item gets one waiting comment' (Wait-Until -Seconds 40 { @(Pm-Events $a.n 'promotion-waiting').Count -ge 1 -and @(Pm-Events $b.n 'promotion-waiting').Count -ge 1 }) "$(Pm-Brief $a.n) /// $(Pm-Brief $b.n)"
     Wait-Sweeps -Count 2 -MinSeconds 8     # later sweeps
     Check 'no deployment is created' ((Pm-Deps).creates -eq 0)
@@ -132,13 +163,13 @@ $PromoteScenarios = [ordered]@{
     $i = Pm-Item '3.5.1' -Tdd 'Failed'
     Check 'it waits, naming the failed tdd deployment' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'deployment to tdd is Failed' }).Count -eq 1 }) (Pm-Brief $i.n)
     [void](Fake 'health' @{ status = 503 })
-    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success' })
+    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success'; new = $true })
     Check 'then the non-Healthy tdd app' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'tdd app answered Unhealthy on /_healthcheck/detailed' }).Count -eq 1 }) (Pm-Brief $i.n)
     [void](Fake 'health' @{ status = 200 })
     Start-Sleep -Seconds 10
     Check 'healthy again is not enough: a non-Healthy read since the deployment finished keeps it waiting' ((Pm-Deps).creates -eq 0)
     # a new tdd deployment of the release (finished now): the reads start again
-    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success' })
+    [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success'; new = $true })
     # a slow CI machine can take more than one sweep to notice the new deployment, and can journal the reason again: at least one, within 90 s
     Check 'first it waits for two Healthy reads apart, the later after the settle time' (Wait-Until -Seconds 90 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not been Healthy long enough' }).Count -ge 1 }) (Pm-Brief $i.n)
     Check 'then it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.5.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)

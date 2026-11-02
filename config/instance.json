@@ -69,6 +69,8 @@
       "environments": ["uat", "prod"],
       "gatewayEnvironment": "",
       "signoffWaitHours": 2,
+      "pollSeconds": 120,
+      "readGapSeconds": 30,
       "trainActs": false
     },
     "finalEnvironment": "prod",

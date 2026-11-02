@@ -418,11 +418,11 @@ public class DeliveryTrainShadowDefectTests
     public async Task AWaitingTrain_LooksAgainAtLeastEveryTenMinutes_EvenWhenNoGapIsTimeBound()
     {
         var f = await OneRelease(["#7 carries the 'hold:owner' label"]);
-        var r = await f.After(TimeSpan.FromMinutes(1));   // the hold lifts only by a label change the train may not hear of
-        Assert.Equal(f.Now + DeliveryTrainService.SafetyWake, r.WakeAt);
+        var r = await f.After(TimeSpan.FromMinutes(1));   // the hold lifts only by a label change the train may not hear of: an item's gap is looked at again at the policy's poll (V2.1, v1's pace), well inside the safety wake
+        Assert.Equal(f.Now.AddSeconds(120), r.WakeAt);
         // and again after that, as long as it waits
-        var again = await f.After(DeliveryTrainService.SafetyWake);
-        Assert.Equal(f.Now + DeliveryTrainService.SafetyWake, again.WakeAt);
+        var again = await f.After(TimeSpan.FromMinutes(2));
+        Assert.Equal(f.Now.AddSeconds(120), again.WakeAt);
     }
 
     [Fact]

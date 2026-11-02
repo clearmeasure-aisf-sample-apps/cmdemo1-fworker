@@ -60,8 +60,9 @@ qc-gate-idle
 qc-gate-lifetime
 qc-gate-lease
 qc-gate-waiting
-# promote: the AutoPromoter of v1 still promotes the app to uat and prod where v2 acts (decision 2 of 2026-10-30, W9.10p), so the suite is unchanged on v2: no #496 (newest-only) difference shows in Tier 1,
-# and no block of golden/v2-differences.txt is made for it; the train's own decisions are compared in the shadow run (W5), not here. tdd is its environment: run.ps1 keeps the name, and names it as the gateway environment of delivery.autoPromote so that the AutoPromoter runs where the engine acts (W9.10p).
+# promote: V2.1, the delivery train acts for the app's uat and prod in the engine run (run.ps1 -Engine v2 sets delivery.autoPromote.trainActs for it, as the switch of V2.2 will in the deployed overrides), so the suite proves the train's promotions,
+# Sign-off answers and journal lines against v1's golden oracle. The AutoPromoter does not run there. tdd is its environment: run.ps1 keeps the name, and names it as the gateway environment of delivery.autoPromote. The train looks again at the
+# scheduled-message poll of the host (5 s in a test gateway, FACTORY_DB_CREATE), where v1 passed every 3 s: the scenarios wait three times as long on v2 (promote.ps1 Pm-Numbers). The scenarios of v1's pass design are declared below.
 promote
 # qc-worker: 330 checks green on v2 in one process (494 s); four shards in the matrix, as in the v1 job
 qc-worker
@@ -79,6 +80,13 @@ qc-worker
 #   W9.10g the plant-wide steps as recurring jobs (the claim-ref reap, the board guard, the replenishment): auto, owner and manager scenarios
 #   W9.10k the manager's actions on an item a saga owns and the plant that comes back from SQL (manager-actions.ps1, v2 only: v1 has no saga and the scenarios say so): manager, 'act: saga item:'
 # ---- scenarios of a claimed suite that stay on v1 (`v1-only-scenarios <suite> | <regex> | <reason>`: run.ps1 -Engine v2 neither lists nor runs them; the line must match a scenario) --------------------------------------
+# promote (V2.1): the scenarios that test v1's pass design and not what is promoted. The pass is the verb auto-promote, called by hand with a budget (the sweep's own budget, the cold pass, the pass that reads next to nothing), and its judgments
+# are kept in promote-judgments.json; the train has no pass: it decides per input and per timer, and keeps its evidence in its row. The state comment's promote_health is v1's record of the health reads, which the train does not write.
+v1-only-scenarios promote | ^promote: a slow promotion ends within its budget | the pass budget (auto-promote --budget_seconds) is v1's pass design: the train has no pass and no budget
+v1-only-scenarios promote | ^promote: a large release queue with an old failed release does not slow the board sweep | the slow pass run on the side (auto-promote --test_promotion_delay_ms) and the sweep's answer without promotion steps are v1's pass design
+v1-only-scenarios promote | ^promote: a second pass with nothing changed reads next to nothing | the pass judgments file and its count of GitHub requests are v1's pass design (the train's reads are kept in memory and bounded per minute: DeliveryShadowReadsTests)
+v1-only-scenarios promote | ^promote: a cold pass over a large queue ends within its budget | the cold pass and its progress file are v1's pass design
+v1-only-scenarios promote | ^promote: the health reads are kept in the item state | promote_health in the state comment is v1's record; the train keeps its reads in its row (DeliveryTrainState, which survives a restart: DeliveryTrainShadowDefectTests)
 # The inline merge of the verdict call. On v1 validation-verdict runs Verb_merge -Gateway itself, so the PASS is merged in the call that records it and the golden writes hold "the gateway squash-merged PR" among the writes the call
 # caused. On v2 the verdict answers next=merge and the merge is the merge verb's, the sweep's or the saga's, a moment later (ItemVerbs.Flow.cs, W9.3, W9.10e), with the session's merge call writing the comment of a session's merge: the
 # checks of these scenarios (the verdict answer carries the merge, the merge is in the caused writes of the verdict call) are the inline merge's, which W9.11 removes with the sweep and the verdict script; the saga suite proves the merge on v2.

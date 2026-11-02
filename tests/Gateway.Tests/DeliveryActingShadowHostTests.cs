@@ -64,6 +64,23 @@ public sealed class DeliveryActingShadowHostTests
         }
     }
 
+    sealed class Answers : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var (status, body) = request.RequestUri!.AbsolutePath switch
+            {
+                "/api/Spaces-1/projects/orders-project" => (200, """{"Id":"Projects-1"}"""),
+                "/api/Spaces-1/projects/Projects-1/releases/1.0.2" => (200, """{"Id":"R2"}"""),
+                "/api/Spaces-1/environments" => (200, """{"Items":[]}"""),
+                "/api/Spaces-1/releases/R2/deployments" => (200, """{"Items":[]}"""),
+                "/api/Spaces-1/deployments/create/untenanted/v1" => (200, """{"DeploymentServerTasks":[{"ServerTaskId":"T-2-Uat"}]}"""),
+                _ => (404, "{}"),
+            };
+            return Task.FromResult(new HttpResponseMessage((System.Net.HttpStatusCode)status) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") });
+        }
+    }
+
     sealed class Rig : IAsyncDisposable
     {
         public readonly IHost Host;
@@ -85,7 +102,8 @@ public sealed class DeliveryActingShadowHostTests
             Shadow = new DeliveryShadow(policies, Store, () => DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5));
             var delivered = new DeliveredToTable(() => throw new InvalidOperationException("no database in this host"));
             var parts = new DeliveryShadowParts(Shadow, policies, reads, delivered, "");
-            var octopus = new OctopusPromoter(new HttpClient(), new OctopusPromoteSettings("Spaces-1", new Dictionary<string, string>(), () => { Interlocked.Increment(ref ExecutorCalls); return null; }));
+            // (the key is counted, and the deployment is created: a promotion the executor is refused is taken back by the train, which then ignores the Sign-off of a deployment it did not ask for)
+            var octopus = new OctopusPromoter(new HttpClient(new Answers()) { BaseAddress = new Uri("https://octopus.example/") }, new OctopusPromoteSettings("Spaces-1", new Dictionary<string, string>(), () => { Interlocked.Increment(ref ExecutorCalls); return "k"; }));
             var ledger = new InMemoryIdempotencyLedger();
             var executor = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, octopus), new AnswerSignOffHandler(ledger, octopus));
             Host = new HostBuilder()
@@ -159,6 +177,19 @@ public sealed class DeliveryActingShadowHostTests
         await Task.Delay(2500);
         Assert.Equal(0, rig.ExecutorCalls);
         Assert.Equal(0L, (long)rig.Shadow.Status()["v2"]!["commandsExecuted"]!);
+    }
+
+    [Fact]
+    public async Task WhereTheTrainPromotes_ASignOffTheWatcherReports_ReachesTheTrain_AndItsAnswerReachesTheExecutor()
+    {
+        // V2.1: the Octopus watcher's SignOffRequested goes through the router to the train that asked for the deployment, which answers it
+        await using var rig = new Rig(shadowed: false);
+        await rig.Start();
+        await rig.ReleaseGoesThroughTdd();
+        Assert.True(await Until(() => Volatile.Read(ref rig.ExecutorCalls) >= 1), "the PromoteRelease did not reach the executor");
+        await rig.Bus.PublishAsync(new OctopusDeploymentChanged("D-2-Uat", "T-2-Uat", "R-2", "1.0.2", "Uat", OctopusDeploymentPhase.Started, Sha('a')));
+        await rig.Bus.PublishAsync(new SignOffRequested("I-2", "D-2-Uat", "T-2-Uat", "R-2", "1.0.2", "Uat", Sha('a')));
+        Assert.True(await Until(() => Volatile.Read(ref rig.ExecutorCalls) >= 2), $"the AnswerSignOff did not reach the executor; log: {string.Join(" // ", rig.Log.TakeLast(40))}");
     }
 
     [Fact]

@@ -26,9 +26,9 @@ public sealed record RetentionSettings(int ItemHistoryDays = 180, int ShadowDays
 }
 
 /// <summary>What one run removed.</summary>
-public sealed record RetentionReport(int ItemHistory, int ShadowHistory, int ShadowComparisons, int Transcripts, int TranscriptsOverCap, bool More)
+public sealed record RetentionReport(int ItemHistory, int ShadowHistory, int ShadowComparisons, int Transcripts, int TranscriptsOverCap, bool More, int DeadLettersArchived = 0)
 {
-    public int Total => ItemHistory + ShadowHistory + ShadowComparisons + Transcripts + TranscriptsOverCap;
+    public int Total => ItemHistory + ShadowHistory + ShadowComparisons + Transcripts + TranscriptsOverCap + DeadLettersArchived;
 }
 
 public sealed class RetentionPrune(Func<FactoryDbContext> open, RetentionSettings settings, Func<DateTimeOffset>? clock = null)
@@ -58,7 +58,27 @@ public sealed class RetentionPrune(Func<FactoryDbContext> open, RetentionSetting
             transcripts = await db.Transcripts.Where(x => x.StartedAt < cut).ExecuteDeleteAsync(ct);
         }
         overCap = await TranscriptCap(at, ct);
-        return new(history, shadowHistory, comparisons, transcripts, overCap, more);
+        return new(history, shadowHistory, comparisons, transcripts, overCap, more, await ArchiveTrainWakeDeadLetters(ct));
+    }
+
+    /// <summary>
+    /// V2.1: the 121 TrainWake dead letters with MergeFactsException that tdd collected from 2026-10-30 (a restart's replay left a timer per input and the burst of full evaluations met a refusal of GitHub that the train did not know as a
+    /// fault) cannot happen again since #607: the wake is one timer, the facts reads obey the shadow's limits, and MergeFactsException is a failed read and a retry rule of every train's host. They are archived (Wolverine's own
+    /// <c>archived_at</c>, which every count of the status block already leaves out; nothing is deleted), and only those that failed before <see cref="TrainWakeFixedAt"/>: one that fails later is a new fault and stays visible.
+    /// Idempotent (an archived row is not touched again), harmless where there is none, and a table that is not there (a database of a test that builds only the factory tables) is no error.
+    /// </summary>
+    public static readonly DateTimeOffset TrainWakeFixedAt = new(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
+
+    async Task<int> ArchiveTrainWakeDeadLetters(CancellationToken ct)
+    {
+        await using var db = open();
+        try
+        {
+            return await db.Database.ExecuteSqlRawAsync(
+                "IF OBJECT_ID(N'wolverine.wolverine_dead_letters') IS NOT NULL UPDATE wolverine.wolverine_dead_letters SET archived_at = SYSDATETIMEOFFSET() " +
+                "WHERE archived_at IS NULL AND (message_type = N'delivery.train.wake' OR message_type LIKE N'%TrainWake') AND exception_type LIKE N'%MergeFactsException%' AND failed_at < @fixed", [new SqlParameter("@fixed", TrainWakeFixedAt)], ct);
+        }
+        catch (SqlException) { return 0; }   // (a housekeeping step never stops the others)
     }
 
     SqlParameter[] Params(DateTimeOffset cut) => [new("@n", settings.ChunkRows), new("@cut", cut)];

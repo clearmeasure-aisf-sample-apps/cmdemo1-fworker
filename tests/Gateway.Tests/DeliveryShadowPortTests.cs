@@ -240,11 +240,74 @@ public sealed class DeliveryShadowPortTests
         Assert.Equal(("https://t.example", "1.0.2", "Healthy"), (p.Url, p.RunningVersion, p.Status));
         Assert.Equal(["https://t.example/_build", "https://t.example/_hc"], app.Seen.Select(s => s.Url));
         Assert.All(app.Seen, s => Assert.Equal(HttpMethod.Get, s.Method));
+        // a page that is no JSON is an answer, as in v1 (Read-EnvHealth: "status N without overallStatus"); it ends the tries
         app.Answer = _ => (HttpStatusCode.ServiceUnavailable, "not json");
-        var down = await reads.Probe("ui", "tdd", default);
-        Assert.Equal("unreachable", down.Status);
-        Assert.Null(down.RunningVersion);
+        var odd = await reads.Probe("ui", "tdd", default);
+        Assert.Equal("status 503 without overallStatus", odd.Status);
+        Assert.Null(odd.RunningVersion);
         Assert.Null((await reads.Probe("ui", "nowhere", default)).Url);
+    }
+
+    sealed class Flaky(int failures, string body) : HttpMessageHandler
+    {
+        public int HealthCalls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/_build")) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"version":"1.0.2"}""") });
+            if (++HealthCalls <= failures) throw new HttpRequestException("connection reset");
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+        }
+    }
+
+    static HttpTrainReads ReadsWith(HttpMessageHandler app, List<TimeSpan> pauses, int tries = 3)
+    {
+        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Home, null, [new RepositoryEntry(Home, [new DeployableEntry("ui", Home, null, null, null, null, false)])], []);
+        var policies = new CatalogDeliveryPolicies(() => snapshot, _ => DeliveryShadowSettings.From(Config(Full)));
+        return new HttpTrainReads(new HttpClient(new Handler()) { BaseAddress = new Uri("https://api.example/") }, new HttpClient(app), "factory-worker", new Facts(), new ItemGateConfig("Auto Merge", "video"), policies, null, null, null,
+            tries, TimeSpan.FromSeconds(20), (d, _) => { pauses.Add(d); return Task.CompletedTask; });
+    }
+
+    [Fact]
+    public async Task AHealthReadThatFailsOnce_IsTriedAgainAsV1Does_AndIsNotABadRead()
+    {
+        var pauses = new List<TimeSpan>(); var app = new Flaky(1, """{"overallStatus":"Healthy"}""");
+        var p = await ReadsWith(app, pauses).Probe("ui", "tdd", default);
+        Assert.Equal("Healthy", p.Status);
+        Assert.Equal(2, app.HealthCalls);
+        var pause = Assert.Single(pauses);
+        Assert.InRange(pause, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(30));   // retrySeconds, and up to half of it more
+    }
+
+    [Fact]
+    public async Task AHealthReadThatFailsEveryTime_IsUnreachableAfterThreeTries_TwoPausesApart()
+    {
+        var pauses = new List<TimeSpan>(); var app = new Flaky(99, "");
+        var p = await ReadsWith(app, pauses).Probe("ui", "tdd", default);
+        Assert.Equal("unreachable", p.Status);
+        Assert.Equal(3, app.HealthCalls);
+        Assert.Equal(2, pauses.Count);
+        var one = new Flaky(99, ""); var none = new List<TimeSpan>();
+        Assert.Equal("unreachable", (await ReadsWith(one, none, tries: 1).Probe("ui", "tdd", default)).Status);   // octopus.health.retries 1: one try, no pause
+        Assert.Equal(1, one.HealthCalls); Assert.Empty(none);
+    }
+
+    [Fact]
+    public async Task WithTheIncidentSagaAttached_TheActingTrainsPortIsKept_SoTheSignOffsAndReleasesReachTheTrain()
+    {
+        var seen = new List<string>();
+        var train = new ShadowOctopusPort(ev => { seen.Add("train:" + ev.GetType().Name); return Task.FromResult(true); }, true);
+        var port = ShadowOctopusPort.WithIncidents(train, ev => { seen.Add("host:" + ev.GetType().Name); return Task.FromResult(true); });
+        Assert.Same(train, port);
+        await port.Publish(new SignOffRequested("I-1", "D-1", "T-1", "R-1", "1.0.2", "Uat", Sha1));
+        await port.Publish(new OctopusReleaseCreated("R-1", "1.0.2", Sha1));
+        Assert.Equal(["train:SignOffRequested", "train:OctopusReleaseCreated"], seen);
+        // no train (or one that could not be built): the deployments reach the incident saga and the other events are accepted and dropped
+        seen.Clear();
+        var alone = ShadowOctopusPort.WithIncidents(new ShadowOctopusPort(_ => Task.FromResult(false), false), ev => { seen.Add("host:" + ev.GetType().Name); return Task.FromResult(true); });
+        Assert.True(await alone.Publish(new SignOffRequested("I-1", "D-1", "T-1", "R-1", "1.0.2", "Uat", Sha1)));
+        Assert.True(await alone.Publish(new OctopusDeploymentChanged("D-1", "T-1", "R-1", "1.0.2", "Tdd", OctopusDeploymentPhase.Started, Sha1)));
+        Assert.Equal(["host:OctopusDeploymentChanged"], seen);
+        Assert.Same(alone.GetType(), ShadowOctopusPort.WithIncidents(null, _ => Task.FromResult(true)).GetType());
     }
 
     // ---- the ingress, the pass hook -------------------------------------------------------------------------------------------------------------------------

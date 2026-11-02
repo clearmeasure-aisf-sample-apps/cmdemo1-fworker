@@ -18,8 +18,10 @@ using Fworker.Workflows.Delivery;
 // kept the short time, read again, and final only when the second read, ten minutes after the first, says the same). Without that, one evaluation of a long range (a read per commit) spends the minute's cap before it ends, the train retries it, and the answers it already had expire and are
 // read again. A 'none' that depends on item state (no candidate item's state names the commit yet) and a 'waiting' keep their lifetimes: a longer one would put v2's decision behind v1's.
 sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceName, IMergeFactsReader facts, ItemGateConfig gates, IDeliveryPolicies policies,
-    Action<string, string?, string?, string?>? observe = null, Func<DateTimeOffset>? clock = null, Func<bool>? budgetLow = null) : ITrainReads
+    Action<string, string?, string?, string?>? observe = null, Func<DateTimeOffset>? clock = null, Func<bool>? budgetLow = null,
+    int healthTries = 3, TimeSpan healthGap = default, Func<TimeSpan, CancellationToken, Task>? pause = null) : ITrainReads
 {
+    readonly TimeSpan healthGap = healthGap == default ? TimeSpan.FromSeconds(20) : healthGap;
     /// <summary>Reads the shadow may make in a minute; v1's pass shares the token, so the shadow stays well under what a sweep needs.</summary>
     public const int MaxCallsPerMinute = 40;
     readonly Queue<DateTimeOffset> callTimes = new();
@@ -181,14 +183,27 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             if (b.IsSuccessStatusCode && JsonNode.Parse(await b.Content.ReadAsStringAsync(ct)) is JsonObject bo) version = bo["version"]?.ToString();
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException) { }
+        // V2.1: v1's Read-EnvHealth tries the health endpoint octopus.health.retries times (3), octopus.health.retrySeconds (20) apart (with up to half a gap of jitter) before it is unreachable. One stray failure
+        // is a stored bad read that blocks the release until a new deployment, so the read is tried again here too. An answer of any kind (even without overallStatus) ends the tries, as in v1.
         var status = "unreachable";
-        try
+        var tries = Math.Max(1, healthTries);
+        for (var attempt = 1; attempt <= tries; attempt++)
         {
-            using var h = await app.GetAsync(url + p.HealthPath, ct);
-            var text = await h.Content.ReadAsStringAsync(ct);
-            status = (JsonNode.Parse(text) as JsonObject)?["overallStatus"]?.ToString() is { Length: > 0 } s ? s : $"status {(int)h.StatusCode} without overallStatus";
+            try
+            {
+                using var h = await app.GetAsync(url + p.HealthPath, ct);
+                var text = await h.Content.ReadAsStringAsync(ct);
+                JsonNode? parsed = null;
+                try { parsed = JsonNode.Parse(text); } catch (System.Text.Json.JsonException) { }   // (a page that is not JSON is an answer, as in v1: "status N without overallStatus")
+                status = (parsed as JsonObject)?["overallStatus"]?.ToString() is { Length: > 0 } s ? s : $"status {(int)h.StatusCode} without overallStatus";
+                break;
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+            {
+                if (ct.IsCancellationRequested) throw;
+                if (attempt < tries) await (pause ?? ((d, c) => Task.Delay(d, c)))(healthGap + TimeSpan.FromMilliseconds(Random.Shared.NextDouble() * healthGap.TotalMilliseconds / 2), ct);
+            }
         }
-        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException) { }
         return new EnvProbe(url, version, status, now());
     }
 
