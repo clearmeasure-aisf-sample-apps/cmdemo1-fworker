@@ -49,7 +49,7 @@
     "healthPath": "/_healthcheck/detailed"
   },
   "delivery": {
-    "autoPromote": { "enabled": true, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd", "trainActs": true },
+    "autoPromote": { "enabled": true, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd" },
     "finalEnvironment": "tdd"
   },
   "api": {

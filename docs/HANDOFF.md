@@ -102,7 +102,8 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   release waits in the Release Queue and each item is told why, once per reason. `delivery.autoPromote` (off in the source defaults, on for
   the tdd gateway in `config/deploy.overrides.json`); design `docs/design/auto-promote.md`. Needs the Octopus permissions listed there granted
   to the gateway's Octopus account (owner action). When it is live, cmdemo1-system's `ui-auto-promote.yml` stops promoting ui.
-- **V2.2 (2026-11-01, owner: v2 takes uat/prod):** `config/deploy.overrides.json` sets `delivery.autoPromote.trainActs` true; `AutoPromoter.Runs` is then false where the engine acts, so only the train promotes uat and prod. Reverting the PR brings the loop back (until V2.3). Live events: `docs/design/fworker-wolverine-implementation.md` section 3.
+- **V2.2 (2026-11-01, owner: v2 takes uat/prod):** `config/deploy.overrides.json` sets `delivery.autoPromote.trainActs` true; `AutoPromoter.Runs` is then false where the engine acts, so only the train promotes uat and prod. Reverting the PR brings the loop back (until V2.3).
+- **V2.3 (2026-11-01):** `gateway/AutoPromoter.cs`, its registration, `AutoPromoteHere`-gated shadow ticks, `InstanceConfig.TrainActs`, `delivery.autoPromote.trainActs` and `timing.promoteSeconds` are gone; no stop switch (rollback = redeploy the previous image). The train promotes uat and prod wherever the engine acts. The `promote` suite runs on the v2 engine only (on v1 it reports one 'v2 only' check). Still to remove in a follow-up: the rule script verb `auto-promote` (`Verbs.Promote.ps1`, kept as the golden oracle of the suite), and the dead shadow machinery of W9.10p (`ObserveV1`, `DeliveryPolicy.Shadow`). Live events: `docs/design/fworker-wolverine-implementation.md` section 3.
 - **When a v2 item is Done relative to uat and prod** (W9.10p, the cutover to `delivery.finalEnvironment` tdd): v2 delivers at tdd and the app's uat and prod promotions stay with v1's `AutoPromoter`, which
   takes its items from the Release Queue (`merge.awaiting` release-queue, written by the state projection only while the saga is Settling). So the 24 hour settle window (`WorkItemPolicy.Settle`) does not complete
   an item whose release is not in prod: at the end of the window the saga decides `settle-held` and keeps the item Settling, in the Release Queue, and the item is Done when the prod train publishes
@@ -839,7 +840,7 @@ owner sets (`docs/design/operator-session.md` section 5):
 
 The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover (v2 acts on tdd)" (`config/deploy.overrides.json`):
 `engine.v2Environments` is `["tdd"]` and `engine.shadowEnvironments` is empty; `intake.enabled` true with `intake.v2Plans` `["docs","feature"]`;
-`scheduler.runtime` `octopus`; `delivery.finalEnvironment` `tdd` (uat and prod: since V2.2 the delivery train promotes them, `delivery.autoPromote.trainActs` true in the overrides, and the v1 `AutoPromoter` stands down; its code goes in V2.3). The Copilot and Cursor runtimes are off on tdd
+`scheduler.runtime` `octopus`; `delivery.finalEnvironment` `tdd` (uat and prod: since V2.2 the delivery train promotes them, `delivery.autoPromote.trainActs` true in the overrides, and the v1 `AutoPromoter` is removed since V2.3, the switch with it). The Copilot and Cursor runtimes are off on tdd
 for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
 Copilot on-demand manager of tdd, which needs the Copilot runtime.
 

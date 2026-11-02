@@ -39,7 +39,7 @@ public sealed class WolverineHostOffTests(TwoPortGateway gw) : IClassFixture<Two
         foreach (var t in WolverineHostTestSupport.HostTypes) Assert.DoesNotContain(gw.Host.Captured!, d => d.ServiceType == t);
         Assert.DoesNotContain(gw.Host.Captured!, d => d.ServiceType.FullName?.StartsWith("Wolverine", StringComparison.Ordinal) == true || d.ServiceType.FullName?.StartsWith("Fworker.Persistence", StringComparison.Ordinal) == true);
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order);
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "PlantTicker", "McpSessionSweeper" }, order);
         Assert.DoesNotContain(gw.Host.Services.GetServices<IHostedService>(), h => h.GetType().Namespace?.StartsWith("Wolverine", StringComparison.Ordinal) == true);
     }
 
@@ -121,7 +121,7 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
         }
         CompositionGraph.AssertSingletons(gw.Host.Services, gw.Host.Captured!);
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "WolverineHostService", "OctopusWatchService", "DeliveryShadowService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order);   // W5.2: the shadow run adds the Octopus watcher and the comparison tick
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "WolverineHostService", "OctopusWatchService", "DeliveryShadowService", "BaseWatch", "Sweeper", "PlantTicker", "McpSessionSweeper" }, order);   // W5.2: the shadow run adds the Octopus watcher and the comparison tick
         Assert.Same(gw.Host.Services.GetRequiredService<WolverineHostService>(), gw.Host.Services.GetServices<IHostedService>().OfType<WolverineHostService>().Single());
     }
 
