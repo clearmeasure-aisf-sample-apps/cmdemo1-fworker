@@ -102,10 +102,17 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
         return acting();
     }
 
-    async Task One(AdoptionReport report, ItemId id, BoardCard? card, IReadOnlyList<TrainState> trains, Dictionary<string, IReadOnlyList<ItemPromotion>> promotions, bool afterBreak, CancellationToken ct)
+    /// <summary>
+    /// V1.1: the adoption of one item from the admission, outside a run of the term: the same mapping, fencing and apply as the run's (no break: the term's run has decided that), with the item already read.
+    /// The counts go to <paramref name="report"/>; the result says what became of the item. <paramref name="afterBreak"/> is the reconciler's rule for an ended instance that v1 opened again (the next generation, from the comment).
+    /// </summary>
+    public async Task<AdoptionResult> AdoptOne(AdoptionReport report, ItemId id, BoardCard card, V1ItemRecord? read, CancellationToken ct, bool afterBreak = false) =>
+        await One(report, id, card, await LoadTrains(ct), new Dictionary<string, IReadOnlyList<ItemPromotion>>(StringComparer.Ordinal), afterBreak, ct, (read, true));
+
+    async Task<AdoptionResult> One(AdoptionReport report, ItemId id, BoardCard? card, IReadOnlyList<TrainState> trains, Dictionary<string, IReadOnlyList<ItemPromotion>> promotions, bool afterBreak, CancellationToken ct, (V1ItemRecord? Record, bool Given)? prefetched = null)
     {
         var key = id.ToString();
-        var read = await ports.Reads.ReadItem(id, ct);
+        var read = prefetched is { Given: true } given ? given.Record : await ports.Reads.ReadItem(id, ct);
         report.Read++;
         var state = read?.State;
         if (state is not null) promotions[key] = AdoptionTrain.Promotions(key, state);
@@ -120,7 +127,7 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
             var at = now();
             var mapping = AdoptionMapper.Map(snapshot with { HeldSlot = ledger?.Slots.GetValueOrDefault(key) }, options.Mapping, at, AdoptionFence.GenerationFor(rec?.State, afterBreak), options.Gap?.Invoke());
             var result = AdoptionReconciler.Reconcile(rec?.State, comment, cardSeq, mapping, at, afterBreak);
-            if (await Apply(report, key, result, rec?.Revision ?? 0, ct)) { Tally(report, result, mapping); return; }
+            if (await Apply(report, key, result, rec?.Revision ?? 0, ct)) { Tally(report, result, mapping); return result; }
             report.Conflicts++;
         }
         throw new AdoptionConflictException(key);

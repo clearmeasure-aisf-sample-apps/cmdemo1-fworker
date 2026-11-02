@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Ids;
 using Fworker.Workflows.Keeper;
+using Fworker.Workflows.WorkItem;
 
 namespace Fworker.Workflows.Reconcilers;
 
@@ -102,7 +104,8 @@ public interface IPlantSteps
     Task<PlantStepResult> DesignWaiting();
 }
 
-public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphanMemory orphans, PlantStepSettings settings, Func<bool>? mayAct = null) : IPlantSteps
+/// <param name="start">V1.1: starts the saga of the item Replenish has just placed in the keeper's column (the gateway where the engine acts; null: v1 runs the item); it is given the column, whose step the saga begins at. It may fail or answer false: the admission starts the saga of a card in a step column that has none.</param>
+public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphanMemory orphans, PlantStepSettings settings, Func<bool>? mayAct = null, Func<StartWorkItem, string, Task>? start = null) : IPlantSteps
 {
     FactoryRules Rules => cx.Rules;
     bool May() => mayAct?.Invoke() ?? true;
@@ -315,6 +318,13 @@ public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphan
                 var info = await github.GetItemInfo(n);
                 if (string.IsNullOrEmpty(info.CardId)) { await github.AddToBoard(info.NodeId); info = await github.GetItemInfo(n); }
                 if (!string.Equals(info.Column ?? "", Rules.KeeperColumn, StringComparison.OrdinalIgnoreCase)) await github.MoveCard(info, Rules.KeeperColumn);
+            }
+            // V1.1: the saga of the new item starts here, at the step of the column the card is in (no marker in the body: the feature plan, which the design switches to docs as for any item). A failure is no failure of the
+            // replenishment: the admission (Adoption/Admission.cs) starts the saga of a card in a step column that has none, the pass after.
+            if (start is not null)
+            {
+                try { await start(new StartWorkItem(new ItemId(new RepoId(Rules.Owner, Rules.Repo), n), "replenish", WorkPlans.Feature), Rules.KeeperColumn); }
+                catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"replenish: the saga of #{n} was not started ({e.GetType().Name}); the admission starts it"); }
             }
             await using (await cx.Locks.Item(d.Number, TimeSpan.FromSeconds(3))) await cx.Journal(d.Number, null, "replenish", [new("new", n), new("title", topic.Title)], "");
             used.Add(topic.Title.ToLowerInvariant());
