@@ -300,7 +300,7 @@ static class GatewayServiceCollectionExtensions
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
         var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
-        // Cutover review: v1's intake is off wherever intake.v2Plans names plans and the engine does not act on them (see Sweeper.IntakeOff): the kill switch, uat and prod (their image has intake.enabled true for tdd's engine), a v2 environment with no database.
+        // Cutover review: v1's intake is off wherever intake.v2Plans names plans and the engine does not act on them (see Sweeper.IntakeOff): uat and prod (their image has intake.enabled true for tdd's engine), a v2 environment with no database.
         // Where v2 is configured and there is no database the sweeper holds an ownership that is never loaded (EngineOptions.NoDatabase): it sweeps nothing at all.
         var intakeOff = !v2Sweep && Fworker.Workflows.Intake.IntakeSettings.From(c.Instance.Root, Environment.GetEnvironmentVariable).V2Plans.Count > 0;
         if (v2Sweep) services.AddSingleton(sp => SagaPlantWiring.Make(c, sp));   // W9.10k: the plant's input for the saga's items, and the sources of the patrol's parks and the release check's in-flight work

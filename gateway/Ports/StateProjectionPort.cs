@@ -7,7 +7,7 @@ using Wolverine;
 using Wolverine.ErrorHandling;
 using Wolverine.Runtime.Handlers;
 
-// W9.10i (docs/design/fworker-wolverine-implementation.md, W9.10i): the state comment projection, wired where the engine acts. It is the rollback path: `FACTORY_V2_OFF` or a revert hands every open item back to v1, which resumes
+// W9.10i (docs/design/fworker-wolverine-implementation.md, W9.10i): the state comment projection, wired where the engine acts. It is the rollback path: a redeploy of the previous release or a revert hands every open item back to v1, which resumes
 // from the item's state comment and the board. In the hybrid composition v1's verbs write the comment for what a session does (the design, the pull request, the verdict, the claim), and the saga's own transitions had no writer:
 // the parks the saga makes (merge-blocked, fix-forward-exhausted, held, the master parks), the lift of a park, the merge the gateway makes (no `merge` record, so no settle), the end of a settle window (no `done_at`), the
 // demotion of a closed pull request. Without them v1 would offer an item the saga had parked, merge again a PASS that was merged and never settle it.

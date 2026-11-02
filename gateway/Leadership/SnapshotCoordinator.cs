@@ -32,25 +32,54 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     DateTime loadFailedAt; bool skipLogged;
     /// <summary>When the first full sweep finished (EventHub.LastSweep): the board has then rebuilt the plant that could not be read, so a term whose first read failed may write it again.</summary>
     public Func<DateTime?>? LastFullSweep { get; set; }
-    // Whether the plant may be written: not while the first read of the term failed. After the first full sweep (the board has rebuilt what it holds) the stored plant is read once more: if it reads now, it is restored
-    // into the rebuilt one (Plant.Restore keeps what is already there) and writes are allowed; if it still does not read, the block stays, so an empty or partial plant never replaces the stored one.
-    async Task<bool> WritesBlockedAsync()
+    // Whether the plant may be written: not while the first read of the term failed. After the first full sweep (the board has rebuilt what it holds) the PERIODIC write of an acting process first reads the stored
+    // plant once more and merges the little of it that can be trusted (MergeStoredAsync), OUTSIDE the write semaphore, so a final write is never held up by it; then writes are allowed. If the stored plant still does not read,
+    // the block stays, so an empty or partial plant never replaces the stored one. The final write and the write at the stop never merge: they stay blocked.
+    readonly SemaphoreSlim mergeGate = new(1, 1);
+    async Task MergeIfDueAsync()
+    {
+        if (!loadFailed || store == null || !leader.MayAct || LastFullSweep?.Invoke() is not { } t || t <= loadFailedAt) return;
+        if (!await mergeGate.WaitAsync(0)) return;
+        try
+        {
+            if (!loadFailed) return;
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var stored = await store.Load(limit.Token);
+            var merged = 0;
+            if (stored != null && leader.MayAct)
+            {
+                var (na, no, skipped) = plant.Restore(MergeableOf(stored.Snapshot, plant.Snapshot()), 60 * 24);
+                merged = na + no;
+                if (skipped == "") { await CorrectAsync(); Interlocked.Exchange(ref heldEpoch, stored.Epoch); }
+            }
+            if (!leader.MayAct) return;   // stood down meanwhile: the write that follows does not happen either (SaveAsync asks again), and the block stays for the next term's own restore
+            loadFailed = false; skipLogged = false;
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["writes"] = "allowed-after-first-sweep", ["merged"] = merged }.ToJsonString());
+        }
+        catch (Exception) { /* still unreadable: stay blocked */ }
+        finally { mergeGate.Release(); }
+    }
+
+    bool LogBlocked()
     {
         if (!loadFailed) return false;
-        if (LastFullSweep?.Invoke() is { } t && t > loadFailedAt && store != null)
-        {
-            try
-            {
-                var stored = await store.Load();
-                if (stored != null) plant.Restore(stored.Snapshot, 60 * 24);
-                loadFailed = false; skipLogged = false;
-                Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["writes"] = "allowed-after-first-sweep", ["merged"] = stored != null }.ToJsonString());
-                return false;
-            }
-            catch (Exception) { /* still unreadable: stay blocked */ }
-        }
         if (!skipLogged) { skipLogged = true; Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["skipped"] = "load-failed" }.ToJsonString()); }
         return true;
+    }
+
+    // What of the stored plant may be merged into the plant the sweep rebuilt: the accepted assignments whose worker is the rebuilt plant's owner of that item (the id the worker's token names), and the owners and bot
+    // holders of items the rebuilt plant already has an owner or a bot for. No unaccepted offer (the sweep offers again), no runtime owners of Copilot or Cursor, no drains, no digest: those are what the board and the
+    // operator say now, and a stale one brings a finished item back.
+    static JsonObject MergeableOf(JsonObject stored, JsonObject rebuilt)
+    {
+        var owners = rebuilt["owners"] as JsonObject ?? new JsonObject(); var bots = rebuilt["bots"] as JsonObject ?? new JsonObject();
+        var f = new JsonObject { ["v"] = stored["v"]?.DeepClone() ?? 1, ["at"] = stored["at"]?.DeepClone() ?? DateTime.UtcNow.ToString("o") };
+        f["assignments"] = new JsonArray((stored["assignments"] as JsonArray ?? new JsonArray()).Where(a =>
+            a?["accepted"] is JsonValue av && av.TryGetValue<bool>(out var ok) && ok && owners[a["item"]?.ToString() ?? ""]?.ToString() is { Length: > 0 } o && o == a["worker"]?.ToString()).Select(a => a!.DeepClone()).ToArray());
+        f["owners"] = new JsonObject(); f["bots"] = new JsonObject();
+        foreach (var kv in stored["owners"] as JsonObject ?? new JsonObject()) if (owners.ContainsKey(kv.Key) && owners[kv.Key]?.ToString() == kv.Value?.ToString()) f["owners"]![kv.Key] = kv.Value?.DeepClone();
+        foreach (var kv in stored["bots"] as JsonObject ?? new JsonObject()) if (bots.ContainsKey(kv.Key) && bots[kv.Key]?.ToString() == kv.Value?.ToString()) f["bots"]![kv.Key] = kv.Value?.DeepClone();
+        return f;
     }
 
     /// <param name="on">The plant is kept (owner mode, not a suite's second gateway, FACTORY_PLANT_SNAPSHOT not 0); it also needs a store: without a database there is none, and the plant starts empty and is rebuilt from the board.</param>
@@ -111,7 +140,7 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
         try
         {
             if (!restored.Task.IsCompleted || store == null) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"not-restored-yet\"}}"); return; }
-            if (WritesBlockedAsync().GetAwaiter().GetResult()) return;
+            if (LogBlocked()) return;
             var snap = plant.Snapshot();
             using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var saved = store.Save(snap, leader.ClaimEpoch, leader.Holder, limit.Token).GetAwaiter().GetResult();
@@ -125,13 +154,14 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     public async Task<bool> SaveAsync(bool final, TimeSpan timeout)
     {
         if (store == null) return false;
-        if (await WritesBlockedAsync()) return false;
+        if (!final) await MergeIfDueAsync();
         // one write at a time, and none that waits longer than it may take: at a stop the final write must not queue behind a periodic one
         if (!await write.WaitAsync(timeout)) return false;
         try
         {
             // a periodic write that waited while the process stopped acting is not made: it would land after the final one
             if (!final && !leader.MayAct) return false;
+            if (LogBlocked()) return false;
             var plain = plant.Snapshot(); var ep = leader.ClaimEpoch;
             var snap = (JsonObject)plain.DeepClone(); snap["epoch"] = ep; snap["holder"] = leader.Holder; snap["final"] = final;
             // the rows of the database, in one transaction; a writer of an older epoch than the stored one is refused (it lost the lock)

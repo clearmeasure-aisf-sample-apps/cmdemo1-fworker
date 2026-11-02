@@ -14,7 +14,7 @@ using Fworker.Workflows.WorkItem;
 
 // W9.9b (docs/design/fworker-wolverine-implementation.md "W9.9b as built"): the adoption in the gateway. Only where the engine acts (Engine.V2Acts) with a database and a home repository; tdd stays in the shadow run and
 // its v1 is untouched (nothing here is made there). The run itself is Fworker.Workflows.Adoption.AdoptionRunner; this file is what it reads (GitHub: the board, the issues, the state comments, the pull requests; Octopus:
-// the Sign-offs now), the job that runs it (a recurring job of the leader: once per term of the lease, after the plant is restored) and the marker a process that the kill switch turned back to v1 leaves.
+// the Sign-offs now), the job that runs it (a recurring job of the leader: once per term of the lease, after the plant is restored).
 
 /// <summary>The reads of the adoption over the gateway's GitHub and Octopus readers. A read without its source throws or answers empty as noted: a board that cannot be read is a failed run (tried again), no Octopus is no Sign-offs.</summary>
 sealed class AdoptionGitHubReads(IAdoptionGitHub github, IItemIssueReader issues, IBoardReader boards, Func<BoardRef?> board, RepoId home, string defaultBranch, PendingSignOffReader? octopus = null,

@@ -64,7 +64,7 @@ sealed class StatusQuery
         // the session transcripts: sessions held, how many have lines not yet saved to GitHub, saves and failures
         o["transcripts"] = transcripts.Status();
         if (ownerMode) o["revocations"] = revocations.Status();
-        // the engine that acts here: shadow (v1 acts, v2 beside it) or v2, or the kill switch FACTORY_V2_OFF while the file names one (W0.0). Plain v1, the
+        // the engine that acts here: shadow (v1 acts, v2 beside it) or v2, (W0.0). Plain v1, the
         // default of every environment, adds nothing, so a default deployment answers exactly as before (the C0 pins list the keys); no block means v1
         if (engine.Reported) o["engine"] = engine.Status();
         // the system catalog (W1.2): its snapshot and the mismatch report against instance.json, only where it is switched on (catalog.enabled or

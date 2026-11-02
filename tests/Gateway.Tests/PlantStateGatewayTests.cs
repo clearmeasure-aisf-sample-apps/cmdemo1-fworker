@@ -120,9 +120,30 @@ public sealed class PlantStateGatewayTests
         Assert.False(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // a sweep has run, but the stored plant still does not read: blocked
         Assert.Equal(0, store.Saves);
         store.FailLoad = false;
-        Assert.True(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));       // it reads now: merged into the plant, and written
-        Assert.Equal("alice", plant.Snapshot()["owners"]!["12"]!.ToString());
+        Assert.True(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));       // it reads now: writes are allowed again
         Assert.Equal(1, store.Saves);
+    }
+
+    [Fact]
+    public async Task TheMergeAfterAFailedFirstRead_BringsBackNoItemTheRebuiltPlantDoesNotKnow_AndNeverFromAFinalWriteOrANonActingProcess()
+    {
+        // the stored plant has owners of #12 (alice) and #30 (bob); the board has since finished #30 and the rebuilt plant knows only #12
+        var store = new MemoryStore { FailLoad = true, Row = new PlantStateRead(Seed(), 0, "old", DateTimeOffset.UtcNow) };
+        DateTime? sweep = null;
+        var plant = NewPlant();
+        plant.Restore(new JsonObject { ["v"] = 1, ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = new JsonArray(), ["owners"] = new JsonObject { ["12"] = "alice" } }, 30);
+        var c = Coordinator(plant, store);
+        c.LastFullSweep = () => sweep;
+        await c.RestoreAsync("start");
+        sweep = DateTime.UtcNow.AddMinutes(1); store.FailLoad = false;
+        Assert.False(await c.SaveAsync(true, TimeSpan.FromSeconds(5)));      // a final write never merges: it stays blocked
+        Assert.Equal(0, store.Saves);
+        Assert.True(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // the periodic write of an acting process merges
+        var snap = plant.Snapshot();
+        Assert.Equal("alice", snap["owners"]!["12"]!.ToString());
+        Assert.Null(snap["owners"]!["30"]);                                  // #30 was not brought back
+        Assert.DoesNotContain(snap["assignments"]!.AsArray(), a => a!["item"]!.ToString() is "9" or "30");   // (no unaccepted offer comes back either)
+        Assert.Empty(snap["drained"]!.AsArray());                           // nor the stored drains
     }
 
     [Fact]

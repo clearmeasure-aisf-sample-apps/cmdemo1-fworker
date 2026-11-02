@@ -163,6 +163,34 @@ public sealed class FencingTests
     }
 
     [Fact]
+    public async Task AFencedCallWaitingForARunnerSlot_WhileTheDrainRuns_NeverStartsAScript()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = SlowPwsh();
+        var old = Environment.GetEnvironmentVariable("FACTORY_RUNNER_MAX");
+        Environment.SetEnvironmentVariable("FACTORY_RUNNER_MAX", "1");
+        try
+        {
+            var r = NewRunner(null);
+            var holding = true;
+            r.MayAct = () => holding;
+            var slot = r.RunAsync("get-item", "{}", TimeSpan.FromSeconds(3));          // takes the only slot for three seconds (a script that runs 30 s, ended by its timeout)
+            await Task.Delay(500);
+            var waiting = r.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(120));   // a fenced call: it waits for the slot
+            var sw = Stopwatch.StartNew();
+            while (r.FencedInFlight == 0 && sw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(20);
+            holding = false;                                                           // the lock is lost ...
+            var (_, killed) = await r.DrainFencedAsync(TimeSpan.Zero);                // ... and the drain finds nothing to end: the call has not started
+            Assert.Equal(0, killed);
+            await slot.WaitAsync(TimeSpan.FromSeconds(20));                            // the slot comes free
+            var (code, output) = await waiting.WaitAsync(TimeSpan.FromSeconds(20));    // ... and the waiting call is refused, it does not run for 30 s
+            Assert.Equal(20, code); Assert.Contains("lease-lost", output);
+            Assert.Equal(0, r.FencedInFlight);
+        }
+        finally { Environment.SetEnvironmentVariable("FACTORY_RUNNER_MAX", old); }
+    }
+
+    [Fact]
     public async Task Drain_AScriptThatFinishesInTime_IsNotEnded()
     {
         if (!StubPwsh.Supported) return;

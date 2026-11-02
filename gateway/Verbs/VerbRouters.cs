@@ -12,7 +12,7 @@ sealed class V1VerbRouter(Runner runner) : IVerbRouter
     }
 }
 
-// The engine branch: composed once at start from EngineOptions (config/instance.json engine lists, FACTORY_ENVIRONMENT, FACTORY_V2_OFF). v2 does not exist
+// The engine branch: composed once at start from EngineOptions (config/instance.json engine lists, FACTORY_ENVIRONMENT). v2 does not exist
 // yet, so every mode resolves to v1: a v2 or shadow environment still runs v1 alone, and nothing routes to v2. The v2 router joins the switch with the
 // wave that builds it; the branch is here so that it is chosen per environment and not in the pipeline.
 static class VerbRouterFactory

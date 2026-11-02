@@ -8,18 +8,17 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// W9.9b: the adoption in a gateway, where it exists and where it must not. Only an engine that acts (with a database, a home repository and a GitHub credential) has the recurring job and the "adoption" block of the v2 status;
-/// tdd's shadow run and v1 have neither (nothing of it is made), and the marker of the kill switch is written only by a process that the switch turned back to v1 in an environment named for v2.
+/// tdd's shadow run and v1 have neither (nothing of it is made).
 /// </summary>
 public sealed class AdoptionWiringTests
 {
     static readonly string Token = "ghp_" + new string('A', 36);   // (composed at run time: a token the gateway takes for a credential)
 
-    static GatewayEnvironment Env(string? mode, bool token = true, bool killSwitch = false)
+    static GatewayEnvironment Env(string? mode, bool token = true)
     {
         var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
         if (token) env.Set("GH_TOKEN", Token);
-        if (killSwitch) env.Set("FACTORY_V2_OFF", "1");
         env.EditConfig = cfg => cfg["engine"] = new JsonObject
         {
             ["v2Environments"] = new JsonArray(mode == "v2" ? "tdd" : "other"), ["shadowEnvironments"] = new JsonArray(mode == "shadow" ? "tdd" : "other"),

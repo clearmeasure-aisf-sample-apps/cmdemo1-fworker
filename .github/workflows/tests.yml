@@ -23,7 +23,7 @@
 # sagas). Those scenarios also run, as before, in the shards. An entry of the v2 matrix names its suites after `claims:`, not `suites:`, so "Every scenario is in exactly one shard" does not read it
 # (it runs tests/ci/run-v2-claims.py, which proves that every claim of the file is in exactly one v2 entry), and the jobs upload v2-results-*, not suite-results-*, so "Tests result" does not count
 # their scenarios a second time. They are required: "Tests result" fails when one fails (V2_BLOCKING there, true since the first green run of Tests on master). The job "Image starts without a database"
-# builds the image and starts it with no FACTORY_DB_CONNECTION three ways (uat; tdd with v2 configured; tdd with the kill switch): /ready must answer 200, 503 "database" (v2 inert, up), 200.
+# builds the image and starts it with no FACTORY_DB_CONNECTION two ways (uat; tdd with v2 configured): /ready must answer 200, 503 "database" (v2 inert, up).
 name: Tests
 
 on:
@@ -706,7 +706,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # The image starts without a database (issue 459, the kill-switch case of W2.0; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
+  # The image starts without a database (issue 459; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
   # image job is a sibling of this workflow's caller, not an input of it) and run twice with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
   # placeholder unset, so it does not wait for revocations) and with the secrets it requires at start and owner mode (the deployed settings need it; the secrets are made at run time):
   #  1. as uat (FACTORY_ENVIRONMENT=uat, where uat and prod run v1 with no database): /ready answers 200 within two minutes;
@@ -724,7 +724,7 @@ jobs:
       - name: Build the image
         run: docker build --file Dockerfile --build-arg VERSION=0.0.0 --tag fworker-start-check:ci .
 
-      - name: Run it without FACTORY_DB_CONNECTION as uat, as tdd with v2 configured, and as tdd with the kill switch
+      - name: Run it without FACTORY_DB_CONNECTION as uat, and as tdd with v2 configured
         run: |
           set -euo pipefail
           dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"; token_secret="$(openssl rand -hex 24)"
