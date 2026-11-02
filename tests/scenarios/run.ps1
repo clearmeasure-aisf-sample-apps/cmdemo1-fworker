@@ -330,7 +330,8 @@ if ($env:FACTORY_TEST_SQL) {
 # A suite's own Extra is applied first, the profile over it.
 $script:V2Profiles = @{
     # 'plain' leaves the host's timers at their defaults: with the recurring jobs at their floor the octopus scenario 'journal order' (accept while the offered and launched lines are in flight) fails on v2 (seen after #572); the plain profile is as master's run
-    'plain'        = @{ mergeStrategy = 'direct' }
+    # V3.2a: every profile carries the plans of the deployed image (config/deploy.overrides.json intake.v2Plans), so that the engine owns every item (V1.1 admission) and v1's sweep has nothing of its own, as on tdd
+    'plain'        = @{ mergeStrategy = 'direct'; intake = @{ v2Plans = @('docs', 'feature', 'hotfix', 'redeliver') } }
     'saga-docs'    = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs') }; scheduler = @{ featureSlots = $false } }
     'saga-feature' = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs', 'feature') }; scheduler = @{ featureSlots = $false } }
 }
