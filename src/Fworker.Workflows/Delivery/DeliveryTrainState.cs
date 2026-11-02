@@ -53,6 +53,8 @@ public sealed class TrainDeployment
     public bool Succeeded => Phase == "Succeeded";
     /// <summary>W8.3: this deployment is the train's own rollback (the deployment of a release that had run here before, ordered by the incident): it delivers no item.</summary>
     public bool Rollback { get; set; }
+    /// <summary>V2.1: the deployment appeared while this train had asked for its release, so it is the executor's own (a Sign-off is answered only on such a deployment). Null: saved before this was kept.</summary>
+    public bool? Ours { get; set; }
 }
 
 /// <summary>A Sign-off (manual intervention) a deployment of this environment waits at.</summary>
@@ -66,8 +68,12 @@ public sealed class TrainSignOff
     public bool Answered { get; set; }
     /// <summary>When the answer went out, and what it was: the train sends it again if the deployment does not move on.</summary>
     public DateTimeOffset? AnsweredAt { get; set; }
+    /// <summary>V2.1: the answer was refused (the Octopus account lacks the permission, or the tries ran out): not asked again before this time.</summary>
+    public DateTimeOffset? RetryAfter { get; set; }
     public bool LastProceed { get; set; }
     public string LastNotes { get; set; } = "";
+    /// <summary>V2.1: the consecutive looks whose read of the previous environment's app got no answer (see <see cref="TrainEvidence.Unreachable"/>).</summary>
+    public int HealthMisses { get; set; }
 }
 
 /// <summary>The health reads taken of the previous environment for one release, with the last evidence verdict (the clock of the read gap).</summary>
@@ -76,6 +82,8 @@ public sealed class TrainEvidence
     public List<TrainRead> Reads { get; set; } = [];
     public DateTimeOffset? LastReadAt { get; set; }
     public string LastGap { get; set; } = "";
+    /// <summary>V2.1: the consecutive looks whose health read got no answer at all. One try is made per look (nothing sleeps in the handler); only the <see cref="DeliveryPolicy.HealthRetries"/>-th in a row is a stored bad read, as v1's three tries.</summary>
+    public int Unreachable { get; set; }
 }
 
 public sealed class TrainRead
@@ -116,6 +124,8 @@ public sealed class TrainState
     public Dictionary<string, int> RequestNumbers { get; set; } = [];
     /// <summary>The work items each requested release carries (W9.10i), by version, "owner/repo#N": the PromoteRelease command names them so the executor can record the deployment on their state comments. Absent in a state saved before it.</summary>
     public Dictionary<string, List<string>> RequestItems { get; set; } = [];
+    /// <summary>V2.1: a deployment the executor was refused (by version): not asked for again before this time (v1 asks again in its next pass).</summary>
+    public Dictionary<string, DateTimeOffset> RetryNotBefore { get; set; } = [];
     /// <summary>"item|commit" of the items already delivered here: a redelivered ItemMerged does not make them candidates again.</summary>
     public List<string> DeliveredItems { get; set; } = [];
     /// <summary>The releases that reached the environment by version and the release that carried it: "delivered in release X, superseding Y".</summary>

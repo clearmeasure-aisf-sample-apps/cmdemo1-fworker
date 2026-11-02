@@ -72,7 +72,14 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         TimerChanged = true;
         Decide(WorkItemActions.Completed, reason);
         LeaveTrain("completed"); EndSession(); ClearSlot("completed");
+        ReleaseOwner(OwnerReleaseKinds.Completed, reason);
     }
+
+    /// <summary>
+    /// The item's owner (the session claim in the plant and the claim in the item's state) is done when the pull request is merged and again when the item completes: the gateway releases it (idempotent: an item with no claim
+    /// is released already), so its session ends and its slot is free. v1's sweep did this from the triggers item.merged and item.complete; the saga does it for every item.
+    /// </summary>
+    public void ReleaseOwner(string kind, string reason) => Send(new ReleaseOwner($"release-{kind}|{ItemKey}|{State.Generation}|{State.Sequence}", reason, kind));
 
     /// <summary>Switches the plan. The item stays on its step when the new plan has it; when it does not (the docs plan has no Deliver) the item has nothing left to do and completes.</summary>
     public void SwitchPlan(string to, string reason)
@@ -273,6 +280,7 @@ public class MergeStep : WorkStep
         c.State.MergeCommit = m.Commit.ToLowerInvariant();
         if (m.PullRequest > 0) c.State.PullRequest = m.PullRequest;
         c.Decide(WorkItemActions.Merged, $"commit {(m.Commit.Length > 7 ? m.Commit[..7] : m.Commit)}");
+        c.ReleaseOwner(OwnerReleaseKinds.Merged, "the pull request was merged");
         c.State.Step = StepKind.Merge;   // (the steps between were skipped: the merge happened)
         c.Advance("merged");
         return StepAnswer.Applied;

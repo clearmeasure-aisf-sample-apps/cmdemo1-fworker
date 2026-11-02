@@ -14,7 +14,7 @@ using Fworker.Workflows.WorkItem;
 
 // W9.9b (docs/design/fworker-wolverine-implementation.md "W9.9b as built"): the adoption in the gateway. Only where the engine acts (Engine.V2Acts) with a database and a home repository; tdd stays in the shadow run and
 // its v1 is untouched (nothing here is made there). The run itself is Fworker.Workflows.Adoption.AdoptionRunner; this file is what it reads (GitHub: the board, the issues, the state comments, the pull requests; Octopus:
-// the Sign-offs now), the job that runs it (a recurring job of the leader: once per term of the lease, after the plant is restored) and the marker a process that the kill switch turned back to v1 leaves.
+// the Sign-offs now), the job that runs it (a recurring job of the leader: once per term of the lease, after the plant is restored).
 
 /// <summary>The reads of the adoption over the gateway's GitHub and Octopus readers. A read without its source throws or answers empty as noted: a board that cannot be read is a failed run (tried again), no Octopus is no Sign-offs.</summary>
 sealed class AdoptionGitHubReads(IAdoptionGitHub github, IItemIssueReader issues, IBoardReader boards, Func<BoardRef?> board, RepoId home, string defaultBranch, PendingSignOffReader? octopus = null,
@@ -69,7 +69,7 @@ sealed class ProjectedSequences(IProjectionVersions versions) : IProjectedSequen
 }
 
 /// <summary>What the gateway builds for the adoption: the runner (the run of one try), the job (when it runs) and the markers.</summary>
-sealed record AdoptionParts(AdoptionRunner Runner, AdoptionJob Job, IEngineMarkers Markers);
+sealed record AdoptionParts(AdoptionRunner Runner, AdoptionJob Job, IEngineMarkers Markers, Admission Admission);
 
 static class AdoptionWiring
 {
@@ -109,7 +109,11 @@ static class AdoptionWiring
         var runner = new AdoptionRunner(options, ports, gate: readoption);
         var node = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
         var job = new AdoptionJob(runner, markers, () => c.Leader.MayAct, () => c.Leader.ClaimEpoch, () => restored() && !c.GitHubBudget.Low().Low, node, readoption: readoption);
-        return new AdoptionParts(runner, job, markers);
+        // V1.1: the admission, after every pass of the board reconciler: the cards in a step column with no saga get one (it waits for the adoption of the term). It starts at most intake.wipLimit sagas of its own per pass.
+        var intake = parts.Intake;
+        var admitting = new AdmissionConfig(intake.FactoryLabel, intake.RivalLabel, intake.DemoLabel, Fworker.Workflows.Keeper.FactoryRules.EnvLabelOf(root, env), settings.DocsMarker, mapping.Policy, Math.Max(1, intake.WipLimit)) { HoldLabels = intake.HoldLabels, ReopenGrace = TimeSpan.FromSeconds(int.TryParse(env("FACTORY_ADMISSION_REOPEN_GRACE_SECONDS"), out var grace) && grace >= 0 ? grace : 300) };   // (the grace is a test knob: the scenarios cannot wait five minutes)
+        var admission = new Admission(options, admitting, runner, ports, () => c.Leader.MayAct, () => job.IsDone(c.Leader.ClaimEpoch), async (id, ct) => (await issues.ReadIssue(id, ct))?.Closed == true, excluded: () => job.Excluded, reopenedAt: key => c.BoardReconciler?.ReopenedAt(key), reopenUsed: key => c.BoardReconciler?.ReopenUsed(key));
+        return new AdoptionParts(runner, job, markers, admission);
     }
 
     // octopus.url, .space, .project and OCTOPUS_API_KEY, as the watcher reads them; null when any is missing (the Sign-offs are then not adopted)
@@ -124,34 +128,11 @@ static class AdoptionWiring
 }
 
 /// <summary>
-/// W9.9b: the marker of a process that the kill switch (FACTORY_V2_OFF) turned back to v1 in an environment the configuration names for v2. It writes "v1-ran" once, so that the engine's next start knows v1 may have acted on the items
-/// in between (the adoption fences them, W9.10n). Registered only for that combination, so no other environment, tdd's shadow run included, writes anything. A database that is paused or has no table yet is tried again with
-/// growing pauses for ten minutes and then left: a missing marker is a missing piece of evidence, and the gap rule of the adoption (AdoptionBreak.Gap) still catches a long absence.
-/// </summary>
-sealed class KillSwitchMarkerService(IEngineMarkers markers, string holder, Func<DateTimeOffset>? clock = null) : BackgroundService
-{
-    readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
-
-    protected override async Task ExecuteAsync(CancellationToken ct)
-    {
-        var at = now();
-        var give = DateTimeOffset.UtcNow.AddMinutes(10);
-        for (var pause = TimeSpan.FromSeconds(5); DateTimeOffset.UtcNow < give && !ct.IsCancellationRequested; pause = TimeSpan.FromSeconds(Math.Min(60, pause.TotalSeconds * 2)))
-        {
-            try { await markers.Mark(EngineMarkerNames.V1Ran, at, holder, "FACTORY_V2_OFF", ct); return; }
-            catch (OperationCanceledException) { return; }
-            catch (Exception) { }
-            try { await Task.Delay(pause, ct); } catch (OperationCanceledException) { return; }
-        }
-    }
-}
-
-/// <summary>
 /// Cutover review: v1's sweep (the PASS merge, settling, the card moves) and the adoption of the term (W9.9b) must not run beside each other: there is no per-item lock between them, and an item that v1's pass merges while the adoption
 /// is still deciding whose it is would be adopted on stale facts. So where the engine acts the sweep waits until the adoption of this process's term in the lease is over (<see cref="AdoptionJob.IsDone"/>), then reads the saga's table
 /// again before its first pass (the adoption wrote rows meanwhile: Sweeper). The sweep begins when a run of the term has finished: "done", or "partial" with no break outstanding (the items it could not read stay v1's, exactly as before the engine, and the job tries them again); after a break only "done" counts, because the fencing is the point. A run that cannot finish (aborted, markers unreadable, plant not restored, partial after a break) is tried again by the job and the sweep keeps waiting.
 /// The wait is bounded in what it SHOWS, not in what it permits: past <see cref="Limit"/> (10 minutes of this term's wait, counted while this process may act) <see cref="Overdue"/> is true, /api/v1/status v2.adoption.sweep says so and, until the
-/// first time the adoption has been over in this process, /ready answers 503 "adoption". A process that never adopts is an outage for the operator to decide (FACTORY_V2_OFF=1 hands the factory back to v1, whose marker the next adoption fences);
+/// first time the adoption has been over in this process, /ready answers 503 "adoption". A process that never adopts is an outage for the operator to decide (a redeploy of the previous release hands the factory back to v1, whose marker the next adoption fences);
 /// a v1 pass on items the adoption has not examined is the unfenced case this exists to prevent. Where this process has no adoption (no GitHub identity: nothing could be read) there is nothing to wait for.
 /// </summary>
 sealed class AdoptionGate(Func<bool> hasAdoption, Func<long, bool> isDone, Func<bool> mayAct, Func<long> epoch, Func<DateTimeOffset>? clock = null, TimeSpan? limit = null, Func<CancellationToken, Task>? poke = null, Func<IReadOnlySet<int>>? excluded = null)

@@ -148,23 +148,6 @@ public sealed class ShadowHistoryNotListedTests(ShadowHistoryNotListedFixture gw
     }
 }
 
-public sealed class ShadowHistoryKilledFixture : GatewayFixture
-{
-    // listed, and FACTORY_V2_OFF: the kill switch puts the environment back on v1 with no shadow, so no host
-    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("FACTORY_V2_OFF", "1"); WolverineHostTestSupport.Shadow(env); }
-}
-
-public sealed class ShadowHistoryKilledTests(ShadowHistoryKilledFixture gw) : IClassFixture<ShadowHistoryKilledFixture>
-{
-    [Fact]
-    public void TheKillSwitch_RegistersNoHostAndNoShadow()
-    {
-        if (!StubPwsh.Supported) return;
-        foreach (var t in WolverineHostTestSupport.HostTypes.Append(typeof(IShadowHistory))) Assert.DoesNotContain(gw.Host.Captured!, d => d.ServiceType == t);
-        Assert.IsType<V1EventIngress>(gw.Host.Services.GetRequiredService<IEventIngress>());
-    }
-}
-
 /// <summary>Shadow on, the database unreachable: the gateway is v1 as before, the events are dropped (counted), and the answers do not change.</summary>
 public sealed class ShadowHistoryUnreachableFixture : GatewayFixture
 {

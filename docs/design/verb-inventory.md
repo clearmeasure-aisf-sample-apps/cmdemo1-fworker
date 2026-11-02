@@ -8,7 +8,7 @@ fails when the three disagree: the `$ServerVerbs` list of `factory.ps1`, the JSO
 means a row here and an entry in the JSON in the same pull request.
 
 **Count: 74, not 73.** The refactor design says 73. The code has 74: the table of R9 does not name `auto-promote` (the automatic promotion of a
-release to uat and prod, `lib/Verbs.Promote.ps1`, run by `gateway/AutoPromoter.cs`). It goes to the DeliveryTrainSaga with `settle` and
+release to uat and prod, `lib/Verbs.Promote.ps1`, the gateway loop that ran it was removed in V2.3). It goes to the DeliveryTrainSaga with `settle` and
 `publish-demo`; the row of R9 gets the verb in the same pull request. The design's counts stay at 73 until its owner reconciles them (follow-up).
 
 ## Columns
@@ -126,7 +126,6 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 | Entry | File | Sites | Verbs | Kind | Owner | Leaves | What it is |
 |---|---|---|---|---|---|---|---|
-| auto-promote | `gateway/AutoPromoter.cs` | 1 | auto-promote | runner | W9.10p | W9.12 | The automatic promotion of the app to uat and prod. It has no v2 route by decision. **exception until W9.12.** |
 | base-watch-verbs | `gateway/BaseUpdate.cs` | 1 | by argument | router | W9.3 | - | BaseWatch runs base-watch and base-update-branch through the Runner (routed since #542; its own table is gone). |
 | base-journal | `gateway/BaseUpdate.cs` | 1 | journal | router | W9.8 | - | The journal line of a base update (#477). |
 | transcripts | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.8 | W9.11b | TranscriptStore: transcript-save, transcript-load and transcript-prune, the rule scripts of the ref store (RunScriptAsync). **exception until W9.11b.** |
@@ -170,9 +169,12 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 ### Exceptions
 
-- **auto-promote** (until W9.12): Decision 2 of 2026-10-30: the app's uat and prod promotions stay with v1's AutoPromoter until the delivery train has a recorded clean live window (the W5 gate). W9.11b must keep Verbs.Promote.ps1 and the Runner path for this one verb.
 - **plant-snapshot** (until W9.11b): The snapshot is the hand-over between gateway processes and the rollback to v1 until W9.11b removes v1; the plant is in SQL from W9.10k.
 - **transcripts** (until W9.11b): The ref store of the sessions written before the move to the database. Where the engine acts the `DatabaseTranscriptBackend` reads it as the fallback of a load and prunes it with the database; both go through the rule script (`Runner.RunScriptAsync`), because the board routes answer `transcript-load` and `transcript-prune` from `factory.Transcripts` and would never reach the refs. It goes with v1 at W9.11b, after the 14 days the refs are kept.
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.
 - **merge-peer-approved** (until W9.11b): The peer-approved merge policy is dropped (decision 4 of 2026-10-30), not ported; its suites go with v1 (W9.11a). Every environment runs mergePolicy auto.
 - **merge-hybrid-script** (until W9.11b): The adoption (W9.9b) gives the saga every open item, and W9.11b deletes the branch with the router of v1.
+
+## Labels that no verb reads
+
+`agent:<name>` (for example `agent:cursor`) is not a label of the factory: no verb of v1 or v2 reads it. The agent of a runtime is runtime configuration (`runtimes...octopus.agent`, `runtimes...caeJob.agent`); the label of an item that names a runtime is `runtime:<kind>` (V1.3 of the v2-only plan reads it in the slot request, `SlotRequestSettings.RuntimeFor`).

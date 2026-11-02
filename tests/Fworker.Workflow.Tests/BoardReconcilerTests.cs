@@ -43,6 +43,26 @@ public class BoardReconcilerTests
     }
 
     [Fact]
+    public async Task ACardSeenClosedAndThenOpen_IsAReopening_UntilItIsSeenClosedAgain_AndACardNeverSeenClosedIsNot()
+    {
+        var (r, b, _) = Make();
+        b.Cards = [new(Home, 5, "Done", false, "finished"), new(Home, 6, "Development", true, "never closed")];
+        await r.Run(default);
+        Assert.Null(r.ReopenedAt("acme/orders#5")); Assert.Null(r.ReopenedAt("acme/orders#6"));
+        b.Cards[0] = new(Home, 5, "Development", true, "finished");
+        await r.Run(default);
+        Assert.NotNull(r.ReopenedAt("acme/orders#5")); Assert.Null(r.ReopenedAt("acme/orders#6"));
+        await r.Run(default);
+        Assert.NotNull(r.ReopenedAt("acme/orders#5"));
+        r.ReopenUsed("acme/orders#5");
+        Assert.Null(r.ReopenedAt("acme/orders#5"));
+        b.Cards[0] = new(Home, 5, "Development", true, "finished");
+        b.Cards[0] = new(Home, 5, "Done", false, "finished");
+        await r.Run(default);
+        Assert.Null(r.ReopenedAt("acme/orders#5"));
+    }
+
+    [Fact]
     public async Task NotTheLeader_OrBudgetLow_OrNoBoard_ReadsNothing()
     {
         var (r1, b1, _) = Make(may: () => false); Assert.Equal("not-leader", (await r1.Run(default)).Outcome); Assert.Equal(0, b1.Reads);

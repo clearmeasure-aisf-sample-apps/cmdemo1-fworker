@@ -37,10 +37,7 @@ static class DeliveryShadowSettings
             // v1 promotes only where autoPromote is on and names this gateway's environment (AutoPromoteHere); otherwise the train observes
             var acts = cfg.AutoPromoteHere;
             var named = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
-            // W9.10p: where the engine acts the train promotes the named environments only when delivery.autoPromote.trainActs is on (W9.12). Until then v1's AutoPromoter promotes them and the train decides them in shadow
-            // (policy.Shadow: the decisions are recorded and compared with the AutoPromoter's, the commands are not executed). In the shadow run itself (the engine does not act) every named environment is v1's and recorded as before.
-            var shadowed = engineActs && !cfg.TrainActs ? named : [];
-            var environments = shadowed.Count > 0 ? [] : named;
+            var environments = named;
             var names = new Dictionary<string, string>(); var urls = new Dictionary<string, string>();
             foreach (var k in DeliveryPolicy.Chain)
             {
@@ -51,7 +48,11 @@ static class DeliveryShadowSettings
             var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
             // W8.3: delivery.rollback.migrationPaths, the path fragments that mark a file as a database migration (the rollback's precondition); absent: DbUp's scripts/Update
             var migrations = (cfg.Root?["delivery"]?["rollback"]?["migrationPaths"] as JsonArray)?.Select(m => m?.ToString() ?? "").Where(m => m != "").ToList();
-            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, shadowed, migrations);
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, [], migrations,
+                // V2.1: how often a train that waits for the clock or the app looks again, and the least gap between two health reads (v1 passes every 60 s and reads at once): 120 s and 30 s; a test shortens them
+                (int)Num(ap, "pollSeconds", 120), (int)Num(ap, "readGapSeconds", 30),
+                // v1's Read-EnvHealth: octopus.health.retries tries (3), retrySeconds (20) apart. The train makes one try per look and counts the failures in a row (TrainEvidence.Unreachable)
+                (int)Num(o?["health"], "retries", 3), (int)Num(o?["health"], "retrySeconds", 20));
         }
         catch { return null; }
     }
@@ -219,6 +220,14 @@ sealed class ShadowOctopusPort(Func<object, Task<bool>> publish, bool enabled)
 {
     public bool Enabled => enabled;
     public Task<bool> Publish(object ev) => enabled ? publish(ev) : Task.FromResult(false);
+
+    /// <summary>
+    /// The port when the incident saga is attached. The port of the acting train, when there is one that is enabled, already carries every Octopus event to the host, and the incident saga takes the deployments from the same publish:
+    /// it is kept. (V2.1: the line that built the incident-only port replaced it unconditionally, and the releases, the replay markers and the Sign-offs of the watcher were dropped: a train that acts for an environment with a
+    /// Sign-off never answered one.) Without a train the port carries the deployments to the incident saga and nothing else.
+    /// </summary>
+    public static ShadowOctopusPort WithIncidents(ShadowOctopusPort? train, Func<object, Task<bool>> publishToHost)
+        => train is { Enabled: true } ? train : new ShadowOctopusPort(ev => ev is Fworker.Contracts.Seams.OctopusDeploymentChanged ? publishToHost(ev) : Task.FromResult(true), enabled: true);
 }
 
 /// <summary>The shadow run of the delivery train once the host has made it (null before, and where the train could not be built). Registered only in the shadow run.</summary>

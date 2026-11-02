@@ -16,13 +16,15 @@ using Fworker.Workflows.WorkItem;
 //  - MergeQueueCount: the merged feature items that still wait for their release candidate, for mergeQueueDepth (a documentation change never counts, and never waits).
 
 /// <summary>What the slot request needs of the configuration: the runtime the v2 sessions ask for, and the labels that rank an item.</summary>
-public sealed record SlotRequestSettings(string Runtime, string TopLabel, string HighLabel, string PinPrefix = "worker:")
+public sealed record SlotRequestSettings(string Runtime, string TopLabel, string HighLabel, string PinPrefix = "worker:", IReadOnlyList<(string Phase, string Runtime)>? Routing = null, Func<string, string?>? ColumnOfPhase = null)
 {
+    public const string RuntimePrefix = "runtime:";
+
     /// <summary>
     /// The runtime of the requests: <c>scheduler.runtime</c> when it names one the scheduler knows, else octopus (the factory's own hosts) when configured, else the first configured runtime in the scheduler's order. The plant's
-    /// routing (runtimes.routing) is v1's and is not read here: the scheduler holds the capacity, the plant places the session.
+    /// routing is read as V1.3 says (<see cref="RuntimeFor"/>); the scheduler holds the capacity, the plant places the session.
     /// </summary>
-    public static SlotRequestSettings From(JsonNode? root, CapacitySettings capacity, string configured)
+    public static SlotRequestSettings From(JsonNode? root, CapacitySettings capacity, string configured, string environment = "", Func<string, string?>? columnOfPhase = null)
     {
         string? Text(JsonNode? n, string name) { try { return n?[name] is JsonValue v && v.TryGetValue<string>(out var s) && s.Length > 0 ? s : null; } catch { return null; } }
         var kinds = capacity.Runtimes.Keys;
@@ -30,7 +32,41 @@ public sealed record SlotRequestSettings(string Runtime, string TopLabel, string
             : kinds.Contains(RuntimeKinds.Octopus) ? RuntimeKinds.Octopus
             : RuntimeKinds.All.FirstOrDefault(kinds.Contains) ?? RuntimeKinds.Octopus;
         JsonNode? labels = null; try { labels = root?["priorityLabels"]; } catch { }
-        return new SlotRequestSettings(runtime, Text(labels, "top") ?? "priority:top", Text(labels, "high") ?? "priority:high");
+        return new SlotRequestSettings(runtime, Text(labels, "top") ?? "priority:top", Text(labels, "high") ?? "priority:high", Routing: RoutingOf(root, environment), ColumnOfPhase: columnOfPhase);
+    }
+
+    /// <summary>
+    /// The routing rules of the runtimes block of this environment (<c>runtimes.environments.&lt;name&gt;.routing</c> when the file has environments, an environment without an entry has none; else <c>runtimes.routing</c>), in order,
+    /// as RuntimeSettings.From reads them: a rule with no phase matches every phase.
+    /// </summary>
+    static IReadOnlyList<(string Phase, string Runtime)> RoutingOf(JsonNode? root, string environment)
+    {
+        var rules = new List<(string, string)>();
+        try
+        {
+            JsonNode? block = root?["runtimes"];
+            if (block is JsonObject o && o["environments"] is JsonObject { Count: > 0 } envs) block = envs[(environment ?? "").Trim().ToLowerInvariant() is { Length: > 0 } e ? e : "tdd"];
+            if (block?["routing"] is JsonArray array)
+                foreach (var x in array)
+                    if (x?["runtime"]?.ToString() is { Length: > 0 } rt) rules.Add((x["phase"]?.ToString() is { Length: > 0 } ph ? ph : "*", rt));
+        }
+        catch { }
+        return rules;
+    }
+
+    /// <summary>
+    /// V1.3, the runtime of an item's slot request, in v1's order (cloud-worker-runtimes.md 4.4): the item's <c>runtime:&lt;kind&gt;</c> label, else the first routing rule of its environment whose phase matches the column of the step
+    /// ("*" matches any; a rule that says local places the session on a connected worker, which is no runtime of the scheduler's, and is passed over), else <c>scheduler.runtime</c>. A label or rule that names a kind the scheduler does
+    /// not know is passed over too. A kind that is off in this environment is not changed here: the scheduler holds the slot with the code runtime-off.
+    /// </summary>
+    public string RuntimeFor(IReadOnlyList<string> labels, string phase)
+    {
+        foreach (var l in labels)
+            if (l.StartsWith(RuntimePrefix, StringComparison.OrdinalIgnoreCase) && RuntimeKinds.All.Contains(l[RuntimePrefix.Length..].ToLowerInvariant())) return l[RuntimePrefix.Length..].ToLowerInvariant();
+        var column = ColumnOfPhase?.Invoke(phase);
+        foreach (var (rulePhase, runtime) in Routing ?? [])
+            if ((rulePhase == "*" || (column is not null && string.Equals(rulePhase, column, StringComparison.OrdinalIgnoreCase))) && RuntimeKinds.All.Contains(runtime)) return runtime;
+        return Runtime;
     }
 
     public string? PriorityOf(IReadOnlyList<string> labels) =>
@@ -52,7 +88,7 @@ public sealed class SlotRequestPort(IMergeFactsReader? reader, SlotRequestSettin
         // (the hotfix plan of an incident ranks at the top whatever its labels say, W8.1)
         var rank = new Fworker.Domain.PlanRank(settings.IsPinned(labels), m.TopRank ? "top" : settings.PriorityOf(labels), InIntake: string.Equals(m.Phase, CapacityPhases.Design, StringComparison.OrdinalIgnoreCase));
         var footprint = m.Footprint.Count == 0 ? Footprint.Empty : new Footprint(m.Footprint, m.FootprintFromPullRequest ? FootprintSource.PullRequest : FootprintSource.Design);
-        return new RequestSlot(m.Item, m.Key, m.Generation, settings.Runtime, m.Phase, rank, false, m.Resume, m.ColumnDepth, m.RequestedAt, [], footprint);
+        return new RequestSlot(m.Item, m.Key, m.Generation, settings.RuntimeFor(labels, m.Phase), m.Phase, rank, false, m.Resume, m.ColumnDepth, m.RequestedAt, [], footprint);
     }
 
     async Task<IReadOnlyList<string>> Labels(ItemId item, CancellationToken ct)

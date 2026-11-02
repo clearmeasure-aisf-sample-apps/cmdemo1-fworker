@@ -55,7 +55,6 @@ public sealed class BoardRoutesTests : IDisposable
     {
         var runner = new Runner("/nonexistent/factory.ps1");
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("\"tdd\""), Services(runner, Parts())));          // another environment: v1
-        Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("\"prod\"", off: "1"), Services(runner, Parts())));   // the kill switch
         Assert.Null(runner.Routes);   // (W9.9a: every call of the gateway itself is then the rule script)
     }
 

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Fworker.Workflows.WorkItem;
 
 sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null, Task? restored = null) : BackgroundService
 {
@@ -26,7 +27,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     // cutover review: where the engine acts the sweep also waits for the adoption of this process's term (AdoptionGate), and reads the saga's table again before the term's first pass. Set only with V2.
     public AdoptionGate? Adoption { get; init; }
     long? adoptedTerm;
-    // cutover review: v1's intake is off. Set where intake.v2Plans names plans and the engine does not act on them (the kill switch, uat and prod, a v2 environment without a database): v1's intake takes only what the plans leave it where the
+    // cutover review: v1's intake is off. Set where intake.v2Plans names plans and the engine does not act on them (uat and prod, a v2 environment without a database): v1's intake takes only what the plans leave it where the
     // engine acts, and everywhere else it would take everything, which the configuration of the cutover never meant (intake.enabled is true for the image so that the engine's intake runs). The script has no intake without the block.
     public bool IntakeOff { get; init; }
 
@@ -113,11 +114,21 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     internal static void AddV2Arguments(JsonObject args, V2Ownership? v2, IReadOnlyList<string> v2Plans, IReadOnlyCollection<int>? left = null)
     {
         if (v2 is null) return;
+        // V1.1 (owner decision of 2026-11-01: v2 replaces v1, no parallel running): where the engine carries plans every factory item is the engine's, with a saga or not (the admission gives each card in a step column one, or says
+        // why not): the script reads and acts on none of them (settle, merge pickup, the PASS merge, park, unpark, demote, offers, idle release). An engine that carries no plan (config/instance.json) leaves them to v1 as before.
+        if (EngineOwnsAllItems(v2Plans)) args["v2_all_items"] = true;
         // (left: after a break the items the adoption could not fence; the script leaves them alone like the saga's)
         var skip = v2.Items.Concat(left ?? []).Distinct().OrderBy(i => i).ToList();
         if (skip.Count > 0) args["skip_items"] = new JsonArray(skip.Select(i => (JsonNode)i).ToArray());
         if (v2Plans.Count > 0 && args["intake"] is JsonObject intake) intake["v2Plans"] = new JsonArray(v2Plans.Select(p => (JsonNode)p).ToArray());
     }
+
+    /// <summary>
+    /// V1.1: whether v1's sweep leaves every item to the engine: only when the engine carries EVERY plan an item can be on (docs, feature and hotfix). With a plan not carried, the items of that plan have nobody but v1 (the admission
+    /// skips them), so v1 keeps sweeping, as before.
+    /// </summary>
+    internal static bool EngineOwnsAllItems(IReadOnlyList<string> v2Plans) =>
+        new[] { WorkPlans.Docs, WorkPlans.Feature, WorkPlans.Hotfix }.All(p => v2Plans.Contains(p, StringComparer.OrdinalIgnoreCase));
 
     // cutover review: after a break, the items the adoption of the term could not fence (AdoptionJob.Excluded): v1 leaves them alone until a run fences them
     IReadOnlyCollection<int> Left() => Adoption is null ? [] : Adoption.Excluded();
@@ -155,7 +166,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             {
                 var left = Left();
                 var mine = items.Where(V2.Owns).ToList();
-                items = items.Where(i => !V2.Owns(i) && !left.Contains(i)).ToList();
+                items = EngineOwnsAllItems(V2Plans) ? [] : items.Where(i => !V2.Owns(i) && !left.Contains(i)).ToList();   // (V1.1: where the engine carries plans, v1 has no item to sweep)
                 // W6.6: the pass named only the saga's items. v1 has nothing to read for them, but the plant still takes the saga's offers for them (an item whose step just began waits for a session)
                 if (items.Count == 0) { if (ownerMode && mine.Count > 0) PlanV2Offers(mine); return unconfirmedOut; }
             }
@@ -277,7 +288,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                     }
                 // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on); not on a
                 // low budget, and only after a full sweep
-                if (baseWatch != null && scope == null && !low) _ = Task.Run(baseWatch.AfterSweep);
+                if (baseWatch != null && scope == null && !low && !PlantJobs) _ = Task.Run(baseWatch.AfterSweep);   // (V1.4: where the engine acts the job base-watch-fallback does it)
                 Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{j["offers"]!.AsArray().Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count},\"kind\":\"{kind}\",\"items\":{items?.Count ?? -1},\"lowBudget\":{(low ? "true" : "false")},\"elapsedMs\":{(j["elapsed_ms"]?.ToString() ?? "null")},\"steps\":{(j["steps"]?.ToJsonString() ?? "null")},\"skipped\":{(j["skipped"]?.ToJsonString() ?? "[]")}}}}}");
             }
             else

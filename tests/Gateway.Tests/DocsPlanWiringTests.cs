@@ -244,23 +244,6 @@ public sealed class DocsPlanInertTests
     static readonly string Token = "ghp_" + new string('A', 36);   // (composed at run time)
 
     [Fact]
-    public void TheKillSwitch_LeavesNoSaga_NoFeed_AndNoOwnership_SoV1ReadsEveryItem()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
-        env.Set("FACTORY_V2_OFF", "1");
-        env.Apply();
-        using var host = new GatewayHost();
-        _ = host.Server;
-        foreach (var t in new[] { typeof(V2Ownership), typeof(WorkItemService), typeof(WorkItemHistory), typeof(WorkItemParts), typeof(WolverineHostService) })
-            Assert.DoesNotContain(host.Captured!, d => d.ServiceType == t);
-        Assert.IsType<V1VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
-        Assert.Null(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<Sweeper>().Single().V2);
-    }
-
-    [Fact]
     public void TheShadowRunAndV1_RouteVerbsToV1Alone()
     {
         if (!StubPwsh.Supported) return;

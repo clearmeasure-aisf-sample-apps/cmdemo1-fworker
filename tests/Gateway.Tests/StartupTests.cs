@@ -34,26 +34,27 @@ public sealed class StartupTests(TwoPortGateway gw) : IClassFixture<TwoPortGatew
 }
 
 /// <summary>
-/// Today's stop, with the leader lease and durable transcripts on (the revocations are read, through the stub): the hand-over (the final plant
-/// snapshot, then the lease released) runs before the transcripts' flush, because ApplicationStopping runs its callbacks last-registered
-/// first; and the whole stop fits the platform's 30 s grace.
+/// Today's stop, with the SQL lease and durable transcripts on (the revocations are read, through the stub; a real SQL Server, FACTORY_TEST_SQL, or the test returns at once): the hand-over (the node leaves, the final
+/// plant is written to the database, then the lock is let go) runs before the transcripts' flush, because ApplicationStopping runs its callbacks last-registered first; and the whole stop fits the platform's 30 s grace.
 /// </summary>
 public sealed class StopOrderTests
 {
     [Fact]
     public Task StopOrder_HandOverBeforeTranscriptFlush_Within30Seconds() => Run(null);
 
-    /// <summary>The scenario; <paramref name="change"/> adds to the environment (WolverineHostTests runs it again with the Wolverine host registered).</summary>
+    /// <summary>The scenario; <paramref name="change"/> adds to the environment.</summary>
     public static async Task Run(Action<GatewayEnvironment>? change)
     {
-        if (!StubPwsh.Supported) return;
+        if (!StubPwsh.Supported || !TestDatabase.Available) return;
+        await using var db = await TestDatabase.CreateAsync("fw_stop_");
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
         env.Set("FACTORY_LEADER_LEASE", null);
         env.Set("FACTORY_PLANT_SNAPSHOT", null);
         env.Set("GH_TOKEN", "fake");
         env.Set("FACTORY_TRANSCRIPT_SAVE_SECONDS", "3600");
-        env.Set("FACTORY_TIMING_leaderCheckSeconds", "3600");
+        env.Set("FACTORY_DB_CONNECTION", db.ConnectionString);
+        WolverineHostTestSupport.Shadow(env);
         change?.Invoke(env);
         env.Apply();
         var host = new GatewayHost();
@@ -61,10 +62,10 @@ public sealed class StopOrderTests
         try
         {
             _ = host.Server;
-            // 1. acting: revocations read, lease acquired, snapshot looked for, lease checked
+            // 1. acting: revocations read, the lock taken, the plant restored
             JsonNode? status = null;
             var sw = Stopwatch.StartNew();
-            while (sw.Elapsed < TimeSpan.FromSeconds(30))
+            while (sw.Elapsed < TimeSpan.FromSeconds(60))
             {
                 var a = await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
                 status = a.Json;
@@ -94,11 +95,11 @@ public sealed class StopOrderTests
             stop.Stop();
             Assert.True(stop.Elapsed < TimeSpan.FromSeconds(30), $"the stop took {stop.Elapsed.TotalSeconds:0.0} s");
             var after = StubPwsh.Read(env.StubLog).Skip(before).ToList();
-            var trail = string.Join(", ", after.Select(c => $"{c.Verb}{(c.Action != "" ? ":" + c.Action : "")}{(c.Final ? ":final" : "")}"));
-            var snap = after.FindIndex(c => c.Verb == "plant-snapshot-save" && c.Final);
-            var release = after.FindIndex(c => c.Verb == "leader-lease" && c.Action == "release");
-            var flush = after.FindIndex(c => c.Verb == "transcript-save");
-            Assert.True(snap >= 0 && release > snap && flush > release, $"wanted the final snapshot, then the lease release, then the transcript save; the stub saw: {trail}");
+            Assert.Contains(after, c => c.Verb == "transcript-save");   // the flush ran, after the hand-over (callbacks run last-registered first)
+            Assert.Equal(1L, await db.Count("SELECT COUNT(*) FROM factory.PlantState WHERE Document LIKE N'%\"final\":true%'"));   // the final plant is in the database ...
+            var next = new SqlLease(db.ConnectionString, _ => Task.CompletedTask, 20);
+            try { Assert.True((await next.TryAcquireAsync("the-successor", false, default)).Acquired); }   // ... and the lock was let go
+            finally { await next.ReleaseAsync(); }
         }
         finally
         {

@@ -122,7 +122,7 @@ sealed class RunnerPool
     }
 
     // null: no worker is free (or the pool is stopping); the caller runs the call as a process of its own.
-    public async Task<(int Code, string Output)?> TryRunAsync(string verb, string stdin, TimeSpan timeout)
+    public async Task<(int Code, string Output)?> TryRunAsync(string verb, string stdin, TimeSpan timeout, Func<bool>? mayStart = null)
     {
         Worker? w = null;
         while (!stopping && idle.TryDequeue(out var c))
@@ -132,6 +132,8 @@ sealed class RunnerPool
             c.Verb = verb; c.Busy = true; w = c; break;
         }
         if (w is null) return null;
+        // marked busy where KillBusy finds it; if the lock went before that the call is not run here (the caller refuses it), the worker goes back
+        if (mayStart is not null && !mayStart()) { w.Busy = false; idle.Enqueue(w); return null; }
 
         string? frame = null; var stray = false;
         var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(8));

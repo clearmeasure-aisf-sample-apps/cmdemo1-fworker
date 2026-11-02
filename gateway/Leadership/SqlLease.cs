@@ -8,8 +8,9 @@ using Microsoft.Data.SqlClient;
 //
 // The newest process still wins: a starting process that finds the lock taken writes a takeover request (and refreshes it at every try); the holder sees it at its next check, stops its node, saves the
 // plant and releases (GatewayLeader.SqlStepDownAsync); the newcomer takes the lock and increments the epoch. A request that is not refreshed (its writer died) is stale after RequestFreshSeconds and
-// ignored. A newcomer whose request was overwritten by a still newer one concedes and waits passively. The GitHub-ref lease (Leader.cs) stays beside this one as the arbitration with a process that has
-// no database (v1 under the kill switch, uat, prod); a process without a database never constructs this class.
+// ignored. A newcomer whose request was overwritten by a still newer one concedes and waits passively. Since V3.2 this is the only lease (the GitHub-ref lease is gone): a process without a
+// database never constructs this class, has no lease and acts at once. The lock lives with its connection: a holder that dies or loses its network frees it, but a holder that hangs while it keeps its connection holds the
+// lock until a liveness probe of the platform ends the process (the lock's own look, CheckAsync, runs on a thread of that process and would not notice).
 interface ISqlLease
 {
     /// <summary>True while this process holds the lock (set false as soon as a check finds it gone).</summary>

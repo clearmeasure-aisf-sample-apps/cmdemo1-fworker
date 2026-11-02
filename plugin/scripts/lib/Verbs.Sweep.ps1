@@ -514,6 +514,9 @@ function Invoke-SyncBoard($a) {
     # and the claim-ref reap leaves their refs alone. Absent where the engine does not act, so v1 sweeps every item as before.
     $skipItems = @{}
     if (Test-Has $a 'skip_items') { foreach ($x in @($a.skip_items)) { $si = 0; if ([int]::TryParse("$x", [ref]$si) -and $si -gt 0) { $skipItems[$si] = $true } } }
+    # v2_all_items (V1.1): the engine carries plans, so EVERY factory item is its own (it has a saga, or the admission says why not): the item loop below reads and acts on none of them. The gap renew, which is the only
+    # item step the engine has no saga rule for, belongs to claims of v1's sessions and there are none where this is set. The plant-wide steps below (intake, claim-ref reap, board guard, QC sync, replenish) are unchanged.
+    $v2AllItems = (Test-Has $a 'v2_all_items') -and $a.v2_all_items
     $low = (Test-Has $a 'low') -and $a.low
     # skip_steps (W9.10g): the plant-wide steps of the sweep (claim-ref-reap, board-guard, qc-sync, replenish) are recurring jobs of the gateway where the engine acts (PlantSteps in src/Fworker.Workflows/Reconcilers, in C#;
     # the QC sync is QcService's). skip_steps names the steps an ordinary pass leaves to them (the gateway also leaves the keeper's count out of the pass; the gap stays with the sweep, issue 94). Absent where the engine does
@@ -573,7 +576,7 @@ function Invoke-SyncBoard($a) {
         # (issue 82: a closed item in any column the factory works is read too, so a park it was left with is removed below)
         if (-not $it.open -and -not ((Test-NameIn "$($it.column)" $c.columns.ai) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
         # an item that has a saga is the v2 engine's (W9.10e): v1 neither reads its state nor acts on it. (It still counts as waiting in the keeper's column: the backlog is the board's.)
-        if ($skipItems.ContainsKey([int]$it.number)) { if ($it.open -and "$($it.column)" -ieq $designCol) { $designWaiting++ }; continue }
+        if ($skipItems.ContainsKey([int]$it.number) -or $v2AllItems) { if ($it.open -and "$($it.column)" -ieq $designCol) { $designWaiting++ }; continue }
         # The budget of the sweep (issue 426) is checked before each item of a full sweep. The sweep then answers what it has read, marked partial: the
         # gateway handles it like an incremental pass over `viewed` (an item not looked at keeps its owner, its hold and its facts), so stopping here
         # loses nothing; the next full sweep begins at this item. Always at least one item. An incremental pass (at most 50 items) and a dry run are not cut.

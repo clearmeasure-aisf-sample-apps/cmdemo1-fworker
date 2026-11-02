@@ -36,7 +36,6 @@ public sealed class EngineOptionsTests : IDisposable
             var e = EngineOptions.From(cfg, name, Env());
             Assert.Equal(EngineMode.V1, e.Mode);
             Assert.Equal(EngineMode.V1, e.Configured);
-            Assert.False(e.KillSwitch);
             Assert.False(e.V2Acts);
             Assert.False(e.ShadowRuns);
         }
@@ -71,16 +70,15 @@ public sealed class EngineOptionsTests : IDisposable
         var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")), File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
         string[] Strings(System.Text.Json.Nodes.JsonNode? n) => n!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
         Assert.True(merged["intake"]!["enabled"]!.GetValue<bool>());
-        Assert.Equal(new[] { "docs", "feature" }, Strings(merged["intake"]!["v2Plans"]));
+        Assert.Equal(new[] { "docs", "feature", "hotfix", "redeliver" }, Strings(merged["intake"]!["v2Plans"]));   // (V1.3: a person's hotfix label starts the hotfix plan, and a delivery undone starts redeliver)
         Assert.Equal("tdd", merged["delivery"]!["finalEnvironment"]!.GetValue<string>());
         Assert.Equal("octopus", merged["scheduler"]!["runtime"]!.GetValue<string>());
         // #437 option A: the Copilot and Cursor runtimes are off for the measured batch
         Assert.False(merged["api"]!["cursor"]!["enabled"]!.GetValue<bool>());
         Assert.False(merged["api"]!["copilot"]!["environments"]!["tdd"]!["enabled"]!.GetValue<bool>());
-        // uat and prod stay with v1's promoter; the merge strategy is the default's
+        // V2.3: v1's promoter is gone, so the train promotes uat and prod with no switch; the merge strategy is the default's
         var overrides = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")))!;
-        Assert.Null(overrides["delivery"]?["autoPromote"]?["trainActs"]);
-        Assert.NotEqual(true, merged["delivery"]!["autoPromote"]!["trainActs"]?.GetValue<bool>());
+        Assert.Null(overrides["delivery"]!["autoPromote"]!["trainActs"]);
         Assert.Null(overrides["mergeStrategy"]);
     }
 
@@ -115,37 +113,15 @@ public sealed class EngineOptionsTests : IDisposable
         Assert.Equal(EngineMode.V2, EngineOptions.From(Config(Block("\"tdd\"", "\"tdd\"")), "tdd", Env()).Mode);
 
     [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData(" yes ", true)]
-    [InlineData("on", true)]
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("", false)]
-    [InlineData("  ", false)]
-    [InlineData("off", false)]
-    [InlineData(null, false)]
-    public void KillSwitch_ReadsFactoryV2Off(string? value, bool on)
-    {
-        Assert.Equal(on, EngineOptions.IsKillSwitch(value));
-        Assert.Equal(on, EngineOptions.From(Config(Block("", "")), "tdd", Env(("FACTORY_V2_OFF", value))).KillSwitch);
-    }
-
-    [Theory]
     [InlineData("tdd", "v2")]      // v2Environments
     [InlineData("local", "shadow")]
     [InlineData("uat", "v1")]
-    public void KillSwitchOn_PutsEveryEnvironmentOnV1WithNoShadow(string environment, string configured)
+    public void FactoryV2Off_IsNotRead_ThereIsNoKillSwitch(string environment, string configured)
     {
         var cfg = Config(Block("\"tdd\"", "\"local\""));
-        var off = EngineOptions.From(cfg, environment, Env());
-        Assert.Equal(configured, EngineOptions.Label(off.Mode));
-        var on = EngineOptions.From(cfg, environment, Env(("FACTORY_V2_OFF", "1")));
-        Assert.Equal(EngineMode.V1, on.Mode);
-        Assert.Equal(configured, EngineOptions.Label(on.Configured));   // what the file names is still reported
-        Assert.False(on.V2Acts);
-        Assert.False(on.ShadowRuns);
+        var withIt = EngineOptions.From(cfg, environment, Env(("FACTORY_V2_OFF", "1")));
+        Assert.Equal(configured, EngineOptions.Label(withIt.Mode));   // D1 of 2026-11-01: the way back is a redeploy of the previous release
+        Assert.Equal(configured, EngineOptions.Label(EngineOptions.From(cfg, environment, Env()).Mode));
     }
 
     [Theory]
@@ -165,9 +141,9 @@ public sealed class EngineOptionsTests : IDisposable
     public void Status_Block()
     {
         var s = EngineOptions.From(Config(Block("", "\"tdd\"")), "tdd", Env(("FACTORY_V2_OFF", "1"))).Status();
-        Assert.Equal("v1", (string?)s["mode"]);
+        Assert.Equal("shadow", (string?)s["mode"]);
         Assert.Equal("shadow", (string?)s["configured"]);
-        Assert.True((bool?)s["killSwitch"]);
+        Assert.Null(s["killSwitch"]);
         Assert.Equal("tdd", (string?)s["environment"]);
     }
 }
@@ -194,7 +170,7 @@ public sealed class EngineStatusTests(TwoPortGateway gw) : IClassFixture<TwoPort
         var shadow = EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("", "\"tdd\"")), _ => null), "tdd", _ => null);
         Assert.True(shadow.Reported);
         Assert.False(EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("", "\"tdd\"")), _ => null), "uat", _ => null).Reported);
-        Assert.True(EngineOptions.From(InstanceConfig.Load(Write("{}"), _ => null), "uat", n => n == "FACTORY_V2_OFF" ? "1" : null).Reported);
+        Assert.False(EngineOptions.From(InstanceConfig.Load(Write("{}"), _ => null), "uat", n => n == "FACTORY_V2_OFF" ? "1" : null).Reported);   // (no kill switch: the variable is not read)
     }
 
     static string Write(string json) { var p = Path.Combine(Path.GetTempPath(), "engine-status-" + Guid.NewGuid().ToString("N") + ".json"); File.WriteAllText(p, json); return p; }

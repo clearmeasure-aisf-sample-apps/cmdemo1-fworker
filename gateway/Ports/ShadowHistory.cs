@@ -6,8 +6,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Wolverine;
 
-// Shadow history (task W2.3, docs/design/wolverine-host.md "Shadow history"). Only where the environment is in engine.shadowEnvironments (and the kill switch
-// FACTORY_V2_OFF is off) and the Wolverine host is registered: every event that enters through the ingress (seam S3) and every journal line the plant posts is
+// Shadow history (task W2.3, docs/design/wolverine-host.md "Shadow history"). Only where the environment is in engine.shadowEnvironments and the Wolverine host is registered: every event that enters through the ingress (seam S3) and every journal line the plant posts is
 // written to ItemHistory (Fworker.Persistence, W2.1) by way of Wolverine's durable local queue, so a line survives a restart of the node. v1 acts exactly as before:
 //  - recording runs after v1 has done its part, on the thread pool, and never waits for the database or for the host;
 //  - it is best-effort: a host that is not up, a database that is paused or down, a full backlog or any exception drops the record (counted, never thrown);

@@ -10,12 +10,14 @@ namespace Internal.Generated.WolverineHandlers
     {
         private readonly Fworker.Workflows.Delivery.DeliveryShadow _deliveryShadow;
         private readonly Fworker.Workflows.Delivery.IDeliveryPolicies _deliveryPolicies;
+        private readonly PromotionJournal _promotionJournal;
         private readonly SignOffWaitRecorder _signOffWaitRecorder;
 
-        public TrainDecidedHandler1702373780(Fworker.Workflows.Delivery.DeliveryShadow deliveryShadow, Fworker.Workflows.Delivery.IDeliveryPolicies deliveryPolicies, SignOffWaitRecorder signOffWaitRecorder)
+        public TrainDecidedHandler1702373780(Fworker.Workflows.Delivery.DeliveryShadow deliveryShadow, Fworker.Workflows.Delivery.IDeliveryPolicies deliveryPolicies, PromotionJournal promotionJournal, SignOffWaitRecorder signOffWaitRecorder)
         {
             _deliveryShadow = deliveryShadow;
             _deliveryPolicies = deliveryPolicies;
+            _promotionJournal = promotionJournal;
             _signOffWaitRecorder = signOffWaitRecorder;
         }
 
@@ -24,11 +26,15 @@ namespace Internal.Generated.WolverineHandlers
             // The actual message body
             var trainDecided = (Fworker.Workflows.Delivery.TrainDecided)context.Envelope.Message;
 
-            System.Diagnostics.Activity.Current?.SetTag("message.handler", "SignOffWaitHandler, DeliveryExecutorHandlers, Fworker.Workflows.Delivery.DeliveryActingShadowHandlers");
-            System.Diagnostics.Activity.Current?.SetTag("handler.type", "SignOffWaitHandler, DeliveryExecutorHandlers, Fworker.Workflows.Delivery.DeliveryActingShadowHandlers");
+            System.Diagnostics.Activity.Current?.SetTag("message.handler", "SignOffWaitHandler, PromotionJournalHandler, DeliveryExecutorHandlers, Fworker.Workflows.Delivery.DeliveryActingShadowHandlers");
+            System.Diagnostics.Activity.Current?.SetTag("handler.type", "SignOffWaitHandler, PromotionJournalHandler, DeliveryExecutorHandlers, Fworker.Workflows.Delivery.DeliveryActingShadowHandlers");
             
             // The actual message execution
             await SignOffWaitHandler.Handle(trainDecided, _signOffWaitRecorder, cancellation).ConfigureAwait(false);
+
+            
+            // The actual message execution
+            await PromotionJournalHandler.Handle(trainDecided, _promotionJournal, cancellation).ConfigureAwait(false);
 
             
             // The actual message execution

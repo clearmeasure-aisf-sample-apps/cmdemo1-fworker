@@ -22,7 +22,6 @@ public sealed class VerbRouterTests : IDisposable
     [InlineData("tdd", null, "v1")]
     [InlineData("uat", null, "shadow")]
     [InlineData("prod", null, "v2")]
-    [InlineData("prod", "1", "v1")]
     public void EveryModeResolvesToTheV1Router(string environment, string? off, string expected)
     {
         var engine = Engine(EngineOptionsTests.BlockFor("\"prod\"", "\"uat\""), environment, off);

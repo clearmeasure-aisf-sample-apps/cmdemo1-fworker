@@ -102,16 +102,6 @@ public sealed class ItemVerbsPortTests : IDisposable
             Assert.All(ItemRoutes.Verbs, v => Assert.False(noCredential.TryGet(v, out _), v));
             Assert.IsType<V2VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());   // (the other groups' routes put it in front; the item verbs fall through to v1 behind the saga's feed)
         }
-        // the kill switch puts the environment back on v1: no route, the router of v1
-        using (var env = new GatewayEnvironment())
-        {
-            env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("GH_TOKEN", Token); env.Set("FACTORY_V2_OFF", "1"); V2Config(env); env.Apply();
-            using var host = new GatewayHost();
-            _ = host.Server;
-            Assert.Equal(0, host.Services.GetRequiredService<V2VerbRoutes>().Count);
-            Assert.Null(host.Services.GetRequiredService<Runner>().Routes);   // W9.9a: every call of the gateway itself stays the rule script
-            Assert.IsType<V1VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
-        }
     }
 
     [Theory]
