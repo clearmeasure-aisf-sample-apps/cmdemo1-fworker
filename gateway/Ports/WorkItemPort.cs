@@ -50,6 +50,8 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 
     /// <summary>V1.3: the worker a label pins an item to, from the labels of the reconciler's cards (set by the composition); null for none.</summary>
     public Func<int, string?>? PinOf { get; set; }
+    /// <summary>V3.2: whether the item carries the owner's hold label (hold:owner): it is offered to nobody while it does, and an open offer of it is dropped by the next pass (the sweep's rule, now the plant's).</summary>
+    public Func<int, bool>? OwnerHeld { get; set; }
 
     /// <summary>
     /// Cutover review: an ownership that is never loaded, for a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase). The sweep asks it and waits for ever, so v1 acts on no item;
@@ -101,7 +103,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         var nodes = new List<JsonObject>();
         var s = snapshot;   // (offers and slots of one read)
         foreach (var (item, column) in OffersOf(s))
-            if (!hasOwner(item) && (only is null || only.Contains(item)))
+            if (!hasOwner(item) && (only is null || only.Contains(item)) && OwnerHeld?.Invoke(item) != true)
             {
                 var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
                 // V1.3: a worker: label pins the item to that worker, as the sweep's pins do for v1's items (Plant.Plan reads it from the offers of an offer made outside a sweep, see PlanSagaOffers)

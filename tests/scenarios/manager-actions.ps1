@@ -256,7 +256,7 @@ function Ma-OnSaga([scriptblock]$Body, [switch]$Snapshot) {
     $oldSnap = $env:FACTORY_PLANT_SNAPSHOT
     try {
         $cfg = $orig | ConvertFrom-Json -AsHashtable
-        $cfg.intake.enabled = $true; $cfg.intake.v2Plans = @('docs')
+        $cfg.intake.enabled = $true; $cfg.intake.v2Plans = @('docs'); $cfg.intake.wipLimit = 100   # (V3.2: every card left by an earlier scenario has a saga now and counts against the limit)
         $cfg.wolverine.scheduledJobSeconds = 60; $cfg.wolverine.firstScheduledJobSeconds = 0
         $cfg.scheduler.featureSlots = $false
         $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath

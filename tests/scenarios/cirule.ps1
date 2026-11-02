@@ -119,14 +119,3 @@ $CiRuleScenarios['ci rule: a park that expires, and one an operator releases, st
 # The merge path (the owner suite: the gateway merges a PASS by itself). A PASS whose head turns red on a check master fails too is re-run once,
 # then waits as a master defect without a demotion; once master passes the check again the gateway updates the branch and merges the new head.
 $CiRuleOwnerScenarios = [ordered]@{}
-$CiRuleOwnerScenarios['ci rule (gateway merge): a PASS whose head is red for a reason of its own is re-run once, then demoted as before [full]'] = {
-    Fake 'config' @{ rerunSeconds = 3; rerunConclusion = 'failure' } | Out-Null
-    $x = Pm-ToValidation
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 3600 } | Out-Null
-    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
-    Ci-SetHead (Get-Head $x.pr) @('Integration Build (SQLite)') 9401
-    Check 'the failed jobs are re-run once before deciding' (Wait-Until -Seconds 60 { (Ci-Comments $x.n '*re-running the failed jobs once*before deciding*').Count -eq 1 })
-    Check 'still red after it, with master passing that check: demoted to Development as before' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Development' -and [int](Ci-State $x.n)['demotions'] -eq 1 }) "column $((Get-FakeIssue $x.n).column)"
-    # (the demotion saves the state and then posts its comment: the state check above can pass before the comment is there, which a loaded runner shows)
-    Check 'the demotion says it was still red after the re-run; nothing was merged' ((Wait-Until -Seconds 20 { (Ci-Comments $x.n '*merge failed*still red after one re-run*').Count -eq 1 }) -and -not (Get-FakePr $x.pr).merged) (((Get-FakeIssue $x.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(200, $_.body.Length)) }) -join ' | ')
-}

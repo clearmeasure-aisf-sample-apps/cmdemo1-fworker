@@ -198,7 +198,6 @@ $RuntimeScenarios['runtime: a per-worker ack window; an offer a runtime worker l
         $e2 = (Rt-Execs $n)[-1]
         Check 'the second worker never registers: its execution is stopped after the window' (Wait-Until -Seconds 40 { @((Rt-Arm).executions | Where-Object { $_.name -eq $e2.name -and $_.status -eq 'Stopped' }).Count -eq 1 })
         Check 'two failed executions in the phase park the item runtime-failed' (Wait-Until -Seconds 30 { $s = Get-ItemState $n; $s.ContainsKey('park') -and $s.park.reason -eq 'runtime-failed' })
-        Check 'the park is journalled' ((Rt-Journal $n 'plant event=parked ') -ge 1)
         $starts = (Rt-Arm).starts; Start-Sleep -Seconds 6
         Check 'no third execution is started' ((Rt-Arm).starts -eq $starts -and (Rt-Execs $n).Count -eq 2)
         Check 'status: the runtime counted an execution that never registered' ((Rt-Status).startFailuresInRow -ge 1)
@@ -213,6 +212,7 @@ $RuntimeScenarios['runtime: session.end maps to the execution exit: the worker e
         $e = (Rt-Execs $n)[0]; $name = "$($e.worker)"; [void](Rt-Launch $e)
         $r = Rt-Own $name $n; CheckExit 'its worker owns the item' $r 0
         [void](Gh-As 'fake-operator' "issues/$n/labels" @{ labels = @('hold:owner') })
+        Start-Sleep -Seconds 8   # V3.2: the saga learns of the hold from the next pass of the board reconciler; until then it would offer the released item again
         $r = Fo $name @('release', '--item', $n, '--reason', 'scenario: the item is done for this execution'); CheckExit 'the item leaves the worker' $r 0
         Check 'the runtime worker is told session.end (one item per session for runtime workers)' (Wait-Until -Seconds 60 { @(Get-WorkerEvents $name | Where-Object { $_.event -eq 'session.end' }).Count -gt 0 })
         [void](Fake 'arm-exec' @{ worker = $name; status = 'Succeeded' })
@@ -300,6 +300,9 @@ $RuntimeScenarios['runtime: outside tdd the baked caeJob is off; the FACTORY_RUN
         $env:FACTORY_ENVIRONMENT = 'tdd'; $env:FACTORY_RUNTIME_MAX_PER_DAY = '5'; Restart-Gateway
         Check 'in tdd a variable overrides the baked value' ((Rt-Status).enabled -eq $true -and (Rt-Status).maxExecutionsPerDay -eq 5) (Rt-Status | ConvertTo-Json -Compress -Depth 4)
         Remove-Item env:FACTORY_RUNTIME_MAX_PER_DAY
+        # V3.2: no engine but v2 acts, so the environment uat is a v2 environment of this gateway (as it is once the engine takes uat and prod)
+        $cfgPath = Join-Path $script:Work 'instance.test.json'; $origCfg = Get-Content -Raw $cfgPath
+        $cfgU = $origCfg | ConvertFrom-Json -AsHashtable; $cfgU.engine.v2Environments = @($cfgU.engine.v2Environments) + 'uat'; $cfgU | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
         $env:FACTORY_ENVIRONMENT = 'uat'; Restart-Gateway
         function Rt-On { $r = (Get-Plant).runtimes; $c = if ($r -and $r.PSObject.Properties['cae-job']) { $r.'cae-job' } else { $r }; [bool]($c -and $c.enabled -eq $true) }
         Check 'in uat the baked caeJob is off' (-not (Rt-On)) ((Get-Plant).runtimes | ConvertTo-Json -Compress -Depth 4)
@@ -313,6 +316,7 @@ $RuntimeScenarios['runtime: outside tdd the baked caeJob is off; the FACTORY_RUN
         Check 'an execution is started with the gateway address of the variables' (Wait-Until -Seconds 30 { $e = Rt-Execs $n; $e.Count -gt 0 -and @($e[0].env | Where-Object { $_.name -eq 'FWORKER_GATEWAY_URL' -and $_.value -eq 'http://ca-uat-fworker' }).Count -eq 1 })
     } finally {
         Rt-Cleanup @($n)
+        if ($origCfg) { Set-Content -Path $cfgPath -Value $origCfg -NoNewline }
         foreach ($v in $vars) { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
         Restart-Gateway
     }

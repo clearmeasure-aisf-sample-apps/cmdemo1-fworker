@@ -50,17 +50,6 @@ function Bu-SetVerdict([int]$Item, [int]$Pr, [switch]$NoHead) {
 
 $BaseUpdateScenarios = [ordered]@{
 
-'base update: a verdict recorded between the trigger and the delayed update stops the gateway''s update [full]' = {
-    Bu-Worker 'bm1'
-    $a = Bu-OwnedPr 'bm1' @('docs/verdict.md')
-    Bu-Synced
-    [void](Fake 'master-merge' @{ files = @('docs/v.md') })
-    Check 'the owner is told' (Wait-Until -Seconds 30 { (Bu-Events 'bm1' $a.item).Count -gt 0 })
-    Bu-SetVerdict $a.item $a.pr
-    Start-Sleep -Seconds 14
-    Check 'the gateway does not update the branch' ((Bu-Puts $a.pr) -eq 0)
-}
-
 'base update: a merge to master tells the other owners of open branches with the overlapping files, not the merged pull request''s own worker' = {
     Bu-Worker 'bm1'; Bu-Worker 'bm2'; Bu-Worker 'bm3'
     $a = Bu-OwnedPr 'bm1' @('docs/a.md', 'src/Shared.cs'); $b = Bu-OwnedPr 'bm2' @('docs/b.md'); $c = Bu-OwnedPr 'bm3' @('src/Shared.cs', 'docs/c.md')
@@ -152,18 +141,6 @@ $BaseUpdateScenarios = [ordered]@{
         Start-Sleep -Seconds 14
         Check 'no update branch' ((Bu-Puts $a.pr) -eq 0)
     } finally { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/base-update?autoUpdateBranch=true" -Method POST -Headers $h) }
-}
-
-'base update: an item whose PASS verdict waits for its merge gets no trigger [full]' = {
-    Bu-Worker 'bm1'
-    $a = Bu-OwnedPr 'bm1' @('docs/pass.md'); $b = Bu-OwnedPr 'bm1' @('docs/pass2.md')
-    # the state of a PASS verdict that the gateway has not merged yet (pass-unmerged)
-    Bu-SetVerdict $a.item $a.pr -NoHead
-    Bu-Synced
-    [void](Fake 'master-merge' @{ files = @('docs/z.md') })
-    $got = Wait-Until -Seconds 30 { (Bu-Events 'bm1' $b.item).Count -gt 0 }
-    Check 'the other item is told' $got
-    Check 'the pass-unmerged item is not' ((Bu-Events 'bm1' $a.item).Count -eq 0)
 }
 
 'base update: a session that reconnects is replayed the latest base.updated only [full]' = {

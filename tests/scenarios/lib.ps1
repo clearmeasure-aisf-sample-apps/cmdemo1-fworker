@@ -591,6 +591,14 @@ function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $goldenMode = Get-GoldenMode
     try {
         try { Wait-SweepGap } catch { }
+        # V3.2: every open card has a saga, and a saga outlives the fake's reset (the reconciler never sees a card vanish): an item left open by the scenario before would be offered to this scenario's sessions.
+        # So the scenario before ends them the way GitHub does: its open issues are closed, and the board reconciler publishes the closed cards (its pass is seconds in the tests) before the reset.
+        try {
+            $ghBase = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+            $openIssues = @(Invoke-RestMethod "$ghBase/issues?state=open&per_page=100" -Headers @{ Authorization = 'Bearer fake-operator' } -TimeoutSec 5 | Where-Object { $_ -and -not $_.pull_request })
+            foreach ($oi in $openIssues) { try { [void](Invoke-RestMethod "$ghBase/issues/$($oi.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body '{"state":"closed"}' -TimeoutSec 5) } catch { } }
+            if ($openIssues.Count -gt 0) { Start-Sleep -Seconds 4 }
+        } catch { }
         Fake 'reset' @{} | Out-Null
         # a suite whose gateway keeps state in a database across the scenarios (the delivery train of -Engine v2) starts each scenario on a gateway of its own state: $script:BeforeScenario, after the reset of the fake
         if ($script:BeforeScenario) { try { & $script:BeforeScenario } catch { Check 'the scenario starts on a fresh gateway' $false $_.Exception.Message } }
