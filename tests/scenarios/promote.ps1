@@ -5,6 +5,17 @@
 $PromoteLabels = @('factory worker', 'Auto Merge')
 
 # An item waiting in the Release Queue for release $Ver, as settle leaves it after a gateway merge of a PASS (or, with -NoPass, of a person's merge)
+# -Engine v2: the delivery train keeps its state in the database, across the scenarios of a gateway, and a request, a Sign-off or a release left over from one scenario (the fake is reset for the next, so that a deployment Octopus would have
+# finished never does) is followed, retried or promoted in the next. Each scenario therefore starts on a gateway with a database of its own (as it starts on a fake of its own): the gateway is restarted on a new database after the fake's reset.
+if ($script:GoldenEngine -eq 'v2') {
+    # (every suite file is loaded by every run: the hook is the promote suite's only)
+    $script:BeforeScenario = {
+        if ($script:SuiteName -ne 'promote') { return }
+        $env:FACTORY_DB_CONNECTION = $env:FACTORY_TEST_SQL.Trim().TrimEnd(';') + ';Initial Catalog=fworker_v2ci_promote_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        Restart-Gateway
+    }
+}
+
 function Pm-Sha { ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40) }
 # What runs everywhere before the scenario's releases: release 3.0.0 at commit B, deployed to tdd, uat and prod; master history starts at B.
 # Once per scenario (Pm-Item calls it unless -NoBase).

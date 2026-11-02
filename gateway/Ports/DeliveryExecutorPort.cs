@@ -29,8 +29,8 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         return new(r, failed == null ? null : new DeliveryCommandFinished(c.IdempotencyKey, c.Name, false, r.Error), failed);
     }
 
-    /// <summary>A refusal that settles (Permanent): the effect did not happen. A command that ran out of tries may have had its effect, and the train does not take its request back.</summary>
-    static bool IsSettled(CommandResult? r) => r is { Ok: false, Failure: FailureKind.Permanent or FailureKind.NotSupported };
+    /// <summary>A refusal the train takes its request back for: a fault of the credential (a 403 for a missing permission, a 401), which the owner's fix clears and the ledger does not remember. Any other failure (a release that is not in Octopus, tries that ran out and may have had their effect) is left to the train's resend after five minutes and its expiry.</summary>
+    static bool IsSettled(CommandResult? r) => r is { Ok: false } && AuthFaults.Is(r);
 
     static RuntimeOutcome Exhausted(IntegrationCommand c, string error)
     {

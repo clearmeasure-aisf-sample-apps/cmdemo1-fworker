@@ -580,6 +580,8 @@ function Run-Scenario([string]$Name, [scriptblock]$Body) {
     try {
         try { Wait-SweepGap } catch { }
         Fake 'reset' @{} | Out-Null
+        # a suite whose gateway keeps state in a database across the scenarios (the delivery train of -Engine v2) starts each scenario on a gateway of its own state: $script:BeforeScenario, after the reset of the fake
+        if ($script:BeforeScenario) { try { & $script:BeforeScenario } catch { Check 'the scenario starts on a fresh gateway' $false $_.Exception.Message } }
         # the record of this scenario's writes starts after the reset (tests/scenarios/golden/README.md)
         if ($goldenMode -ne 'off') {
             try {
