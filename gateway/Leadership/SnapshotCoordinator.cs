@@ -50,7 +50,8 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
             {
                 var (na, no, skipped) = plant.Restore(MergeableOf(stored.Snapshot, plant.Snapshot()), 60 * 24);
                 merged = na + no;
-                if (skipped == "") { await CorrectAsync(); Interlocked.Exchange(ref heldEpoch, stored.Epoch); }
+                if (skipped != "") return;   // the merge was refused: the block stays
+                await CorrectAsync(); Interlocked.Exchange(ref heldEpoch, stored.Epoch);
             }
             if (!leader.MayAct) return;   // stood down meanwhile: the write that follows does not happen either (SaveAsync asks again), and the block stays for the next term's own restore
             loadFailed = false; skipLogged = false;
