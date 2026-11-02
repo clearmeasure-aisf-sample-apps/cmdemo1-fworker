@@ -97,12 +97,17 @@ resource agOwner 'Microsoft.Insights/actionGroups@2023-01-01' = {
 | `tdd-fworker-not-ready` | Application Insights standard web test of `https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io/ready` (every 5 minutes from 5 locations, expect 200; `/ready` answers 503 while the schema, the revocations or the prompts are not ready, and 503 `gateway-replaced` for a process a newer one replaced) with the web test metric alert | `failedLocationCount >= 2` | PT10M | 1 |
 | `tdd-fworker-5xx` | metric `Requests`, Total, `statusCodeCategory` = `5xx`, of the factory | `>= 10` | PT5M | 2 |
 | `tdd-fworker-alerts-not-stored` | scheduled query rule v2 on the Container Apps environment's Log Analytics workspace: `ContainerAppConsoleLogs_CL \| where ContainerAppName_s == 'ca-cmdemo1-tdd-fworker' \| where Log_s has '"alertIngress":"not-stored"'` | count `>= 1` | PT5M | 1 |
+| `tdd-fworker-no-host-report` | scheduled query rule v2 on the same workspace: `ContainerAppConsoleLogs_CL \| where ContainerAppName_s == 'ca-cmdemo1-tdd-fworker' \| where Log_s has '"hostReports":"none"'` | count `>= 1` | PT10M | 2 |
 | `tdd-fworker-db-connections` | metric `connection_failed` of the factory's Azure SQL database, Total | `>= 5` | PT5M | 2 |
 | `tdd-fworker-db-paused-or-full` | metric `storage_percent`, Maximum, of the same database | `> 85` | PT15M | 3 |
 
 `tdd-fworker-alerts-not-stored` is the one that the alert ingress itself feeds: the gateway writes one JSON line
 `{"alertIngress":"not-stored",...}` whenever it could not put an alert into its inbox (and answers 503, so Azure retries), which means incidents of the
 app are arriving at a factory that cannot take them.
+
+`tdd-fworker-no-host-report` says that no fworker host has reported to the scheduler for 30 minutes (2026-11-01: Octopus kept omarchy Unavailable for 6 hours and
+no feature work could start). The acting gateway writes `{"hostReports":"none",...}` every 5 minutes while that holds (`HostSilenceWatch`, `gateway/Endpoints/StatusV2Health.cs`);
+`/api/v1/status` `v2.capacity.hostReports` shows the ages. The remedy is the health check of docs/deploy/octopus-host-health-policy.md.
 
 ## 6. After applying
 

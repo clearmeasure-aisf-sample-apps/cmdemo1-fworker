@@ -348,6 +348,8 @@ static class GatewayServiceCollectionExtensions
         services.AddGatewayCloudOwners(c);
         // C5d: the two loops Program.cs started last, after Build(), in that order: the on-demand manager's tick, then the MCP session sweep
         services.AddGatewayManagerCopilot(c);
+        // the log line of the factory alert "no host has reported for 30 minutes" (docs/deploy/incident-alert-rules.md 5): where the engine acts and the health block exists (it needs the database)
+        if (c.Engine.V2Acts && c.Database.ConnectionString is not null) services.AddHostedService(sp => new HostSilenceWatch(sp.GetRequiredService<V2Health>(), () => c.Leader.MayAct));
         services.AddHostedService(sp => new McpSessionSweeper(() => sp.GetRequiredService<WorkerSessions>(), McpSessionSweeper.DefaultInterval));
         // W1.2: the system catalog's refresh, last, and only where the catalog is switched on (catalog.enabled or FACTORY_CATALOG=1); off, the list of hosted services is what it was
         if (c.Catalog.Enabled && c.Instance.CanCompose) services.AddHostedService(sp => sp.GetRequiredService<CatalogRefreshService>());
