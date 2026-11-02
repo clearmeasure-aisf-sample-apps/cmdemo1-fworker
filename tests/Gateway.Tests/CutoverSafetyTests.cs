@@ -143,11 +143,9 @@ public sealed class CutoverSafetyTests
         var services = host.Services.GetServices<IHostedService>();
         var sweeper = services.OfType<Sweeper>().Single();
         Assert.True(sweeper.V2!.Unavailable); Assert.False(sweeper.V2.Loaded);
-        Assert.Contains(services, s => s is AutoPromoter);
         // nothing that acts on items acts (the lease is off in this test, so MayAct of the leader is true: only the inert rule says no), and a verb that changes anything is refused
         Assert.False(services.OfType<PlantTicker>().Single().MayAct!());
         Assert.False(services.OfType<BaseWatch>().Single().MayAct!());
-        Assert.True(services.OfType<AutoPromoter>().Single().MayAct!());
         Assert.True(host.Services.GetRequiredService<ILeadership>().MayAct); Assert.False(new InertLeadership(host.Services.GetRequiredService<ILeadership>()).MayAct);
         var router = host.Services.GetRequiredService<IVerbRouter>();
         Assert.IsType<InertVerbRouter>(router);

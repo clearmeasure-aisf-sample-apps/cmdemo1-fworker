@@ -14,8 +14,6 @@ sealed class TimingOptions
     // before FACTORY_SWEEP_MIN_SECONDS and the cap at the sweep interval, which Program.cs applies
     public double SweepMinSeconds { get; init; }
     public double McpIdleMinutes { get; init; }
-    // the interval of the automatic promotion's own loop (AutoPromoter.cs)
-    public double PromoteSeconds { get; init; }
 
     public static TimingOptions From(InstanceConfig cfg) => new()
     {
@@ -30,6 +28,5 @@ sealed class TimingOptions
         SessionRepeatQuestionLimit = (int)cfg.TimingValue("sessionRepeatQuestionLimit", 2),
         SweepMinSeconds = cfg.TimingValue("sweepMinSeconds", 60),
         McpIdleMinutes = cfg.TimingValue("mcpIdleMinutes", 30),
-        PromoteSeconds = cfg.TimingNumber("promoteSeconds", 60),
     };
 }

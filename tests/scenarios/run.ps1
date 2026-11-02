@@ -166,7 +166,7 @@ $SuiteDefs = @(
             runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
                 agent = 'codex'; perHostCapacity = 1; overflowRoles = @('qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
     # the automatic promotion (promote.ps1, docs/design/auto-promote.md): on, for any gateway environment; tdd and uat health on the fake's /_healthcheck
-    @{ Name = 'promote'; Policy = 'auto'; Set = $PromoteScenarios; Env = 'promote'; Timing = @{ staleItemMinutes = 600; promoteSeconds = 3 }
+    @{ Name = 'promote'; Policy = 'auto'; Set = $PromoteScenarios; Env = 'promote'; Timing = @{ staleItemMinutes = 600 }
         Extra = @{ delivery = @{ autoPromote = @{ enabled = $true; environments = @('uat', 'prod'); gatewayEnvironment = 'tdd'; signoffWaitHours = 0.05; pollSeconds = 3; readGapSeconds = 1 } }
             wolverine = @{ scheduledJobSeconds = 5; firstScheduledJobSeconds = 0 }
             octopus = @{ url = '__FAKE_URL__/octopus'; space = 'Spaces-355'; project = 'cmdemo1-ui'; prodUrl = 'https://ca-cmdemo1-prod-ui.example'; tddUrl = '__FAKE_URL__'; uatUrl = '__FAKE_URL__'; healthPath = '/_healthcheck/detailed'; watchSeconds = 5; health = @{ spacingMinutes = 0.05; settleMinutes = 0.1; retries = 2; retrySeconds = 0.5 }
@@ -403,9 +403,11 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
         return
     }
     $cfg = @{ mergePolicy = $Policy; humanApprovers = @('factory-worker-testperson[bot]') }; foreach ($k in $Extra.Keys) { $cfg[$k] = $Extra[$k] }
+    # V2.3: v1 has no automatic promotion any more (the AutoPromoter is gone); the delivery train promotes, so this suite runs on the engine only
+    if ($script:SuiteName -eq 'promote' -and $Engine -ne 'v2') { $env:TEST_GOLDEN = 'off'; $stub = { Check 'v2 only: v1 no longer promotes to uat and prod (V2.3); the delivery train does, and the claim of this suite runs on v2' $true }; $Set = [ordered]@{}; foreach ($n in $names) { $Set[$n] = $stub } }   # (every scenario keeps its name and reports one check: the shards of tests.yml list them)
     if ($Engine -eq 'v2') { $cfg['engine'] = @{ v2Environments = @($script:V2EnvName); shadowEnvironments = @() } }   # (no suite sets an engine block of its own)
-    # W9.10p, V2.1: the promote suite names the gateway environment tdd for delivery.autoPromote; the engine run's environment is v2ci, and the delivery train (trainActs true) promotes uat and prod there, as it does after the switch of W9.12
-    if ($Engine -eq 'v2' -and $cfg.ContainsKey('delivery') -and $cfg['delivery'] -is [System.Collections.IDictionary] -and $cfg['delivery'].Contains('autoPromote') -and $cfg['delivery']['autoPromote'] -is [System.Collections.IDictionary]) { $cfg['delivery']['autoPromote']['gatewayEnvironment'] = $script:V2EnvName; $cfg['delivery']['autoPromote']['trainActs'] = $true }   # V2.1: the delivery train promotes the app's uat and prod in the engine run (the profile of W9.12's switch); the AutoPromoter does not run there
+    # W9.10p, V2.1: the promote suite names the gateway environment tdd for delivery.autoPromote; the engine run's environment is v2ci, and the delivery train promotes uat and prod there, as it does after the switch of W9.12
+    if ($Engine -eq 'v2' -and $cfg.ContainsKey('delivery') -and $cfg['delivery'] -is [System.Collections.IDictionary] -and $cfg['delivery'].Contains('autoPromote') -and $cfg['delivery']['autoPromote'] -is [System.Collections.IDictionary]) { $cfg['delivery']['autoPromote']['gatewayEnvironment'] = $script:V2EnvName }   # V2.1: the delivery train promotes the app's uat and prod in the engine run (the profile of W9.12's switch); the AutoPromoter does not run there
     if ($Engine -eq 'v2') { Start-TestEnv $cfg -Merge $script:V2Profiles[$V2Profile] } else { Start-TestEnv $cfg }
     if ($Engine -eq 'v2') {
         # /ready does not wait for the database (the host starts in the background: the migration, which creates the database, then the node), and a journal line before the host is

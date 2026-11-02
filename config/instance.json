@@ -70,8 +70,7 @@
       "gatewayEnvironment": "",
       "signoffWaitHours": 2,
       "pollSeconds": 120,
-      "readGapSeconds": 30,
-      "trainActs": false
+      "readGapSeconds": 30
     },
     "finalEnvironment": "prod",
     "dependenciesDelivered": true,
@@ -245,7 +244,6 @@
     "questionDedupeMinutes": 60,
     "baseUpdateDebounceSeconds": 20,
     "sweepMinSeconds": 60,
-    "promoteSeconds": 60,
     "journalWaitingMinutes": 30
   },
   "baseUpdate": {

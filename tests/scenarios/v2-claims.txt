@@ -60,8 +60,8 @@ qc-gate-idle
 qc-gate-lifetime
 qc-gate-lease
 qc-gate-waiting
-# promote: V2.1, the delivery train acts for the app's uat and prod in the engine run (run.ps1 -Engine v2 sets delivery.autoPromote.trainActs for it, as the switch of V2.2 will in the deployed overrides), so the suite proves the train's promotions,
-# Sign-off answers and journal lines against v1's golden oracle. The AutoPromoter does not run there. tdd is its environment: run.ps1 keeps the name, and names it as the gateway environment of delivery.autoPromote. The train looks again at the
+# promote: V2.1, the delivery train acts for the app's uat and prod in the engine run (as the deployed gateway does since V2.2; V2.3 removed the switch and the AutoPromoter, so the suite runs on v2 only and reports one 'v2 only' check on v1), so the suite proves the train's promotions,
+# Sign-off answers and journal lines against v1's golden oracle. tdd is its environment: run.ps1 keeps the name, and names it as the gateway environment of delivery.autoPromote. The train looks again at the
 # scheduled-message poll of the host (5 s in a test gateway, FACTORY_DB_CREATE), where v1 passed every 3 s: the scenarios wait three times as long on v2 (promote.ps1 Pm-Numbers). The scenarios of v1's pass design are declared below.
 promote
 # qc-worker: 330 checks green on v2 in one process (494 s); four shards in the matrix, as in the v1 job
