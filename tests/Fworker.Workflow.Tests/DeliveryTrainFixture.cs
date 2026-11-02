@@ -34,7 +34,27 @@ sealed class FakeTrainReads : ITrainReads
         => Task.FromResult(Lookups.TryGetValue(commit.Sha, out var l) ? l : new CommitItemLookup(0, ""));
 
     public int FreshGateReads;
-    public Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, bool fresh = false) { if (fresh) FreshGateReads++; return ReadGatesCore(item); }
+    /// <summary>The instant each item's gates were last read, and how many reads the cap of a minute allows (0: no cap): a read over the cap throws, as the shadow's does.</summary>
+    public readonly Dictionary<string, DateTimeOffset> GateReadAt = [];
+    public int GateReadsPerMinute;
+    readonly Queue<DateTimeOffset> gateCalls = new();
+    public int GateReads;
+    public Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, DateTimeOffset? freshSince = null)
+    {
+        var key = item.ToString(); var t = Clock();
+        // a cached answer, as the real reads keep one: used unless it is older than freshSince (or, with no freshSince, older than GatesKeep)
+        if (GateReadsPerMinute > 0 && GateReadAt.TryGetValue(key, out var at) && (freshSince is { } f ? at >= f : t - at < GatesKeep)) return ReadGatesCore(item);
+        if (freshSince is not null) FreshGateReads++;
+        if (GateReadsPerMinute > 0)
+        {
+            while (gateCalls.Count > 0 && t - gateCalls.Peek() > TimeSpan.FromMinutes(1)) gateCalls.Dequeue();
+            if (gateCalls.Count >= GateReadsPerMinute) throw new HttpRequestException("the reads of this minute are spent");
+            gateCalls.Enqueue(t); GateReadAt[key] = t;
+        }
+        GateReads++;
+        return ReadGatesCore(item);
+    }
+    public TimeSpan GatesKeep = TimeSpan.FromMinutes(5);
     Task<ItemMergedGates?> ReadGatesCore(ItemId item) => Task.FromResult(Gates.TryGetValue(item.ToString(), out var g) ? g : null);
 
     public Task<EnvProbe> Probe(string deployable, string environment, CancellationToken ct)

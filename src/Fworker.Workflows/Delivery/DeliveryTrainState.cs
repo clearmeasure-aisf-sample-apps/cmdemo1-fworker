@@ -53,6 +53,8 @@ public sealed class TrainDeployment
     public bool Succeeded => Phase == "Succeeded";
     /// <summary>W8.3: this deployment is the train's own rollback (the deployment of a release that had run here before, ordered by the incident): it delivers no item.</summary>
     public bool Rollback { get; set; }
+    /// <summary>V2.1: the deployment appeared while this train had asked for its release, so it is the executor's own (a Sign-off is answered only on such a deployment). Null: saved before this was kept.</summary>
+    public bool? Ours { get; set; }
 }
 
 /// <summary>A Sign-off (manual intervention) a deployment of this environment waits at.</summary>
@@ -70,6 +72,8 @@ public sealed class TrainSignOff
     public DateTimeOffset? RetryAfter { get; set; }
     public bool LastProceed { get; set; }
     public string LastNotes { get; set; } = "";
+    /// <summary>V2.1: the consecutive looks whose read of the previous environment's app got no answer (see <see cref="TrainEvidence.Unreachable"/>).</summary>
+    public int HealthMisses { get; set; }
 }
 
 /// <summary>The health reads taken of the previous environment for one release, with the last evidence verdict (the clock of the read gap).</summary>
@@ -78,6 +82,8 @@ public sealed class TrainEvidence
     public List<TrainRead> Reads { get; set; } = [];
     public DateTimeOffset? LastReadAt { get; set; }
     public string LastGap { get; set; } = "";
+    /// <summary>V2.1: the consecutive looks whose health read got no answer at all. One try is made per look (nothing sleeps in the handler); only the <see cref="DeliveryPolicy.HealthRetries"/>-th in a row is a stored bad read, as v1's three tries.</summary>
+    public int Unreachable { get; set; }
 }
 
 public sealed class TrainRead

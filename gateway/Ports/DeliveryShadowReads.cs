@@ -19,14 +19,16 @@ using Fworker.Workflows.Delivery;
 // read again. A 'none' that depends on item state (no candidate item's state names the commit yet) and a 'waiting' keep their lifetimes: a longer one would put v2's decision behind v1's.
 sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceName, IMergeFactsReader facts, ItemGateConfig gates, IDeliveryPolicies policies,
     Action<string, string?, string?, string?>? observe = null, Func<DateTimeOffset>? clock = null, Func<bool>? budgetLow = null,
-    int healthTries = 3, TimeSpan healthGap = default, Func<TimeSpan, CancellationToken, Task>? pause = null) : ITrainReads
+    TimeSpan probeBudget = default) : ITrainReads
 {
-    readonly TimeSpan healthGap = healthGap == default ? TimeSpan.FromSeconds(20) : healthGap;
+    /// <summary>The longest one probe takes in all (the build read and the health read together): the handler of the train runs in the one queue every train shares and must come back well inside Wolverine's handler timeout.</summary>
+    readonly TimeSpan probeBudget = probeBudget == default ? TimeSpan.FromSeconds(25) : probeBudget;
     /// <summary>Reads the shadow may make in a minute; v1's pass shares the token, so the shadow stays well under what a sweep needs.</summary>
     public const int MaxCallsPerMinute = 40;
     readonly Queue<DateTimeOffset> callTimes = new();
-    static readonly TimeSpan CompareKeep = TimeSpan.FromMinutes(2), NoneKeep = TimeSpan.FromMinutes(10), GatesKeep = TimeSpan.FromMinutes(1), WaitingKeep = TimeSpan.FromSeconds(60);
+    static readonly TimeSpan CompareKeep = TimeSpan.FromMinutes(2), NoneKeep = TimeSpan.FromMinutes(10), GatesKeep = TimeSpan.FromMinutes(5), WaitingKeep = TimeSpan.FromSeconds(60);
     const int MaxKept = 500;
+    // GatesKeep is longer than the minute of MaxCallsPerMinute: a look at a release of more items than one minute's reads allows reads some of them and is refused for the rest, and the answers it got are still there at the next look, which reads the rest.
 
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly object gate = new();
@@ -161,10 +163,11 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         return null;
     }
 
-    public async Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, bool fresh = false)
+    public async Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, DateTimeOffset? freshSince = null)
     {
         var key = item.ToString();
-        lock (gate) if (!fresh && gateReads.TryGetValue(key, out var kept) && now() - kept.At < GatesKeep) return kept.Gates;
+        // (freshSince: an answer read at or after that instant is as good as a new one; without it an answer is good for GatesKeep)
+        lock (gate) if (gateReads.TryGetValue(key, out var kept) && (freshSince is { } since ? kept.At >= since : now() - kept.At < GatesKeep)) return kept.Gates;
         var read = await Facts(() => facts.ReadItem(item, ct));
         var g = read is null ? null : ItemMergedDeriver.GatesOf(read, item.Number, gates);
         lock (gate) { Trim(gateReads); gateReads[key] = (now(), g); }
@@ -177,32 +180,28 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         var url = p?.UrlOf(environment);
         if (p is null || url is null) return new EnvProbe(null, null, "", now());
         string? version = null;
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(probeBudget);   // the build read and the health read together
         try
         {
-            using var b = await app.GetAsync(url + "/_build", ct);
-            if (b.IsSuccessStatusCode && JsonNode.Parse(await b.Content.ReadAsStringAsync(ct)) is JsonObject bo) version = bo["version"]?.ToString();
+            using var b = await app.GetAsync(url + "/_build", bounded.Token);
+            if (b.IsSuccessStatusCode && JsonNode.Parse(await b.Content.ReadAsStringAsync(bounded.Token)) is JsonObject bo) version = bo["version"]?.ToString();
         }
-        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException) { }
-        // V2.1: v1's Read-EnvHealth tries the health endpoint octopus.health.retries times (3), octopus.health.retrySeconds (20) apart (with up to half a gap of jitter) before it is unreachable. One stray failure
-        // is a stored bad read that blocks the release until a new deployment, so the read is tried again here too. An answer of any kind (even without overallStatus) ends the tries, as in v1.
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException) { if (ct.IsCancellationRequested) throw; }
+        // V2.1: ONE try per look. v1's Read-EnvHealth tries octopus.health.retries times (3), retrySeconds (20) apart and sleeps between the tries; the handler here runs in the one queue every train shares, so nothing sleeps in it:
+        // the train counts the looks that got no answer (TrainEvidence.Unreachable), looks again after retrySeconds, and only the last of them is a stored bad read. An answer of any kind (even without overallStatus) is a read, as in v1.
         var status = "unreachable";
-        var tries = Math.Max(1, healthTries);
-        for (var attempt = 1; attempt <= tries; attempt++)
+        try
         {
-            try
-            {
-                using var h = await app.GetAsync(url + p.HealthPath, ct);
-                var text = await h.Content.ReadAsStringAsync(ct);
-                JsonNode? parsed = null;
-                try { parsed = JsonNode.Parse(text); } catch (System.Text.Json.JsonException) { }   // (a page that is not JSON is an answer, as in v1: "status N without overallStatus")
-                status = (parsed as JsonObject)?["overallStatus"]?.ToString() is { Length: > 0 } s ? s : $"status {(int)h.StatusCode} without overallStatus";
-                break;
-            }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
-            {
-                if (ct.IsCancellationRequested) throw;
-                if (attempt < tries) await (pause ?? ((d, c) => Task.Delay(d, c)))(healthGap + TimeSpan.FromMilliseconds(Random.Shared.NextDouble() * healthGap.TotalMilliseconds / 2), ct);
-            }
+            using var h = await app.GetAsync(url + p.HealthPath, bounded.Token);
+            var text = await h.Content.ReadAsStringAsync(bounded.Token);
+            JsonNode? parsed = null;
+            try { parsed = JsonNode.Parse(text); } catch (System.Text.Json.JsonException) { }   // (a page that is not JSON is an answer, as in v1: "status N without overallStatus")
+            status = (parsed as JsonObject)?["overallStatus"]?.ToString() is { Length: > 0 } s ? s : $"status {(int)h.StatusCode} without overallStatus";
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            if (ct.IsCancellationRequested) throw;
         }
         return new EnvProbe(url, version, status, now());
     }

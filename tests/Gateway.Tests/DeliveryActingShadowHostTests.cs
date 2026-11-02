@@ -33,7 +33,7 @@ public sealed class DeliveryActingShadowHostTests
         public readonly Dictionary<string, string> Running = [];
         public Task<CompareRange?> Compare(RepoId repository, string deployedCommit, string releaseCommit, CancellationToken ct) => Task.FromResult(Ranges.TryGetValue((deployedCommit, releaseCommit), out var r) ? r : null);
         public Task<CommitItemLookup> LookupCommit(RepoId repository, RangeCommit commit, CancellationToken ct) => Task.FromResult(new CommitItemLookup(0, ""));
-        public Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, bool fresh = false) => Task.FromResult<ItemMergedGates?>(null);
+        public Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, DateTimeOffset? freshSince = null) => Task.FromResult<ItemMergedGates?>(null);
         public Task<EnvProbe> Probe(string deployable, string environment, CancellationToken ct) => Task.FromResult(new EnvProbe($"https://{environment}.example", Running.GetValueOrDefault(environment), "Healthy", DateTimeOffset.UtcNow));
     }
 

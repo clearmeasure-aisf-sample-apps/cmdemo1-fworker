@@ -448,6 +448,21 @@ public class DeliveryShadowTests
     }
 
     [Fact]
+    public async Task AV2OnlyRow_OfALaterEnvironment_ThatPromotes_IsNotDeclaredAsChainPosition()
+    {
+        // only a v2 WAIT on the previous environment is v1's chain order seen from the later train; a v2-only promotion in prod while v1 judged the release in uat is a real difference
+        var r = new Rig();
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.7", environment = "Uat", reasons = new[] { "its deployment to Tdd ended Failed (Deployments-9)" } }));
+        r.Shadow.ObserveV2(new TrainDecided("orders/prod", "promote", "1.0.7", [], [], r.Now));
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.8", environment = "Uat", reasons = new[] { "its deployment to Tdd ended Failed (Deployments-9)" } }));
+        r.Shadow.ObserveV2(new TrainDecided("orders/prod", "waiting", "1.0.8", [], ["the prod gate"], r.Now));   // a wait of another kind (the release's own gates) is no wait on the previous environment either
+        var gate = await Gate(r);
+        Assert.Empty((JsonArray)Declared(gate, "chain-position")["releases"]!);
+        Assert.Equal(2, (int)gate["liveV2Only"]!);
+        Assert.Equal(4, (int)gate["unexplainedLive"]!);   // the two v2-only rows of prod and the two v1-only rows of uat
+    }
+
+    [Fact]
     public async Task AV2OnlyRow_OfAnEarlierEnvironment_ForAReleaseV1JudgesInALaterOne_IsNotDeclared()
     {
         var r = new Rig();

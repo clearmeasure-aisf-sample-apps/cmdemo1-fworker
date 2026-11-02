@@ -226,8 +226,15 @@ public sealed class DeliveryShadowPortTests
         Assert.True(g!.AutoMerge); Assert.Empty(g.Gaps);
         await reads.ReadGates(new ItemId(Home, 7), default);
         Assert.Equal(1, facts.Items);
-        await reads.ReadGates(new ItemId(Home, 7), default, fresh: true);   // (the decision at a Sign-off is made on what the item carries now)
+        var evaluationBegan = now + TimeSpan.FromSeconds(1);
+        now += TimeSpan.FromSeconds(2);
+        await reads.ReadGates(new ItemId(Home, 7), default, freshSince: evaluationBegan);   // (the decision at a Sign-off is made on what the item carries now: a read before the evaluation began is not good enough)
         Assert.Equal(2, facts.Items);
+        await reads.ReadGates(new ItemId(Home, 7), default, freshSince: evaluationBegan);   // (a read made after it began, by the evaluation's first judgment or an earlier look of the chain, counts)
+        Assert.Equal(2, facts.Items);
+        now += TimeSpan.FromMinutes(4);
+        await reads.ReadGates(new ItemId(Home, 7), default);
+        Assert.Equal(2, facts.Items);   // (kept for five minutes, longer than the minute of the cap)
         now += TimeSpan.FromMinutes(2);
         await reads.ReadGates(new ItemId(Home, 7), default);
         Assert.Equal(3, facts.Items);
@@ -261,36 +268,47 @@ public sealed class DeliveryShadowPortTests
         }
     }
 
-    static HttpTrainReads ReadsWith(HttpMessageHandler app, List<TimeSpan> pauses, int tries = 3)
+    static HttpTrainReads ReadsWith(HttpMessageHandler app, TimeSpan budget = default)
     {
         var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Home, null, [new RepositoryEntry(Home, [new DeployableEntry("ui", Home, null, null, null, null, false)])], []);
         var policies = new CatalogDeliveryPolicies(() => snapshot, _ => DeliveryShadowSettings.From(Config(Full)));
-        return new HttpTrainReads(new HttpClient(new Handler()) { BaseAddress = new Uri("https://api.example/") }, new HttpClient(app), "factory-worker", new Facts(), new ItemGateConfig("Auto Merge", "video"), policies, null, null, null,
-            tries, TimeSpan.FromSeconds(20), (d, _) => { pauses.Add(d); return Task.CompletedTask; });
+        return new HttpTrainReads(new HttpClient(new Handler()) { BaseAddress = new Uri("https://api.example/") }, new HttpClient(app) { Timeout = Timeout.InfiniteTimeSpan }, "factory-worker", new Facts(), new ItemGateConfig("Auto Merge", "video"), policies, null, null, null, budget);
     }
 
     [Fact]
-    public async Task AHealthReadThatFailsOnce_IsTriedAgainAsV1Does_AndIsNotABadRead()
+    public async Task AProbeIsOneTryPerLook_ItNeverSleeps_AndTheTrainCountsTheLooksThatGotNoAnswer()
     {
-        var pauses = new List<TimeSpan>(); var app = new Flaky(1, """{"overallStatus":"Healthy"}""");
-        var p = await ReadsWith(app, pauses).Probe("ui", "tdd", default);
-        Assert.Equal("Healthy", p.Status);
-        Assert.Equal(2, app.HealthCalls);
-        var pause = Assert.Single(pauses);
-        Assert.InRange(pause, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(30));   // retrySeconds, and up to half of it more
-    }
-
-    [Fact]
-    public async Task AHealthReadThatFailsEveryTime_IsUnreachableAfterThreeTries_TwoPausesApart()
-    {
-        var pauses = new List<TimeSpan>(); var app = new Flaky(99, "");
-        var p = await ReadsWith(app, pauses).Probe("ui", "tdd", default);
+        // v1 tries the health read 3 times, 20 s apart. The handler runs in the one queue of every train and must not sleep: one try, "unreachable", and the train (TrainEvidence.Unreachable) counts and looks again.
+        var app = new Flaky(99, "");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var p = await ReadsWith(app).Probe("ui", "tdd", default);
         Assert.Equal("unreachable", p.Status);
-        Assert.Equal(3, app.HealthCalls);
-        Assert.Equal(2, pauses.Count);
-        var one = new Flaky(99, ""); var none = new List<TimeSpan>();
-        Assert.Equal("unreachable", (await ReadsWith(one, none, tries: 1).Probe("ui", "tdd", default)).Status);   // octopus.health.retries 1: one try, no pause
-        Assert.Equal(1, one.HealthCalls); Assert.Empty(none);
+        Assert.Equal(1, app.HealthCalls);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5));
+        var ok = new Flaky(0, """{"overallStatus":"Healthy"}""");
+        Assert.Equal("Healthy", (await ReadsWith(ok).Probe("ui", "tdd", default)).Status);
+        Assert.Equal(1, ok.HealthCalls);
+    }
+
+    sealed class Silent : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException();
+        }
+    }
+
+    [Fact]
+    public async Task AProbe_IsBoundedInAll_AnAppThatNeverAnswersIsUnreachableWithinTheBudget_AndACallersCancelStillCancels()
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var p = await ReadsWith(new Silent(), TimeSpan.FromMilliseconds(300)).Probe("ui", "tdd", default);
+        Assert.Equal("unreachable", p.Status);
+        Assert.Null(p.RunningVersion);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"took {clock.Elapsed}");   // (the build read and the health read share the 300 ms)
+        using var cts = new CancellationTokenSource(); cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ReadsWith(new Silent(), TimeSpan.FromMinutes(1)).Probe("ui", "tdd", cts.Token));
     }
 
     [Fact]

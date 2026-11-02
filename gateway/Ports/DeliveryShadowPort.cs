@@ -53,7 +53,9 @@ static class DeliveryShadowSettings
             var migrations = (cfg.Root?["delivery"]?["rollback"]?["migrationPaths"] as JsonArray)?.Select(m => m?.ToString() ?? "").Where(m => m != "").ToList();
             return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, shadowed, migrations,
                 // V2.1: how often a train that waits for the clock or the app looks again, and the least gap between two health reads (v1 passes every 60 s and reads at once): 120 s and 30 s; a test shortens them
-                (int)Num(ap, "pollSeconds", 120), (int)Num(ap, "readGapSeconds", 30));
+                (int)Num(ap, "pollSeconds", 120), (int)Num(ap, "readGapSeconds", 30),
+                // v1's Read-EnvHealth: octopus.health.retries tries (3), retrySeconds (20) apart. The train makes one try per look and counts the failures in a row (TrainEvidence.Unreachable)
+                (int)Num(o?["health"], "retries", 3), (int)Num(o?["health"], "retrySeconds", 20));
         }
         catch { return null; }
     }
@@ -160,15 +162,12 @@ static class DeliveryShadowWiring
         }
         app ??= new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
         var budget = c.GitHubBudget;
-        // V2.1: the health read is tried octopus.health.retries times, octopus.health.retrySeconds apart, as v1's Read-EnvHealth does
-        double Health(string name, double fallback) => c.Instance.Root?["octopus"]?["health"]?[name] is { } n && double.TryParse(n.ToString(), System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
         void Observe(string resource, string? remaining, string? reset, string? limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
         var gates = new ItemGateConfig(Str("autoMergeLabel", "Auto Merge"), Str("videoLabel", "video"), holds);
         var facts = new Fworker.Integrations.GitHub.HttpMergeFactsReader(github, new Fworker.Integrations.GitHub.ProviderCredentialSource(tokens), Str("name", "factory-worker"), gates.VideoLabel,
             (resource, remaining, reset, limit) => Observe(resource, remaining, reset, limit));
         var policies = new CatalogDeliveryPolicies(() => catalog.Current, DeliveryShadowSettings.For(c.Instance, () => catalog.Current, c.Engine.V2Acts));
-        var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low,
-            Math.Max(1, (int)(Health("retries", 3))), TimeSpan.FromSeconds(Math.Max(0, Health("retrySeconds", 20))));
+        var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low);
         var shadow = new DeliveryShadow(policies, new SqlShadowComparisonStore(() => ItemMergedWiring.Open(connectionString)));
         return new DeliveryShadowParts(shadow, policies, reads, new DeliveredToTable(() => ItemMergedWiring.Open(connectionString)), connectionString);
     }
