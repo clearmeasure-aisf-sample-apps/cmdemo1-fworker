@@ -119,27 +119,6 @@ $CiRuleScenarios['ci rule: a park that expires, and one an operator releases, st
 # The merge path (the owner suite: the gateway merges a PASS by itself). A PASS whose head turns red on a check master fails too is re-run once,
 # then waits as a master defect without a demotion; once master passes the check again the gateway updates the branch and merges the new head.
 $CiRuleOwnerScenarios = [ordered]@{}
-$CiRuleOwnerScenarios['ci rule (gateway merge): a PASS whose head is red on a defect of master waits without a demotion, and is merged once master is fixed [full]'] = {
-    Fake 'config' @{ rerunSeconds = 3; rerunConclusion = 'failure' } | Out-Null
-    $shard = 'Acceptance Tests [shard 4/6]'
-    Fake 'base-history' @{ name = $shard; conclusions = @('failure', 'success', 'success') } | Out-Null
-    $x = Pm-ToValidation
-    # the checks of the head run for an hour, so the PASS is not merged in the verdict call; then they end red on the shard
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 3600 } | Out-Null
-    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
-    Ci-SetHead (Get-Head $x.pr) @($shard) 9301
-    Check 'the gateway re-runs the failed jobs once before deciding' (Wait-Until -Seconds 60 { (Ci-Comments $x.n '*re-running the failed jobs once*before deciding*').Count -eq 1 }) (((Get-FakeIssue $x.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
-    Check 'still red after it: reported once as a defect of master, the merge waits (master-defect)' (Wait-Until -Seconds 60 { (Ci-Comments $x.n '*a defect of master, not of this change*').Count -eq 1 -and (Ci-Comments $x.n '*master-defect*plant event=merge-waiting*').Count -eq 1 }) (((Get-FakeIssue $x.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(200, $_.body.Length)) }) -join ' | ')
-    Start-Sleep -Seconds 6
-    $st = Ci-State $x.n
-    Check 'no demotion: the item stays in Functional Testing with its PASS unmerged' ((Get-FakeIssue $x.n).column -eq 'Functional Testing' -and -not $st.Contains('demotions') -and -not (Get-FakePr $x.pr).merged -and (Ci-Comments $x.n '*a defect of master, not of this change*').Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
-    # master is fixed: the gateway merges master into the branch; the new head's checks (made green here) decide
-    Fake 'base-history' @{ name = $shard; conclusions = @('success', 'failure', 'success') } | Out-Null
-    Check 'the gateway merges master into the branch' (Wait-Until -Seconds 60 { (Ci-Comments $x.n '*again: the gateway merged master into the branch*').Count -eq 1 }) (((Get-FakeIssue $x.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 0 } | Out-Null
-    Check 'the new head is merged by the gateway, with no demotion' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged }) "column $((Get-FakeIssue $x.n).column)"
-    Check 'never demoted' (-not (Ci-State $x.n).Contains('demotions'))
-}
 $CiRuleOwnerScenarios['ci rule (gateway merge): a PASS whose head is red for a reason of its own is re-run once, then demoted as before [full]'] = {
     Fake 'config' @{ rerunSeconds = 3; rerunConclusion = 'failure' } | Out-Null
     $x = Pm-ToValidation

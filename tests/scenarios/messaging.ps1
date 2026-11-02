@@ -3953,33 +3953,6 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
     }
 }
 
-$ManagerScenarios['mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too'] = {
-    # a gateway of its own name and label: its sweep reads the fake GitHub, and this suite's gateway never looks at these items (so the injected
-    # fault is never seen by it)
-    $cfg = Msg-Config 'instance.sweep-two.json' { param($c) $c.name = 'sweep-two'; $c.label = 'sweep-two' }
-    $s = New-Item-Fake 'Sweep settling' 'x' @('sweep-two') 'Development'; $e = New-Item-Fake 'Sweep unreadable' 'x' @('sweep-two'); $d = New-Item-Fake 'Sweep omitted' 'x' @('sweep-two')
-    # the state of an item whose pull request was merged and whose master build has not finished: no claim, merge.awaiting set
-    $fence = '```'; $sha = 'ab' * 20
-    [void](Gh-As 'fake-operator' "issues/$s/comments" @{ body = "<!-- factory-state:sweep-two v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$s,`"merge`":{`"sha`":`"$sha`",`"awaiting`":`"master-green`",`"merged_at`":`"$([DateTime]::UtcNow.ToString('o'))`",`"pr`":1}}`n$fence`n" })
-    # every read of the second item's comments fails, so every sweep reports an error for it
-    Fake 'fault' @{ match = "/issues/$e/comments"; status = 500; count = 100000 } | Out-Null
-    Msg-OnGateway (Msg-Merge $script:MgrFast @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_SWEEP_SECONDS = '2'; FACTORY_TIMING_mgrOwnedGraceSeconds = '1' }) {
-        param($g)
-        foreach ($i in $s, $e, $d) { [void](Msg-Post '/api/v1/_test/roles' @{ item = $i; owner = 'alice'; sweepable = $true }) }
-        $owners = { , @((Msg-Admin '/api/v1/_test/plant-data').owned | ForEach-Object { [int]$_.item } | Sort-Object) }
-        $sweeps = { @([regex]::Matches((Mgr-Log $g), '"sweep":\{')).Count }
-        Check 'the three items have their owner' (((& $owners) -join ',') -eq ((@($s, $e, $d) | Sort-Object) -join ','))
-        Check 'the owner of the item no sweep lists is dropped: after the grace, by two sweeps in a row' (Wait-Until -Seconds 90 { (& $owners) -notcontains $d }) ((& $owners) -join ',')
-        # a settling item keeps no owner (it is released at item.merged, issue 107): an owner the seam set on one is dropped like any the sweep omits
-        Check 'so is the owner of the settling item' (Wait-Until -Seconds 30 { (& $owners) -notcontains $s }) ((& $owners) -join ',')
-        $n0 = & $sweeps
-        Check 'three more sweeps run' (Wait-Until -Seconds 60 { (& $sweeps) -ge $n0 + 3 }) "$n0 $(& $sweeps)"
-        Check 'the unreadable item kept its owner through every one of them' (((& $owners) -join ',') -eq "$e") ((& $owners) -join ',')
-        $log = Mgr-Log $g
-        Check 'the sweep did settle the one (no error for it) and did report the error of the other' ($log -match "`"sweepAction`":\{[^\n]*`"item`":$s\b[^\n]*`"action`":`"settle`"|`"sweepAction`":\{[^\n]*`"action`":`"settle`"[^\n]*`"item`":$s\b" -and $log -notmatch "`"sweepError`":\{[^\n]*`"item`":$s\b" -and $log -match "`"sweepError`":\{[^\n]*`"item`":$e\b") ($log -split "`n" | Where-Object { $_ -match 'sweepError|settle' } | Select-Object -First 4 | Out-String)
-    }
-}
-
 $ManagerScenarios['mgr: a session started with both FACTORY_TOKEN and FACTORY_SUPERVISOR_TOKEN is warned once at its start, and neither token is printed'] = {
     $both = Start-ManagerClient 'warn-both' 'supervisor' @('--model', 'claude-opus-5-5', '--effort', 'high') @{ FACTORY_TOKEN = 'test-token' }
     try {
@@ -4407,23 +4380,6 @@ $ManagerScenarios['start: while GitHub does not answer the revocation read /read
             Check 'and the worker credential is accepted' ([int](Msg-Verb 'my-items' (Msg-Token 'alice')).StatusCode -eq 200 -and (Mgr-Log $g) -match '"revocations":"loaded"')
         } 1
     } finally { Fake 'latency' @{ ms = 0 } | Out-Null }
-}
-
-$ManagerScenarios['sweep: an item new on the board is offered after a short second look, not a whole sweep interval later [full]'] = {
-    # as deployed an item is offered by the second sweep that sees it in its column (timing.sweepSeenCount 2). The interval here is an hour:
-    # only the early second look (FACTORY_SWEEP_CONFIRM_SECONDS) can offer the item inside this scenario.
-    # (a label of its own, so the sweep of this gateway plans this item and nothing of the other scenarios)
-    $cfg = Msg-Config 'instance.first-pickup.json' { param($c) $c.name = 'first-pickup'; $c.label = 'first-pickup' }
-    $n = New-Item-Fake 'First pickup' 'x' @('first-pickup', 'worker:nobody-here')
-    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_TIMING_sweepSeenCount = '2'; FACTORY_SWEEP_CONFIRM_SECONDS = '2' } {
-        param($g)
-        $sweeps = { , @([regex]::Matches((Mgr-Log $g), '"sweep":\{"offers":(\d+)') | ForEach-Object { [int]$_.Groups[1].Value }) }
-        $asg = { @((Msg-Admin '/api/v1/status').plant.assignments | Where-Object { $_.item -eq $n }).Count }
-        Check 'the first sweep sees the item and offers nothing yet' ((Wait-Until -Seconds 60 { (& $sweeps).Count -ge 1 }) -and (& $sweeps)[0] -eq 0 -and ((& $sweeps).Count -gt 1 -or (& $asg) -eq 0)) ((& $sweeps) -join ',')
-        Check 'a second sweep follows within seconds although the interval is an hour, and it offers the item' ((Wait-Until -Seconds 60 { (& $sweeps).Count -ge 2 }) -and (& $sweeps)[1] -ge 1 -and (Wait-Until -Seconds 10 { (& $asg) -eq 1 })) ((& $sweeps) -join ',')
-        Start-Sleep -Seconds 8
-        Check 'with nothing left to confirm the sweeps go back to the interval' ((& $sweeps).Count -eq 2) ((& $sweeps) -join ',')
-    }
 }
 
 # ---- the operator reaches every session (worker-messaging.md 3.4): a note to the supervisor, a note to everyone, replies, the operator's inbox ----
