@@ -16,7 +16,7 @@ using Wolverine;
 
 // W6.0 and W6.1 (docs/design/fworker-wolverine-implementation.md W6): the WorkItemSaga in the Wolverine host, in the hybrid composition the owner decided on (2026-10-28). Only where the engine acts
 // (Engine.V2Acts; tdd stays in the shadow run, so nothing of this exists there or in v1): v1's plant still offers the sessions and runs every verb the v2 engine does not own yet, v2's saga decides the items it
-// has started (the docs-only items the intake gave it), and v1's sweep leaves those items alone. The second half is V2Ownership and SweepV2Filter: the sweep's answer is read as before, and everything it says about
+// has started (the docs-only items the intake gave it), and v1's sweep leaves those items alone. The second half is V2Ownership (SweepV2Filter is gone in V3.2; the plant is fed from the saga alone; what v1 once said about
 // an item that has a saga (an offer, a trigger, a hold, a park, an owner) is dropped before the plant sees it, so the plant offers no session for it and notifies no owner of it. W9.10e passes the owned set into the script as well (sync-board `skip_items`: the item loop and the claim-ref reap skip those items, so v1
 // settles, merges, parks and demotes none of them), and until the first read of the table (V2Ownership.Loaded) the sweeper runs no pass at all.
 // W6.6 adds what makes it run (Ports/DocsPlanPort.cs: the merge, the card, the intake of docs items; Verbs/V2VerbFeed.cs: the verbs' events into the saga; the offers below), still only where the engine acts, and with
@@ -80,7 +80,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     public string? Column(StepKind step) => columnOf?.Invoke(step);
 
     /// <summary>
-    /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items are dropped (SweepV2Filter), so
+    /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items were dropped (SweepV2Filter, gone in V3.2), so
     /// the saga is what says that an item waits for a session; the sessions and the plant that places them are v1's. Empty without the columns of the docs plan.
     /// W9.9b (review): after a break an item whose row is still the old generation and that the adoption has not examined is not offered (ReadoptionGate): v1 may have moved or merged it since, and the plant would start a
     /// session on a stale Develop. The gate is asked at each read, so the offer is back as soon as the adoption has examined the item (Adopted) or the gate is released; the sweep's full pass repeats it.
