@@ -79,6 +79,33 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
 
     public CapacitySettings Settings => settings;
 
+    /// <summary>
+    /// V1.2: how many more sessions of <paramref name="runtime"/> the scheduler would grant now, for the intake (an item pulled from Todo asks for one). It is the room the admission chain would find, counted without granting: the runtime's
+    /// <c>maxConcurrent</c> less what runs (the ledger's slots, and what the plant runs outside it) and less the requests that already wait for a slot, bounded by what is left of the day's budget and, for a runtime with hosts, by the guaranteed
+    /// room of the hosts that reported lately. A runtime that is off or that the plant's manager holds back (blocked) has none. Pure: it changes nothing.
+    /// </summary>
+    public int FreeSlots(CapacityState? state, string runtime, DateTimeOffset now)
+    {
+        if (!settings.Runtimes.TryGetValue(runtime, out var limits)) return 0;
+        state ??= new CapacityState();
+        var o = outside(runtime);
+        if (o.Blocked is { Length: > 0 }) return 0;
+        var held = state.Slots.Values.Where(s => s.ExpiresAt > now).ToList();
+        var running = (limits.HasHosts
+            ? state.Hosts.Values.Where(h => h.Runtime == limits.Kind).Sum(h => state.SlotsOn(h.Name) + h.Outside) + held.Count(s => s.Runtime == limits.Kind && s.Host is null)
+            : held.Count(s => s.Runtime == limits.Kind) + o.Running);
+        var waiting = state.Queue.Values.Count(r => r.Runtime == runtime);
+        var room = limits.MaxConcurrent - running - waiting;
+        var today = (state.Day == now.UtcDateTime.ToString("yyyy-MM-dd") ? state.ExecutionsToday.GetValueOrDefault(runtime) : 0) + o.ExecutionsToday;
+        room = Math.Min(room, limits.MaxExecutionsPerDay - today - waiting);
+        if (limits.HasHosts)
+        {
+            var hostRoom = state.Hosts.Values.Where(h => h.Runtime == limits.Kind && now - h.ReportedAt <= settings.HostGone).Sum(h => Math.Max(0, limits.PerHostCapacity - Running(state, h)));
+            room = Math.Min(room, hostRoom - waiting);
+        }
+        return Math.Max(0, room);
+    }
+
     static string ReplayKeyOf(CapacityInput input) => input switch
     {
         CapacityWake w => $"wake|{w.Due.UtcTicks}",

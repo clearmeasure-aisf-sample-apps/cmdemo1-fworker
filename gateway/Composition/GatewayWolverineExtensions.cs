@@ -30,8 +30,9 @@ static class GatewayWolverineExtensions
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
+        Func<bool>? leaseHold = null;   // V1.4: set where the jobs are made; while true the timer of an expired lease waits for the term's gap renewal
         var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
-        AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
+        AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null; System.Text.Json.Nodes.JsonObject? intakeLast = null;
         // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
         WolverineHostService? hostForPoke = null;
         // (the sweep asks for the term's first look of the adoption itself once the host runs: the recurring job's first look comes later, and the sweep waits for it)
@@ -74,7 +75,7 @@ static class GatewayWolverineExtensions
                 // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
                 // W7.3: a fix-forward round of the feature plan reaches the owner session as the trigger v1's sweep sends (the plant is resolved when the trigger is sent, not here: building the plant needs the host)
                 var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board,
-                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>(), readoption: readoption);
+                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>(), readoption: readoption, holdLeaseTimers: () => leaseHold?.Invoke() == true);
                 WorkItemWiring.Attach(host, workItems);
                 workItemParts = workItems;
                 v2Ownership = workItems.Ownership;
@@ -115,9 +116,17 @@ static class GatewayWolverineExtensions
                         var intake = new Fworker.Workflows.Intake.WorkItemIntake(workItems.Store, workItems.Intake, async (m, _) => { if (!await host.PublishAsync(m)) throw new InvalidOperationException("the Wolverine host is not up"); });
                         var docsIntake = workItems.Docs.IntakeJob(intake, home, workItems.Docs.Settings.Columns.Values.ToList(), () => sp.GetRequiredService<Plant>().IntakeSlots(),
                             () => workItems.Ownership?.Offers.Any(o => o.Column == workItems.Docs.Settings.ColumnOf(Fworker.Workflows.WorkItem.StepKind.Design) && !sp.GetRequiredService<Plant>().HasOwner(o.Item)) == true,
-                            () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
+                            () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low,
+                            // V1.2: the sessions the plant starts per item (runtime sessions: tdd has no owner session) count too, as the scheduler's free capacity of the runtime a new item's first slot would ask for
+                            // (the first slot of a hotfix is for Development, there is no design step)
+                            (labels, plan, ct) => capacityParts.Service.FreeSlots(workItems.Feature.SlotSettings.RuntimeFor(labels, plan == Fworker.Workflows.WorkItem.WorkPlans.Hotfix ? Fworker.Workflows.Capacity.CapacityPhases.Develop : Fworker.Workflows.Capacity.CapacityPhases.Design), ct));
                         if (docsIntake is not null)
-                            jobs.Add(RecurringJobSlots.DocsIntake, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = await docsIntake.Run(ct) }.ToJsonString()));
+                            jobs.Add(RecurringJobSlots.DocsIntake, async ct =>
+                            {
+                                var outcome = await docsIntake.Run(ct);
+                                intakeLast = new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["outcome"] = outcome };
+                                Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = outcome }.ToJsonString());
+                            });
                     }
                     // W7.3: the watcher of CI alongside Functional Testing (every minute, on the leader), for the feature items; the checks are read through the rule script's own verbs, so its CI rule stays the script's
                     if (workItems.Docs.Settings.CarriesFeature)
@@ -134,7 +143,8 @@ static class GatewayWolverineExtensions
                     jobs.Add(RecurringJobSlots.ItemSteps, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["itemSteps"] = await itemSteps.Run(ct) }.ToJsonString()));
                     // W9.10j: the saga starts the session of the slot the scheduler granted (the offer is made from the saga's state, on the slot's runtime), and the reaper tells the scheduler which items are in flight so that
                     // what it keeps of an item whose saga never cleared it is dropped
-                    if (workItems.Ownership is { } sessionOwnership) SessionStartWiring.Attach(host, new SessionStartPort(sessionOwnership, () => sp.GetService<Plant>()));
+                    if (workItems.Ownership is { } sessionOwnership) SessionStartWiring.Attach(host, new SessionStartPort(sessionOwnership, () => sp.GetService<Plant>(),
+                        workItems.Docs.Facts is { } facts ? async (item, ct) => SagaLabelRules.From(c.Instance.Root).Pin((await facts.ReadItem(item, ct))?.Labels ?? []) : null, () => c.GitHubBudget.Low().Low));
                     var reaper = new CapacityReaper(workItems.Store, m => host.PublishAsync(m), () => c.Leader.MayAct);
                     jobs.Add(RecurringJobSlots.CapacityReap, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["capacityReap"] = await reaper.Run(ct) }.ToJsonString()));
                     ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
@@ -163,18 +173,57 @@ static class GatewayWolverineExtensions
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever
                     jobs.Add(RecurringJobSlots.IngressDedupPurge, _ => { dedup.Purge(IngressDedupRetention); return Task.CompletedTask; });
                     // W4.3: the board reconciler publishes what the board shows into the inbox as source "poll", the message a webhook sends. W9.10g: its memory is in SQL (BoardSeen) and its GitHub cost is measured (status v2.reconciler)
-                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable, seen: new Fworker.Workflows.Reconcilers.SqlBoardSeenStore(() => ItemMergedWiring.Open(cs)), interval: intervals.BoardReconciler) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, reconcile);
+                    var admissionLogged = 0;   // (the admission is logged when its counts moved, not at every pass)
+                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable, seen: new Fworker.Workflows.Reconcilers.SqlBoardSeenStore(() => ItemMergedWiring.Open(cs)), interval: intervals.BoardReconciler) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, async ct =>
+                    {
+                        await reconcile(ct);
+                        // V1.1: after every pass the cards in a step column that have no saga get one (Admission; it waits for the adoption of the term). `adoption` is made below, before the first run.
+                        if (adoption?.Admission is { } admission && c.BoardReconciler is { } passed)
+                        {
+                            try { var did = await admission.Run(passed.LastCards, ct); var moved = admission.Report.Started + admission.Report.Adopted + admission.Report.Reopened + admission.Report.Errors; if (did is not ("not-leader" or "waiting: adoption") && !did.StartsWith("off") && moved != admissionLogged) { admissionLogged = moved; Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["admission"] = admission.Report.ToJson() }.ToJsonString()); } }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception e) { Console.Error.WriteLine($"admission: {e.GetType().Name}"); }
+                        }
+                    });
                     // W9.10g: the plant-wide steps of the sweep as jobs of the leader (PlantStepJobs.cs; the sweep leaves them out where this exists), and the retention prune
                     var restoredSince = DateTime.UtcNow;
+                    // V1.1: Replenish starts the saga of the item it creates, when the engine carries the plan (intake.v2Plans names it); else v1 runs the item as before
+                    Func<Fworker.Workflows.WorkItem.StartWorkItem, string, Task> StartOnReplenish = async (m, column) =>
+                    {
+                        if (!workItems.Intake.IsV2Plan(m.Plan)) return;
+                        // the saga begins at the step of the column the card was placed in (the keeper's column: Technical Design, the Design step)
+                        var step = workItems.Docs.Settings.Columns.Where(kv => string.Equals(kv.Value, column, StringComparison.OrdinalIgnoreCase)).Select(kv => (Fworker.Workflows.WorkItem.StepKind?)kv.Key).FirstOrDefault() ?? Fworker.Workflows.WorkItem.StepKind.Design;   // (a keeper column that is no step's: the first step)
+                        if (!await host.PublishAsync(m with { Step = step })) throw new InvalidOperationException("the Wolverine host is not up");
+                    };
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
                     Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
-                    var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
+                    var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct, start: StartOnReplenish), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
                         () => plantRestored() && adoptionGate.Settled() is not null, c.Gateway.OwnerMode, excluded: () => adoptionGate.Excluded());   // (the plant-wide steps wait for the adoption of the term as the sweep does, and leave out what it could not fence)
                     jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
                     jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
                     jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));
                     jobs.Add(RecurringJobSlots.Replenish, ct => steps.Replenish(ct));
                     jobs.Add(RecurringJobSlots.BacklogLow, ct => steps.BacklogLow(ct));
+                    // (the timer of a lease that ran out in the gap would relaunch the item before the renewal ran: it waits for the restore, the adoption and the renewal of the term, at most 10 minutes from the start of the leader term)
+                    long termEpoch = -1; var termAt = DateTime.UtcNow;   // (the window counts from the start of each leader term: a lease taken back later has a gap of its own)
+                    leaseHold = () =>
+                    {
+                        if (!c.Leader.MayAct) return false;
+                        lock (c) { var e = c.Leader.ClaimEpoch; if (e != termEpoch) { termEpoch = e; termAt = DateTime.UtcNow; } if (DateTime.UtcNow - termAt >= TimeSpan.FromMinutes(10)) return false; }
+                        return !plantRestored() || adoptionGate.Settled() is null || c.SweepGap.PeekRenew() != null;
+                    };
+                    // V1.4: what only the sweep did: the gap renewal of the saga's owners' claims, the base update fallback after a missed webhook, the flag of a Release Queue card with no merge record (SweepLeftoverJobs.cs; the sweep leaves them to these jobs)
+                    if (workItems.Ownership is { } leftoverOwnership)
+                    {
+                        Fworker.Workflows.Reconcilers.ReleaseQueueFlags? rqFlags = null;
+                        var holdColumns = (c.Instance.Root?["columns"]?["hold"] as System.Text.Json.Nodes.JsonArray)?.Select(x => x?.ToString() ?? "").Where(x => x.Length > 0).ToList() ?? ["Release Queue"];
+                        var leftovers = new SweepLeftoverJobs(() => c.Leader.MayAct, () => plantRestored() && adoptionGate.Settled() is not null, leftoverOwnership, c.SweepGap, n => sp.GetService<Plant>()?.OwnerNameOf(n), (code, item, column) => sp.GetService<Plant>()?.OperatorPlantEvent(code, item, "", column), c.GitHubBudget,
+                            async renewal => { if (!await host.PublishAsync(renewal)) throw new InvalidOperationException("the Wolverine host did not take the renewal of a lease"); },
+                            () => sp.GetRequiredService<BaseWatch>().AfterSweep(), () => rqFlags ??= KeeperWiring.MakeReleaseQueueFlags(sp), () => c.BoardReconciler?.LastCards ?? [], home, holdColumns);
+                        jobs.Add(RecurringJobSlots.GapRenew, ct => leftovers.GapRenew(ct));
+                        jobs.Add(RecurringJobSlots.BaseWatchFallback, ct => leftovers.BaseWatchFallback(ct));
+                        jobs.Add(RecurringJobSlots.ReleaseQueueFlag, ct => leftovers.ReleaseQueueFlag(ct));
+                    }
                     // W9.9b: the adoption of v1's items, pending Sign-offs and merges, once per term of the lease and after the plant is restored (the job asks AdoptionJob, whose heartbeat is the engine's marker)
                     var adopting = AdoptionWiring.Make(c, workItems, cs, host, () => sp.GetService<ISystemCatalog>(), mergedDeriver, plantRestored, new Fworker.Workflows.Merge.SqlMergeTrainStore(() => ItemMergedWiring.Open(cs)),
                         new Fworker.Workflows.Delivery.SqlTrainStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Capacity.SqlCapacityStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Qc.SqlQcEnvironmentStore(() => ItemMergedWiring.Open(cs)), Environment.GetEnvironmentVariable, readoption: readoption);
@@ -274,7 +323,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; });   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), admission: () => adoption?.Admission.Report.ToJson(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; }, intake: () => (System.Text.Json.Nodes.JsonObject?)intakeLast?.DeepClone(), hostReportMax: Fworker.Workflows.Capacity.CapacitySettings.From(c.Instance.Root, c.Engine.Environment).HostReportMax);   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

@@ -46,6 +46,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         switch (input)
         {
             case StartWorkItem s: return Start(existing, s, now);
+            case ReopenWorkItem when existing is { IsOpen: false } && !policy.Carries(PlanOfReopen(existing)): return Nothing(existing, WorkItemOutcome.Refused, "the plan is not carried by this engine");
             case ReopenWorkItem r when existing is { IsOpen: false }: return NewGeneration(input.Item, existing, r.Reason.Length == 0 ? "reopened" : $"reopened: {r.Reason}", PlanOfReopen(existing), now, r.Key, WorkItemActions.Reopened);
             case DeliveryLost l when existing is { IsOpen: false }: return Redeliver(existing, l, now);
         }
@@ -227,21 +228,24 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         if (plan is null || plan.Name == WorkPlans.Redeliver) return Nothing(existing, WorkItemOutcome.Refused, $"there is no plan '{s.Plan}' to start on");
         if (existing is { IsOpen: true })
         {
+            // V1.1: a start that names the step (Replenish's, the admission's) for an item that has a saga does nothing at all: the two can meet in one pass, a pass can come twice, a message can be redelivered. A start lost
+            // between the save and its publication (a crash) is not repeated by the message: WorkItemRearm sends the timers and commands of the saved row again, and the decision is the row's history.
+            if (s.Step is not null) return Nothing(existing, WorkItemOutcome.Refused, "the item is open");
             // a redelivery of the start finds its own transition still the last and publishes it again; a start of an item that has moved on changes nothing
             if (existing.LastKey == "start") return Reemit(existing, WorkItemState.FromJson(existing.ToJson()));
             return Nothing(existing, WorkItemOutcome.Refused, "the item is open");
         }
-        return NewGeneration(s.Item, existing, s.Source.Length == 0 ? "started" : s.Source, plan.Name, now, "start", WorkItemActions.Started);
+        return NewGeneration(s.Item, existing, s.Source.Length == 0 ? "started" : s.Source, plan.Name, now, "start", WorkItemActions.Started, s.Step);
     }
 
     static string PlanOfReopen(WorkItemState completed) => completed.Plan == WorkPlans.Redeliver ? WorkPlans.Feature : completed.Plan;
 
     // the next instance: a fresh state on the plan's first step; the decision sequence goes on across generations
-    WorkItemTransition NewGeneration(ItemId item, WorkItemState? previous, string source, string planName, DateTimeOffset now, string key, string action)
+    WorkItemTransition NewGeneration(ItemId item, WorkItemState? previous, string source, string planName, DateTimeOffset now, string key, string action, StepKind? at = null)
     {
         var plan = WorkPlans.Get(planName);
         var state = new WorkItemState { Item = item.ToString(), Generation = (previous?.Generation ?? 0) + 1, Plan = plan.Name, StartedAt = now, Source = source, Sequence = previous?.Sequence ?? 0 };
-        return Begin(state, plan, source, now, key, action);
+        return Begin(state, plan, source, now, key, action, at);
     }
 
     WorkItemTransition Redeliver(WorkItemState completed, DeliveryLost l, DateTimeOffset now)
@@ -254,12 +258,14 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         return Begin(state, WorkPlans.RedeliverPlan, state.Source, now, l.Key, WorkItemActions.Reopened);
     }
 
-    WorkItemTransition Begin(WorkItemState state, WorkPlan plan, string source, DateTimeOffset now, string key, string action)
+    WorkItemTransition Begin(WorkItemState state, WorkPlan plan, string source, DateTimeOffset now, string key, string action, StepKind? at = null)
     {
         var c = new StepContext(state, policy, docs, now);
-        state.Step = plan.First;
+        // V1.1: a card that stands in the column of a step of the plan begins there (Design, Develop or Verify: the only steps a column stands for)
+        var first = at is StepKind.Design or StepKind.Develop or StepKind.Verify && plan.Has(at.Value) ? at.Value : plan.First;
+        state.Step = first;
         c.Decide(action, source);
-        c.Enter(plan.First, "first step of the plan");
+        c.Enter(first, first == plan.First ? (at is not null && at != first ? $"the {at} column is not a step of the {plan.Name} plan: begins at its first step" : "first step of the plan") : $"the card stands in the {first} column");
         return Seal(c, null, key);
     }
 

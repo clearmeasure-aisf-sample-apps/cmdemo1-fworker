@@ -78,6 +78,22 @@ variable "reconcile_enabled" {
   default     = true
 }
 
+variable "host_machine_policy_name" {
+  type        = string
+  description = "Machine policy of the fworker-host deployment targets."
+  default     = "fworker-host"
+}
+
+variable "host_health_check_minutes" {
+  type        = number
+  description = "Health-check interval of the fworker-host machine policy, in minutes (1 to 59)."
+  default     = 10
+  validation {
+    condition     = var.host_health_check_minutes >= 1 && var.host_health_check_minutes <= 59
+    error_message = "host_health_check_minutes must be 1 to 59."
+  }
+}
+
 variable "gateway_url" {
   description = "Base URL of the tdd gateway the workers connect to (FWORKER_GATEWAY_URL)."
   type        = string
@@ -179,6 +195,32 @@ resource "octopusdeploy_project" "runtime" {
   description      = "Starts and stops factory worker containers on self-hosted fworker-host targets (cmdemo1-fworker deploy/octopus)."
   lifecycle_id     = data.octopusdeploy_lifecycles.default.lifecycles[0].id
   project_group_id = data.octopusdeploy_project_groups.group.project_groups[0].id
+}
+
+# A short health-check interval for the fworker hosts (2026-11-01: omarchy lost its Tentacle connection a few times, Octopus marked it Unavailable and
+# never checked it again; the Reconcile hosts runbook targets healthy machines only, so it skipped omarchy for 6 hours and the gateway's scheduler
+# granted no slot: "host-headroom: no host reported"). With this policy Octopus checks the fworker-host targets every var.host_health_check_minutes,
+# so a stale Unavailable clears itself. The check is connectivity only (no script). The policy is assigned to the targets through the API
+# (docs/deploy/octopus-host-health-policy.md); the live project is not applied from here (see the top).
+resource "octopusdeploy_machine_policy" "fworker_host" {
+  name        = var.host_machine_policy_name
+  description = "fworker-host targets: health check every ${var.host_health_check_minutes} minutes (connectivity only) so an Unavailable host recovers by itself."
+  space_id    = var.space_id
+
+  machine_health_check_policy {
+    health_check_interval = var.host_health_check_minutes * 60 * 1000000000 # nanoseconds, as the provider takes it
+    health_check_type     = "OnlyConnectivity"
+
+    # the blocks are required by the provider; with connectivity-only checks no script runs, so they inherit the default and carry no body
+    bash_health_check_policy {
+      run_type    = "InheritFromDefault"
+      script_body = ""
+    }
+    powershell_health_check_policy {
+      run_type    = "InheritFromDefault"
+      script_body = ""
+    }
+  }
 }
 
 # GHCR (private) as a feed of the space
