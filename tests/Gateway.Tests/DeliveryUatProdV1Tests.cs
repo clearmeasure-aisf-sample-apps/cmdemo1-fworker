@@ -88,15 +88,19 @@ public sealed class DeliveryUatProdV1Tests
     public void TrainActs_IsOffUnlessTheFileSaysTrue(string json, bool expected) => Assert.Equal(expected, Config(json).TrainActs);
 
     [Fact]
-    public void TheShippedDefaultsAndTheDeployedOverrides_LeaveUatAndProdWithV1()
+    public void TheShippedDefaultsLeaveUatAndProdWithV1_AndTheDeployedOverridesGiveThemToTheTrain()
     {
         var root = AppContext.BaseDirectory;
         for (var d = new DirectoryInfo(root); d is not null; d = d.Parent)
             if (File.Exists(Path.Combine(d.FullName, "config", "instance.json"))) { root = d.FullName; break; }
         Assert.False(InstanceConfig.Load(Path.Combine(root, "config", "instance.json"), _ => null).TrainActs);
-        // the deployed overrides name no trainActs (W9.12 adds it), and the setting exists in the defaults, so the merge of the image would accept it then
+        // V2.2 (owner decision 2026-11-01): the deployed overrides turn trainActs on for uat and prod; the setting exists in the defaults, so the merge of the image accepts it
         Assert.NotNull(JsonNode.Parse(File.ReadAllText(Path.Combine(root, "config", "instance.json")))!["delivery"]!["autoPromote"]!["trainActs"]);
-        Assert.Null(JsonNode.Parse(File.ReadAllText(Path.Combine(root, "config", "deploy.overrides.json")))!["delivery"]?["autoPromote"]?["trainActs"]);
+        Assert.True(JsonNode.Parse(File.ReadAllText(Path.Combine(root, "config", "deploy.overrides.json")))!["delivery"]!["autoPromote"]!["trainActs"]!.GetValue<bool>());
+        // so the AutoPromoter stands down in the deployed gateway (the engine acts there): exactly one of the two promotes
+        var merged = JsonNode.Parse(File.ReadAllText(Path.Combine(root, "config", "instance.json")))!;
+        merged["delivery"]!["autoPromote"]!["trainActs"] = true;
+        Assert.False(AutoPromoter.Runs(Config(merged.ToJsonString()), engineActs: true));
     }
 
     static InstanceConfig InstanceConfig_(bool trainActs = false) => Config(Json(trainActs));

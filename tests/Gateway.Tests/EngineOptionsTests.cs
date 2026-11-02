@@ -76,10 +76,10 @@ public sealed class EngineOptionsTests : IDisposable
         // #437 option A: the Copilot and Cursor runtimes are off for the measured batch
         Assert.False(merged["api"]!["cursor"]!["enabled"]!.GetValue<bool>());
         Assert.False(merged["api"]!["copilot"]!["environments"]!["tdd"]!["enabled"]!.GetValue<bool>());
-        // uat and prod stay with v1's promoter; the merge strategy is the default's
+        // V2.2: the train promotes uat and prod (v1's promoter stands down); the merge strategy is the default's
         var overrides = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")))!;
-        Assert.Null(overrides["delivery"]?["autoPromote"]?["trainActs"]);
-        Assert.NotEqual(true, merged["delivery"]!["autoPromote"]!["trainActs"]?.GetValue<bool>());
+        Assert.True(overrides["delivery"]!["autoPromote"]!["trainActs"]!.GetValue<bool>());
+        Assert.True(merged["delivery"]!["autoPromote"]!["trainActs"]!.GetValue<bool>());
         Assert.Null(overrides["mergeStrategy"]);
     }
 
