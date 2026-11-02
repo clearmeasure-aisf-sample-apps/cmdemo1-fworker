@@ -108,6 +108,33 @@ public sealed class OwnerReleaseTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => new OwnerRelease(() => null).Run(Request(), default));
     }
 
+    static OwnerReleaseRequested Of(string kind) => new(Item, "release-" + kind + "|1", "the pull request was merged", 1, kind);
+
+    [Fact]
+    public async Task AtTheMerge_ThePlantLetsTheOwnerGo_AndTheClaimIsGivenUp()
+    {
+        var router = new Router((verb, _) => verb == "get-item" ? Claimed("worker-1") : Ok(new JsonObject { ["ok"] = true, ["released"] = true }));
+        var calls = new List<string>(); var forgotten = new List<(int, string)>();
+        var port = new OwnerRelease(() => router, (i, h) => forgotten.Add((i, h)), i => calls.Add("merged " + i), i => calls.Add("completed " + i));
+        Assert.Equal("released", await port.Run(Of(OwnerReleaseKinds.Merged), default));
+        Assert.Equal(["merged 7"], calls);
+        Assert.Equal(["get-item", "release"], router.Calls.Select(c => c.Verb));
+        Assert.Empty(forgotten);   // (the merge hook is the plant's release; the idle release's forget is not used)
+        Assert.Equal("released", await port.Run(Of(OwnerReleaseKinds.Completed), default));
+        Assert.Equal(["merged 7", "completed 7"], calls);
+    }
+
+    [Fact]
+    public async Task AtTheMerge_AnItemWithNoClaim_StillFreesThePlant_AndAFaultOfThePlantDoesNotStopTheClaim()
+    {
+        var none = new Router((_, _) => Ok(new JsonObject { ["ok"] = true, ["state"] = new JsonObject() }));
+        var calls = new List<string>();
+        Assert.Equal("no-claim", await new OwnerRelease(() => none, null, i => calls.Add("merged " + i)).Run(Of(OwnerReleaseKinds.Merged), default));
+        Assert.Equal(["merged 7"], calls);
+        var router = new Router((verb, _) => verb == "get-item" ? Claimed("worker-1") : Ok(new JsonObject { ["ok"] = true }));
+        Assert.Equal("released", await new OwnerRelease(() => router, null, _ => throw new InvalidOperationException("no plant")).Run(Of(OwnerReleaseKinds.Merged), default));
+    }
+
     [Fact]
     public async Task APlantThatCannotForget_DoesNotUndoTheRelease()
     {

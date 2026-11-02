@@ -147,7 +147,7 @@ static class GatewayWolverineExtensions
                         workItems.Docs.Facts is { } facts ? async (item, ct) => SagaLabelRules.From(c.Instance.Root).Pin((await facts.ReadItem(item, ct))?.Labels ?? []) : null, () => c.GitHubBudget.Low().Low));
                     var reaper = new CapacityReaper(workItems.Store, m => host.PublishAsync(m), () => c.Leader.MayAct);
                     jobs.Add(RecurringJobSlots.CapacityReap, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["capacityReap"] = await reaper.Run(ct) }.ToJsonString()));
-                    ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
+                    ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder), item => sp.GetService<Plant>()?.Merged(item), item => sp.GetService<Plant>()?.Complete(item)));
                     // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
                     if (workItems.Store is IWorkItemAges ages)
                     {

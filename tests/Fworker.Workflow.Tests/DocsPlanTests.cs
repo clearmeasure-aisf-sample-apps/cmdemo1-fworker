@@ -248,6 +248,8 @@ public class DocsPlanTests
         var fx = await AtMerge();
         var r = await fx.Attempted(new MergeResult(MergeResultKind.Merged, "merged", Commit: Merged.ToUpperInvariant()));
         Assert.Equal([WorkItemActions.Merged, WorkItemActions.Completed], r.Decisions.Select(d => d.Action));
+        // V3.2: the owner is released at the merge and again at the completion (the claim and the plant's owner go)
+        Assert.Equal([OwnerReleaseKinds.Merged, OwnerReleaseKinds.Completed], r.Sent.OfType<OwnerReleaseRequested>().Select(x => x.Kind));
         Assert.Equal((WorkItemStatus.Completed, Merged), (fx.State.Status, fx.State.MergeCommit));
         Assert.Null(fx.State.LeaseDue);
         Assert.Null(fx.State.MergeRequest);
