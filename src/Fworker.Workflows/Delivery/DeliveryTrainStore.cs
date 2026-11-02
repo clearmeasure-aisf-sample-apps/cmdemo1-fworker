@@ -83,8 +83,8 @@ public interface ITrainReads
     /// <summary>Find-CommitItem for a commit of the range that is no candidate's: the item that commit merged (0: none) and a waiting reason ('' when settled).</summary>
     Task<CommitItemLookup> LookupCommit(RepoId repository, RangeCommit commit, CancellationToken ct);
 
-    /// <summary>The promotion gates of an item that is no candidate (a docs-only item found by its commit): Get-ItemPromotionGapsRead. Null when the item is gone.</summary>
-    Task<Fworker.Contracts.Messaging.ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct);
+    /// <summary>(<c>freshSince</c>: an answer read before that instant is not good enough: the decision at a Sign-off is made on what the item carries now, as v1's pass reads it. The instant is the start of the evaluation, so an answer the same evaluation already read counts, and so does one a refused earlier look of the same chain read, see <see cref="DeliveryTrainService"/>.) The promotion gates of an item that is no candidate (a docs-only item found by its commit): Get-ItemPromotionGapsRead. Null when the item is gone.</summary>
+    Task<Fworker.Contracts.Messaging.ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, DateTimeOffset? freshSince = null);
 
     /// <summary>One read of the environment's app: /_build and the health path (Test-EnvHealth, Read-EnvHealth).</summary>
     Task<EnvProbe> Probe(string deployable, string environment, CancellationToken ct);

@@ -68,6 +68,15 @@ and later; v2 acts since #609 at 01:28Z):
   the board reconciler made 395 requests in the last hour against the estimate of 150 (79 passes: the 120 s job and the pass that
   `sync-board` adds after every sweep).
 
+**The 6 unexplained shadow rows, explained (V2.1).** They are the prod rows of the releases 2.4.1228, 2.4.1257, 2.4.1264, 2.4.1277,
+2.4.1283 and 2.4.1288: the train of prod says "it has no deployment to uat" (a wait, class `none`) while v1 says nothing of prod.
+`Verbs.Promote.ps1` judges a release only in the first environment it has not reached (`$tk`, the first target whose deployment is not
+`Success`), and those six waited in uat ("its deployment to tdd is Failed"). v2 has one train per environment and each describes the
+release. `ShadowGate` left a v2-only row out of `queue-only-v1` when v1 had judged the release in any environment, so these fell under no
+declared difference. V2.1 declares `chain-position` (a v2-only row of a later environment for a release v1 judges in an earlier
+environment of the same deployable, by rule and not by list); `unexplainedLive` is 0 on that data. The one `v1-only` row (2.4.1261) is
+`newest-only` already.
+
 ### 1. The map: every v1 behaviour, label and setting, and its v2 owner
 
 Sources: `docs/design/verb-inventory.md` and `.json` (74 verbs: 68 routed where v2 acts, 6 never routed), the architecture test of
@@ -167,7 +176,7 @@ settings of `schedule` (`hostOwnedDefault`, `hostBuildsDefault`, `buildSlot*`, `
 | item gates (Auto Merge, no hold, merged by the gateway after a PASS, the video asset) | `ItemGates.Gaps` (`ContentGate.cs`) | same |
 | content gate (every commit a queued or settled item's merge; fail-closed) | `ContentGate.Judge`, `CommitItemLookup` | same |
 | health evidence (`/_build` version, `overallStatus` Healthy, no bad read since the deployment, two reads 5 minutes apart, 10 minutes settle) | `EvidenceComposite.Evaluate`, reads kept in the train's row (survive a restart) | same; `state.promote_health` on the first item is no longer written (only v1 read it) |
-| a health read is tried 3 times, 20 s apart (`octopus.health.retries`, `retrySeconds`) before it counts as unreachable | `HttpTrainReads.Probe`: one try | **gap**: one stray failure is a stored bad read that blocks the release until a new deployment; V2.1 |
+| a health read is tried 3 times, 20 s apart (`octopus.health.retries`, `retrySeconds`) before it counts as unreachable | `HttpTrainReads.Probe`: one try per look (bounded to 25 s in all); the train counts the looks in a row that got no answer (`TrainEvidence.Unreachable`, `TrainSignOff.HealthMisses`), looks again after `retrySeconds`, and only the last of `retries` is a stored bad read. Nothing sleeps in the handler: every train shares one sequential queue, and a sleeping probe (3 tries, 20 s pauses, a 15 s timeout each) could run past Wolverine's handler timeout and stall the tdd rollback behind it | V2.1: same count as v1, no pause inside a message |
 | Sign-off: interruptions of our own deployments; responsible PUT, submit Proceed or Abort; hard and soft gaps; abort after `signoffWaitHours` (2) with `signoff_wait_since` | `SignOffRequested`, `OctopusPromoter.Answer`, `SignOffWaitRecorder` | same |
 | journal lines on the items: `promoted`, `promotion-waiting` (once per release, environment and reason, naming the item that holds the others), `promotion-signoff` | none (the train's history only) | **gap**: V2.1 |
 | a 403 of Octopus is a waiting reason on the items naming the missing permission | logged and retried, never shown on an item | **gap**: V2.1 |
@@ -335,9 +344,10 @@ that order, one at a time.
   the state comment). Keep the v1-format state comment through the W9.11 gate.
 - **The reconciler's GitHub cost** (395 requests an hour now): it falls when the sweep's extra pass goes (V3.2); until then it is read on
   every tdd check.
-- **The app's tdd deployments are failing** (since at least release 2.4.1228). That is the app's, not the factory's, but it blocks every
-  promotion in either engine; its fix is a precondition of V2.2's live events (D2). The factory's items keep moving to the Release
-  Queue meanwhile.
+- **A tdd deployment of the newest release succeeded** (2.4.1298, SuccessWithWarning, Deployments-57454 on 2026-10-27; releases 2.4.1228
+  to 2.4.1288 failed there from an old step bug, since fixed). Octopus's API gives that task the state `Success` (the warning is
+  `HasWarningsOrErrors`), which v1, the watcher and the train all read, so the deployment is delivered and the health gate is met. The
+  train can promote 2.4.1298, which carries the 67 queued items, and V2.2's live events can be watched.
 
 **Decisions:** D1 to D3 were decided by the owner on 2026-11-01 (top of this revision); none is open.
 
@@ -1814,6 +1824,7 @@ deployment itself, the incident rollback of the app in tdd, automatic (uat and p
 - **Undelivered:** when the rollback deployment succeeds, every item the rolled-back releases delivered receives `Undelivered(item, tdd)` (the delivered-to row goes, and the WorkItemSaga's `DeliveryLost` returns the item to its Deliver step inside its
   settle window; both existed since W5.0 and W6.x) and becomes a candidate of the train again, so the release that fixes forward delivers it (`DeliveredBy`: the items of the newest ten delivered releases). The release rolled back from is
   never a target again. A failed rollback deployment escalates and undelivers nothing.
+- **Replay hold on the incident host:** a train whose Octopus replay has not ended takes inputs in and decides nothing, the rollback included (`TrainState.ReplayingSince`, `DeliveryTrainService.ReplayLimit`, 30 minutes). After a restart of the host that runs the incident saga, a rollback it asks for waits until the replay ends, or for the 30 minutes when the end marker is lost. That is the accepted bound of the tdd rollback after a restart; the hold ends by itself.
 - **Held trains:** an incident's hold does not stop the rollback (it is the incident's own deployment); the hold's other half, letting the incident's hotfix release through, is W8.1's.
 - **Wiring:** `RollbackWiring.Attach` (`gateway/Ports/RollbackPort.cs`) is called by `DeliveryActingWiring.Attach` (W9.4), so it exists exactly where the acting train does (`Engine.V2Acts`, a catalog and GitHub access); v1, the shadow run and `FACTORY_V2_OFF` register nothing. It registers the executor when the Octopus URL, space and a key
   (`OCTOPUS_RUNBOOK_API_KEY`, else `OCTOPUS_API_KEY`) are configured, and the compare read when GitHub can be read. `DeliveryTrainService` takes the probe as an optional part.

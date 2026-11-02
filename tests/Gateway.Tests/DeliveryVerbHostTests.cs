@@ -7,6 +7,7 @@ using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Integrations.Octopus;
 using Fworker.Workflows.Delivery.Verbs;
+using Fworker.Workflows.Delivery;
 using Xunit;
 
 namespace Gateway.Tests;
@@ -283,10 +284,13 @@ public class DeliveryVerbHostTests
             _ => (200, """{"Items":[]}"""),
         }, out _);
         var m = await refused.PromoteMessages(Cmd, 1, CancellationToken.None);
-        Assert.Equal(2, m.Count);
+        Assert.Equal(3, m.Count);
         var failed = Assert.IsType<IntegrationFailed>(m[0]);
         Assert.Equal((FailureKind.Permanent, "PromoteRelease"), (failed.Kind, failed.CommandName));
         Assert.False(Assert.IsType<DeliveryCommandFinished>(m[1]).Ok);
+        // V2.1: and the train is told, which takes the request back and asks again after its poll
+        var told = Assert.IsType<TrainCommandRefused>(m[2]);
+        Assert.Equal(("orders/uat", "PromoteRelease", "1.0.5", Cmd.IdempotencyKey, true), (told.Key, told.Command, told.Version, told.CommandKey, told.Settled));
 
         var flaky = Executor(_ => (503, "{}"), out _);
         await Assert.ThrowsAsync<CommandRetryException>(() => flaky.PromoteMessages(Cmd, 1, CancellationToken.None));

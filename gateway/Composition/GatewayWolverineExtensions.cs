@@ -243,7 +243,7 @@ static class GatewayWolverineExtensions
                     jobs.Add(RecurringJobSlots.RetentionPrune, async ct =>
                     {
                         var r = await retention.Run(ct);
-                        if (r.Total > 0 || r.More) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["retentionPrune"] = new System.Text.Json.Nodes.JsonObject { ["itemHistory"] = r.ItemHistory, ["shadowHistory"] = r.ShadowHistory, ["shadowComparisons"] = r.ShadowComparisons, ["transcripts"] = r.Transcripts, ["transcriptsOverCap"] = r.TranscriptsOverCap, ["more"] = r.More } }.ToJsonString());
+                        if (r.Total > 0 || r.More) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["retentionPrune"] = new System.Text.Json.Nodes.JsonObject { ["itemHistory"] = r.ItemHistory, ["shadowHistory"] = r.ShadowHistory, ["shadowComparisons"] = r.ShadowComparisons, ["transcripts"] = r.Transcripts, ["transcriptsOverCap"] = r.TranscriptsOverCap, ["deadLettersArchived"] = r.DeadLettersArchived, ["more"] = r.More } }.ToJsonString());
                     });
                 }
                 // W8.1: the IncidentSaga of the watched environments of the application (incidents.environments; tdd). It listens to the Octopus watcher's deployment events and to the hotfix item, takes the health reads of its
@@ -253,7 +253,9 @@ static class GatewayWolverineExtensions
                 {
                     IncidentWiring.Attach(host, incidents);
                     jobs.Add(RecurringJobSlots.IncidentHealth, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["incidentHealth"] = await incidents.Health.Run(ct) }.ToJsonString()));
-                    octopusPort = new ShadowOctopusPort(ev => ev is Fworker.Contracts.Seams.OctopusDeploymentChanged ? host.PublishAsync(ev) : Task.FromResult(true), enabled: true);   // (the other Octopus events concern the delivery train, which is not attached here yet)
+                    // The port of the acting train (DeliveryActingWiring.Attach above) carries every Octopus event to the host: the incident saga takes the deployments from the same publish. Replacing it, as this line did, dropped the releases,
+                    // the replay markers and the Sign-offs of the watcher, and a train that acts for an environment with a Sign-off (uat and prod) never answered one. The incident-only port is for a host with no train (no merge deriver).
+                    octopusPort = ShadowOctopusPort.WithIncidents(octopusPort, ev => host.PublishAsync(ev));
                 }
                 if (c.Catalog.Enabled) jobs.Add(RecurringJobSlots.CatalogReread, async ct => { await sp.GetRequiredService<ISystemCatalog>().RefreshAsync(ct); });   // W4.3 (the loader keeps the last good snapshot on a failed read)
                 recurring = RecurringJobSlots.Attach(host, jobs, intervals);   // W4.0 slots, filled by W4.3 and W9.10g

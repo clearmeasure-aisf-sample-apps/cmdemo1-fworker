@@ -24,14 +24,18 @@ public sealed record DeliveryPolicySettings(
     double SignoffWaitHours = 2,
     bool DependenciesDelivered = false,
     IReadOnlyList<string>? ShadowEnvironments = null,
-    IReadOnlyList<string>? MigrationPaths = null);
+    IReadOnlyList<string>? MigrationPaths = null,
+    int PollSeconds = 120,
+    int MinReadGapSeconds = 30,
+    int HealthRetries = 3,
+    int HealthRetrySeconds = 20);
 
 /// <summary>The policy of one train: a deployable in one environment (tdd, uat or prod).</summary>
 public sealed record DeliveryPolicy(
     string Deployable, RepoId Repository, string Environment, Promoter Promoter, bool Enabled, string Project,
     IReadOnlyDictionary<string, string> EnvironmentNames, IReadOnlyDictionary<string, string> EnvironmentUrls,
     string HealthPath, HealthWindow Window, double SignoffWaitHours, bool DependenciesDelivered,
-    int PollSeconds = 120, int MinReadGapSeconds = 30, bool Shadow = false, IReadOnlyList<string>? MigrationPaths = null)
+    int PollSeconds = 120, int MinReadGapSeconds = 30, bool Shadow = false, IReadOnlyList<string>? MigrationPaths = null, int HealthRetries = 3, int HealthRetrySeconds = 20)
 {
     /// <summary>W8.3: the path fragments that mark a file as a database migration of the deployable (the rollback's precondition); the default is DbUp's scripts/Update.</summary>
     public IReadOnlyList<string> Migrations => MigrationPaths is { Count: > 0 } ? MigrationPaths : RollbackRules.DefaultMigrationPaths;
@@ -94,7 +98,7 @@ public sealed class CatalogDeliveryPolicies(Func<CatalogSnapshot> catalog, Func<
                 var promoter = env == "tdd" ? Promoter.Pipeline : s?.Promoter ?? Promoter.External;
                 list.Add(new DeliveryPolicy(d.Name.ToLowerInvariant(), d.Repository, env, promoter, named && env != "tdd", s?.Project ?? "",
                     s?.EnvironmentNames ?? new Dictionary<string, string>(), s?.EnvironmentUrls ?? new Dictionary<string, string>(),
-                    EvidenceComposite.HealthPath(s?.HealthPath ?? d.HealthPath), s?.Window ?? new HealthWindow(5, 10), s?.SignoffWaitHours ?? 2, (s?.DependenciesDelivered ?? false) && !shadowed, Shadow: shadowed && env != "tdd", MigrationPaths: s?.MigrationPaths));
+                    EvidenceComposite.HealthPath(s?.HealthPath ?? d.HealthPath), s?.Window ?? new HealthWindow(5, 10), s?.SignoffWaitHours ?? 2, (s?.DependenciesDelivered ?? false) && !shadowed, Shadow: shadowed && env != "tdd", PollSeconds: s?.PollSeconds ?? 120, MinReadGapSeconds: s?.MinReadGapSeconds ?? 30, MigrationPaths: s?.MigrationPaths, HealthRetries: s?.HealthRetries ?? 3, HealthRetrySeconds: s?.HealthRetrySeconds ?? 20));
             }
         }
         return list;
