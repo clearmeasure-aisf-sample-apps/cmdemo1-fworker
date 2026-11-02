@@ -44,9 +44,9 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
     public RevocationOptions Revocation { get; } = revocation;
     // the database of the Wolverine host (FACTORY_DB_CONNECTION, W2.0): unset means no host (v1 alone, or inert where the file names v2: see Engine)
     public DatabaseOptions Database { get; } = DatabaseOptions.From(Environment.GetEnvironmentVariable);
-    // the engine switch of this environment and the FACTORY_V2_OFF kill switch (W0.0). Where the file names v2 and there is no database, V2Acts is false and NoDatabase true: the gateway starts, stays inert and waits (EngineOptions.NoDatabase)
+    // the engine switch of this environment (W0.0; there is no kill switch since D1 of 2026-11-01). Where the file names v2 and there is no database, V2Acts is false and NoDatabase true: the gateway starts, stays inert and waits (EngineOptions.NoDatabase)
     public EngineOptions Engine { get; } = engine.ForDatabase(DatabaseOptions.From(Environment.GetEnvironmentVariable).Configured);   // (read again, not taken from Database: a property initializer cannot use another)
-    // the Wolverine host runs where there is a connection string and the engine switch names shadow or v2 for this environment (W2.3; the kill switch makes it v1)
+    // the Wolverine host runs where there is a connection string and the engine switch names shadow or v2 for this environment (W2.3)
     public bool WolverineHost => Database.Configured && Engine.Mode != EngineMode.V1;
     // where and how often the system catalog is read (W1.2): off by default
     public CatalogSettings Catalog { get; } = CatalogSettings.From(instance, Environment.GetEnvironmentVariable);

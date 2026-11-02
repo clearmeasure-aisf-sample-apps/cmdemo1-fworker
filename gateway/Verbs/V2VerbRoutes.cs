@@ -3,7 +3,7 @@ using Fworker.Contracts.Seams;
 // W9.0 (docs/design/fworker-wolverine-implementation.md W9): where the verbs that v2 answers are registered. One file per verb group in gateway/Verbs/Routes/ (Item, Merge, Delivery, ReadModels,
 // Keeper, Services, Board) lists the verbs of its group (the owners of docs/design/verb-inventory.md) and has a Register that the item W9.2 to W9.8 of that group fills. The QC verbs (qc-*) are W9.1's,
 // registered with QC itself. A verb that no group registered runs on v1, as before; there is no flag that moves a verb or an item to v2 (revision of 2026-10-26): a verb is on v2 when the engine acts
-// (Engine.V2Acts, the environments of v2Environments) and its group registered it, and the kill switch FACTORY_V2_OFF makes the engine v1 again, with every route gone.
+// (Engine.V2Acts, the environments of v2Environments) and its group registered it.
 // The table is built once at the start. Where the engine does not act (v1, the shadow run) it is empty and Register is not even called, so a stub or a group not yet filled changes nothing anywhere.
 
 /// <summary>What answers one registered verb on v2: the JSON body the rule script would have read, the time allowed, and the answer in the shape the rule script printed.</summary>

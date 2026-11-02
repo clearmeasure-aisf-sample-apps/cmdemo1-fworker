@@ -77,7 +77,6 @@ public sealed class V2VerbRoutesTests : IDisposable
     [Theory]
     [InlineData("tdd", "\"prod\"", "", null)]          // v1 acts
     [InlineData("tdd", "", "\"tdd\"", null)]           // the shadow run: v1 acts
-    [InlineData("prod", "\"prod\"", "", "1")]          // the kill switch: v1 again
     public void NothingIsRegistered_WhereV1Acts(string environment, string v2, string shadow, string? off)
     {
         var routes = V2VerbRoutes.Build(Engine(environment, v2, shadow, off), new ServiceCollection().BuildServiceProvider());
@@ -104,7 +103,6 @@ public sealed class V2VerbRoutesTests : IDisposable
     {
         // the table is the shared empty one, so nothing a route file does could be added to it
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("tdd", "\"prod\""), new ServiceCollection().BuildServiceProvider()));
-        Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("prod", "\"prod\"", off: "1"), new ServiceCollection().BuildServiceProvider()));
         Assert.NotSame(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("prod", "\"prod\""), new ServiceCollection().BuildServiceProvider()));
     }
 

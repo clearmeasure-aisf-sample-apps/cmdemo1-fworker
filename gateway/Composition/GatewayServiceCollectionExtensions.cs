@@ -65,55 +65,50 @@ static class GatewayServiceCollectionExtensions
     public static IServiceCollection AddGatewayLeadership(this IServiceCollection services, GatewayComposition c)
     {
         var gw = c.Gateway;
-        // The plant snapshot (PlantSnapshot.cs, enhancement 5): read back before the first sweep. Owner mode only, and not for the suites'
-        // second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off.
-        var snapshotOn = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0";
-        // The leader lease (Leader.cs, issue 94): only the process that holds it acts on the board. Owner mode with a GitHub identity, not the suites' second
-        // gateways; FACTORY_LEADER_LEASE=0 switches it off (every process acts, and the snapshot is written at SIGTERM and read once, as before).
-        var leaderOn = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && c.Revocation.GitHubConfigured;
+        // The plant in the database (SnapshotCoordinator): read back before the first sweep. Owner mode only, and not for the suites' second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing
+        // listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off. It needs a database and a home repository; a process without them keeps no plant (the sweep rebuilds it from the board).
+        var keepsPlant = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0"
+            && c.WolverineHost && c.Database.ConnectionString != null && c.Instance.Home != null;
+        // The leader lease (Leader.cs, issue 94): only the process that holds the SQL application lock acts. Owner mode with a GitHub identity and a database (any process with a database takes the SQL lease, whatever engine it runs), not the suites' second gateways;
+        // FACTORY_LEADER_LEASE=0 switches it off (every process acts). A process with no database has no lease, and so none to arbitrate: every such process acts (uat and prod are inert on the board).
+        var leaderOn = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && c.Revocation.GitHubConfigured && c.Database.Configured;
         var leaderSettings = LeaderSettings.Load(gw.ScriptsDir, leaderOn);
         services.AddSingleton(leaderSettings);
-        var leader = new GatewayLeader(c.Runner, leaderSettings,
-            (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
+        var leader = new GatewayLeader(leaderSettings);
         services.AddSingleton<ILeadership>(leader);
-        // W9.10b: where there is a database (the Wolverine host runs: the connection string is set and the engine is shadow or v2) and the lease is on, the process must also hold the SQL application lock to run the node,
-        // and where the engine acts to act at all. The GitHub ref above stays the arbitration with a process that has no database (v1 under the kill switch, uat, prod): those build no SqlLease.
-        if (leaderOn && c.WolverineHost)
+        if (leaderOn)
         {
             var leaseConnection = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, WolverineHostOptions.From(c.Instance).ConnectTimeoutSeconds);
             var createDatabase = c.Database.CreateIfMissing;
             // (the leadership row is a table of script 170: the scripts are applied before the lock is first tried, under their own application lock, as the host does; the host then finds nothing to apply)
             leader.UseSqlLease(new SqlLease(leaseConnection,
                 ct => FactorySchema.UpgradeAsync(leaseConnection, new SchemaRunOptions { CreateDatabase = createDatabase, Log = line => { try { Console.WriteLine(line); } catch { } } }, ct),
-                leaderSettings.SqlRequestFreshSeconds), fencesActing: c.Engine.V2Acts);
+                leaderSettings.SqlRequestFreshSeconds));
         }
-        // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
-        c.Runner.Lease = () => leader.FenceLease;
+        // the rule scripts that act on the board are no longer fenced by a lease ref (the ref is gone): the gateway's own check, MayAct, is the fence of the routes of a fenced verb (Runner.RunAsync)
         c.Runner.Inert = () => c.Engine.NoDatabase;   // cutover review: with no database only the housekeeping and the reading verbs reach the rule script (InertVerbs)
-        c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lease is lost
-        // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
+        c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lock is lost
+        // the gap since the stored plant was written: the first full sweep after the restore renews the claims that ran out meanwhile
         var sweepGap = new SweepGap();
-        // the plant snapshot and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change
+        // the plant in the database and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change
         services.AddSingleton(leader);
-        var maxAge = c.Timing.PlantSnapshotMaxAgeMinutes;
         services.AddSingleton(sp =>
         {
             var plant = sp.GetRequiredService<Plant>();
-            var snapshots = new SnapshotCoordinator(snapshotOn, maxAge, leader, sp.GetRequiredService<Runner>().RunAsync, plant, sweepGap);
-            // W9.10k: where the engine acts (and there is a database and a home repository) the plant is kept in the database, not in the snapshot ref, and a restored plant is corrected from WorkItems and the claims
-            if (c.Engine.V2Acts && c.WolverineHost && c.Database.ConnectionString is { } connection && c.Instance.Home is { } home)
-            {
-                var cs = WolverineHostService.WithConnectTimeout(connection, WolverineHostOptions.From(c.Instance).ConnectTimeoutSeconds);
-                snapshots.Sql = new Fworker.Workflows.PlantState.SqlPlantStateStore(() => WorkItemWiring.Open(cs));
-                var correction = new PlantRestoreCorrection(plant, new Fworker.Workflows.WorkItem.SqlWorkItemStore(() => WorkItemWiring.Open(cs)), home, (item, ct) => PlantRestoreCorrection.HolderOf(sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), item, ct));
-                snapshots.Correct = () => correction.Run();
-                snapshots.SchemaReady = ct => SnapshotCoordinator.WaitForTablesAsync(sp.GetRequiredService<FactorySchemaStatus>(), leader, ct);
-            }
+            // where the engine acts the plant is kept in the database, and a restored plant is corrected from WorkItems and the claims
+            if (!keepsPlant) return new SnapshotCoordinator(false, leader, null, plant, sweepGap);
+            var cs = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, WolverineHostOptions.From(c.Instance).ConnectTimeoutSeconds);
+            var home = c.Instance.Home!.Value;
+            var snapshots = new SnapshotCoordinator(true, leader, new Fworker.Workflows.PlantState.SqlPlantStateStore(() => WorkItemWiring.Open(cs)), plant, sweepGap);
+            var correction = new PlantRestoreCorrection(plant, new Fworker.Workflows.WorkItem.SqlWorkItemStore(() => WorkItemWiring.Open(cs)), home, (item, ct) => PlantRestoreCorrection.HolderOf(sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), item, ct));
+            snapshots.Correct = () => correction.Run();
+            snapshots.LastFullSweep = () => sp.GetRequiredService<EventHub>().LastSweep;
+            snapshots.SchemaReady = ct => SnapshotCoordinator.WaitForTablesAsync(sp.GetRequiredService<FactorySchemaStatus>(), leader, ct);
             return snapshots;
         });
         services.AddSingleton<ISnapshotCoordinator>(sp => sp.GetRequiredService<SnapshotCoordinator>());
         services.AddSingleton<LeadershipService>();
-        c.SnapshotOn = snapshotOn; c.LeaderOn = leaderOn; c.Leader = leader; c.SweepGap = sweepGap;
+        c.SnapshotOn = keepsPlant; c.LeaderOn = leaderOn; c.Leader = leader; c.SweepGap = sweepGap;
         return services.AddGatewayWolverine(c);   // W2.2: the Wolverine host's services, only with a connection string
     }
 
@@ -287,9 +282,6 @@ static class GatewayServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
-        // W9.9b: a process that the kill switch turned back to v1 in an environment the configuration names for v2 leaves the marker the engine's next adoption reads (nothing is made or written in any other case)
-        if (c.Engine.KillSwitch && c.Engine.Configured == EngineMode.V2 && c.Database.Configured && c.Instance.Home != null)
-            services.AddHostedService(sp => new KillSwitchMarkerService(new Fworker.Workflows.Adoption.SqlEngineMarkers(() => ItemMergedWiring.Open(c.Database.ConnectionString!)), Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node));
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
         // W4.2: the Octopus watcher, read only; v1 promotes with the rule scripts. W5.2: it also runs in the shadow run of the delivery train (slower, a smaller call budget)
         var shadowTrain = c.Engine.ShadowRuns && c.WolverineHost && c.Instance.Home != null;
@@ -308,7 +300,7 @@ static class GatewayServiceCollectionExtensions
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
         var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
-        // Cutover review: v1's intake is off wherever intake.v2Plans names plans and the engine does not act on them (see Sweeper.IntakeOff): the kill switch, uat and prod (their image has intake.enabled true for tdd's engine), a v2 environment with no database.
+        // Cutover review: v1's intake is off wherever intake.v2Plans names plans and the engine does not act on them (see Sweeper.IntakeOff): uat and prod (their image has intake.enabled true for tdd's engine), a v2 environment with no database.
         // Where v2 is configured and there is no database the sweeper holds an ownership that is never loaded (EngineOptions.NoDatabase): it sweeps nothing at all.
         var intakeOff = !v2Sweep && Fworker.Workflows.Intake.IntakeSettings.From(c.Instance.Root, Environment.GetEnvironmentVariable).V2Plans.Count > 0;
         if (v2Sweep) services.AddSingleton(sp => SagaPlantWiring.Make(c, sp));   // W9.10k: the plant's input for the saga's items, and the sources of the patrol's parks and the release check's in-flight work

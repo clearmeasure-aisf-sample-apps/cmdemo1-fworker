@@ -86,7 +86,7 @@ public sealed class JournalCommandWiringTests : IDisposable
     static Func<string, string?> Env() => k => k switch { "GH_TOKEN" => Token, "FACTORY_SERVER_LOGIN" => Login, _ => null };
 
     static WolverineHostService NewHost() => new(DatabaseOptions.From(k => k == "FACTORY_DB_CONNECTION" ? "Server=tcp:wiring.invalid,1433;Database=wiring;User Id=u;Password=p;Encrypt=False" : null),
-        new WolverineHostOptions(), new GatewayLeader(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = false }, "0.0.0"));
+        new WolverineHostOptions(), new GatewayLeader(new LeaderSettings { On = false }));
 
     static async Task<bool> Until(Func<bool> cond, int seconds = 30)
     {

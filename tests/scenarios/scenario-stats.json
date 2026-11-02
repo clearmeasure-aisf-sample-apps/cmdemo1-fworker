@@ -701,11 +701,6 @@
       "checks": 9,
       "seconds": 55.0
     },
-    "leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch": {
-      "tier": "fast",
-      "checks": 11,
-      "seconds": 12.8
-    },
     "leader: two gateways overlap: the newer takes the lease, the older stops acting, writes its final snapshot and hands its streams over; the newer restores it before its first sweep": {
       "tier": "full",
       "checks": 15,

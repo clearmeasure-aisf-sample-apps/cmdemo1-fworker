@@ -27,7 +27,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     // cutover review: where the engine acts the sweep also waits for the adoption of this process's term (AdoptionGate), and reads the saga's table again before the term's first pass. Set only with V2.
     public AdoptionGate? Adoption { get; init; }
     long? adoptedTerm;
-    // cutover review: v1's intake is off. Set where intake.v2Plans names plans and the engine does not act on them (the kill switch, uat and prod, a v2 environment without a database): v1's intake takes only what the plans leave it where the
+    // cutover review: v1's intake is off. Set where intake.v2Plans names plans and the engine does not act on them (uat and prod, a v2 environment without a database): v1's intake takes only what the plans leave it where the
     // engine acts, and everywhere else it would take everything, which the configuration of the cutover never meant (intake.enabled is true for the image so that the engine's intake runs). The script has no intake without the block.
     public bool IntakeOff { get; init; }
 

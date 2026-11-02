@@ -3,7 +3,7 @@ using Fworker.Contracts.Seams;
 
 // W9.5 (#357): the read models, owned by Fworker.Workflows.ReadModels: the checks of a pull request (pr-checks, wait-for-checks), the inspector's facts (inspect-facts), the delivery of a change (get-delivery), the model tier of an
 // item (model-tier) and the probe of the gateway's secrets (check-secrets). Each answers exactly as its rule script does (docs/design/fworker-wolverine-implementation.md, "W9.5 as built"). Registered to the v2 path only where the engine acts
-// (V2VerbRoutes.Build); v1, the shadow run and FACTORY_V2_OFF are unchanged. The wiring they read and write through is gateway/Ports/ReadModelsPort.cs.
+// (V2VerbRoutes.Build); v1 and the shadow run are unchanged. The wiring they read and write through is gateway/Ports/ReadModelsPort.cs.
 static class ReadModelRoutes
 {
     public const string Group = "read-models";

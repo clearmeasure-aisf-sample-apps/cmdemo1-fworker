@@ -73,7 +73,7 @@ public static class DeliveryExecutorHandlers
 }
 
 /// <summary>
-/// W9.10i: the Sign-off a deployment of the train waits at, recorded on the release's first item (<c>merge.promoted.&lt;environment&gt;.signoff_wait_since</c>), so that after FACTORY_V2_OFF v1 counts the wait from when it began
+/// W9.10i: the Sign-off a deployment of the train waits at, recorded on the release's first item (<c>merge.promoted.&lt;environment&gt;.signoff_wait_since</c>), so that after a return to v1 (a redeploy of the previous release) v1 counts the wait from when it began
 /// and not from its own first look. The train publishes "signoff-waiting" once per change; the sign-off's task and since are read from the train's state. Public because Wolverine's generated code refers to it.
 /// </summary>
 public sealed class SignOffWaitRecorder(ITrainStore trains, PromotionStateWriter writer)

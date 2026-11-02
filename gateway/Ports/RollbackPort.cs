@@ -8,7 +8,7 @@ using Fworker.Workflows.Delivery;
 using Wolverine;
 using Wolverine.ErrorHandling;
 
-// W8.3: the rollback of the delivery train in the gateway, only where the engine acts (Engine.V2Acts; v1, the shadow run and FACTORY_V2_OFF register nothing of it), attached by DeliveryActingWiring (W9.4) with the train. The train (Fworker.Workflows.Delivery,
+// W8.3: the rollback of the delivery train in the gateway, only where the engine acts (Engine.V2Acts; v1 and the shadow run register nothing of it), attached by DeliveryActingWiring (W9.4) with the train. The train (Fworker.Workflows.Delivery,
 // RollbackTrain) decides: it checks the migration precondition and publishes RollbackRelease, the one deployment it creates itself (owner decision of 2026-10-29: the incident rollback of the app in tdd,
 // automatic, tdd only). This file is the host side of it: the executor of RollbackRelease on the W3.0 command base (RollbackExecutor, Octopus), its durable queue and retry rule, and the read of the files
 // two commits differ by (the migration precondition), a GET of GitHub's compare. Where no Octopus key, URL or space is configured the command has no executor: the train then escalates after the request expiry.
