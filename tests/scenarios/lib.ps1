@@ -288,7 +288,13 @@ function TmpFile([string]$Name, [string]$Text) { $p = Join-Path $script:Work $Na
 
 function Check([string]$Name, [bool]$Ok, $Detail = '') {
     $script:Checks++
-    if ($Ok) { Write-Host "    ok    $Name" } else { Write-Host "    FAIL  $Name  $Detail"; [void]$script:Failures.Add("$($script:Current): $Name $Detail") }
+    if ($Ok) { Write-Host "    ok    $Name" } else {
+        Write-Host "    FAIL  $Name  $Detail"; [void]$script:Failures.Add("$($script:Current): $Name $Detail")
+        # V3.2a diagnostic: an item that is not offered is either not admitted (no saga yet) or not offered by its saga; the status says which (v2.admission, v2.workItems)
+        if ($Name -match 'offered' -and (Get-Command Get-Plant -ErrorAction SilentlyContinue)) {
+            try { $st = Get-Plant; $dg = [ordered]@{ admission = $st.v2.admission; v2 = ($st.v2 | Select-Object -Property * -ExcludeProperty admission); plant = @{ waiting = $st.plant.waiting; unowned = $st.plant.unowned } } | ConvertTo-Json -Compress -Depth 5; if ($dg.Length -gt 2500) { $dg = $dg.Substring(0, 2500) }; Write-Host "      DIAG  $dg" } catch { Write-Host "      DIAG  status unreadable: $($_.Exception.Message)" }
+        }
+    }
 }
 # A check that is known to fail now and then for a cause not yet found (docs/HANDOFF.md names it under -Issue). It runs and reports like any
 # check; when it fails it prints QUARANTINED (failed) with the detail and is counted in a total of its own (the suite summary and run-all show it),
