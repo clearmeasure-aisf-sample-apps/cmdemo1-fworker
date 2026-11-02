@@ -1281,6 +1281,11 @@ sealed class World
                 var i = issues[b!["number"]!.GetValue<int>()]; i.Column = b["column"]?.ToString(); i.Card ??= "card_" + i.Number;
                 return (200, J(("ok", true)));
             }
+            case "reopen":
+            {   // { number }: a person reopens the issue (a test control: a PATCH with state open leaves the issue as it is here, as the scenarios of the sweep have always relied on)
+                issues[b!["number"]!.GetValue<int>()].Open = true;
+                return (200, J(("ok", true)));
+            }
             case "push-branch":
             {
                 var br = b!["branch"]!.ToString(); var objs = new List<JsonObject>();
