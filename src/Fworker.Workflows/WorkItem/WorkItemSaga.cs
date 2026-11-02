@@ -93,6 +93,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 return StepAnswer.Applied;
             case ResumeWorkItem:
                 return Resume(c);
+            case DevelopmentSettled d: return Settled(c, d);
             case ItemClosed:
                 // W9.10h: the merge decides for an item that is merged or merging (the merge closes its issue); a delivered item is in its settle window
                 if (state.Status == WorkItemStatus.Settling) return StepAnswer.Refused("the item is delivered");
@@ -139,6 +140,25 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
 
     /// <summary>The park reason of a hold label (W9.10h): a removal of the label lifts exactly this park.</summary>
     public const string HoldParkPrefix = "hold: ";
+
+    // The gateway settled Development for a coding agent's task (copilot-settle awaiting): the pull request of the task's branch is the item's, the step is done without a session's review, and an agent's failure report that parked the
+    // item (worker-failure) is overridden. Any other park, and any step but Develop, is left alone.
+    static StepAnswer Settled(StepContext c, DevelopmentSettled d)
+    {
+        var state = c.State;
+        if (state.Status != WorkItemStatus.Open || state.Step != StepKind.Develop) return StepAnswer.Stale("the item is not in Development");
+        if (state.Parked)
+        {
+            if (!state.ParkReason.StartsWith("worker-failure", StringComparison.Ordinal)) return StepAnswer.Refused($"the item is parked: {state.ParkReason}");
+            state.Parked = false; state.ParkReason = ""; c.ClearParkTimers(); c.TimerChanged = true;
+            c.Decide(WorkItemActions.Resumed, "the gateway settled Development over the agent's failure report");
+        }
+        var recorded = c.StepOf(StepKind.Develop).Handle(c, new PullRequestChanged(d.Item, d.Generation, d.Key, d.PullRequest, d.Head, d.Files));
+        if (recorded.Outcome != WorkItemOutcome.Applied) return recorded;
+        state.ReviewsComplete.Add(StepKind.Develop.ToString());
+        c.Advance("Develop done: the gateway settled the coding agent's task");
+        return StepAnswer.Applied;
+    }
 
     // the budgets of the phase start again and the step is armed anew
     static StepAnswer Resume(StepContext c)

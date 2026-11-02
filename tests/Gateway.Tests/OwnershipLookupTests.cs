@@ -345,6 +345,21 @@ public sealed class OwnershipLookupTests
     }
 
     [Fact]
+    public async Task ACopilotSettleThatAwaitsChecks_IsToldToTheSagaInDevelopment_AndOneThatDoesNothingIsNot()
+    {
+        var rig = new Rig();
+        await rig.StartedAfterTheRead(plan: "feature");
+        var s = (await rig.Store.Inner.Load(Item.ToString(), default))!.State;
+        await rig.Svc.Handle(new ReviewRecorded(Item, 1, s.ArmId, "r1", true)); await rig.Svc.Handle(new StepCompleted(Item, 1, s.ArmId, "d1"));   // (the saga is in Develop)
+        var feed = rig.Feed(new Inner(0, "{}"));
+        await feed.Observe("copilot-settle", Body(new { stage = "end" }), """{"ok":true,"id":7,"action":"none","reason":"no-pr"}""");
+        Assert.DoesNotContain(rig.Published, m => m is DevelopmentSettled);
+        await feed.Observe("copilot-settle", Body(new { stage = "end" }), """{"ok":true,"id":7,"action":"awaiting","pr":11,"sha":"aaa1111111111111111111111111111111111111"}""");
+        var settled = Assert.Single(rig.Published.OfType<DevelopmentSettled>());
+        Assert.Equal((11, "aaa1111111111111111111111111111111111111"), (settled.PullRequest, settled.Head));
+    }
+
+    [Fact]
     public async Task ASagaThatStartedAfterTheRead_HearsTheDesign_FromTheFeedOfTheScript()
     {
         var rig = new Rig();
