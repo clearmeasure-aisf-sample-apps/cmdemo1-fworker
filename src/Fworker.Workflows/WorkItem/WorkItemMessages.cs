@@ -72,6 +72,12 @@ public sealed record LeaseRenewed(ItemId Item, int Generation, string ArmId, str
 [MessageIdentity("workitem.pr-changed")]
 public sealed record PullRequestChanged(ItemId Item, int Generation, string Key, int PullRequest, string Head, IReadOnlyList<string> Files) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
+/// <summary>
+/// The gateway settles Development for a coding agent whose task ended (copilot-settle, action awaiting): the task's branch has the change, the item's pull request is that branch's, and the checks decide from here. Whatever the agent
+/// reported (even a failure that parked the item) and with no review of the session (the agent had none), the Develop step is done and the next step waits for the checks.
+/// </summary>
+public sealed record DevelopmentSettled(ItemId Item, int Generation, string Key, int PullRequest, string Head, IReadOnlyList<string> Files) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
 /// <summary>A check run of the merge commit's own Build: its name, status and conclusion (null while it has none).</summary>
 public sealed record BuildCheck(string Name, string? Status, string? Conclusion);
 
