@@ -12,7 +12,7 @@ $AuthorScenarios = [ordered]@{
     $after = (Get-FakeState).appMints
     # v2: the verbs run in the gateway's own process, which mints the token at its first call to GitHub (the jobs of the Wolverine host make it at the start, a moment before or after this scenario begins, by the speed of the
     # machine) and keeps it in memory: the mints of the window may be 0 and there is no cache file. So on v2 the count is that of the gateway's life, and the file is checked only where a script wrote it.
-    $v2 = $script:GoldenEngine -eq 'v2'
+    $v2 = $true
     $mints = $(if ($v2) { $after } else { $after - $before })
     Check 'one token was minted for several verbs (cache)' (($mints -ge 1) -and ($mints -le 2 -or ($v2 -and $mints -le 4))) "minted $mints (in the window $($after - $before))"
     $al = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/alive" -SkipHttpErrorCheck; Check '/alive answers without a token (the kit health probe)' ($al.StatusCode -eq 200)

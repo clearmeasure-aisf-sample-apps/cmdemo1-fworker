@@ -5,9 +5,9 @@ purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull
 of the suite `saga` (`tests/scenarios/saga.ps1`, W9.10d), the first that start a `WorkItemSaga` on v2: the docs plan (W6.6) and the feature plan (W7.3). The suite runs on both engines
 from one script, its golden files are recorded on v1, and each block says what v2 writes instead: the engine's intake and the saga's projection move the card (source `gateway`), the plant's journal lines
 go through the Wolverine sink (source `gateway`), the merge of both plans is the saga's own call (source `gateway`, no merge comment, the card to Done by the projection). A block whose `# why:` names #557
-(W9.10e) held differences that were defects until v1's sweep left the saga's items alone; that task removed the lines of v1's merge pickup and of its inline merge from it. The comparison that reads the file is part of the v2 Tier 1 jobs (`tests.yml`,
-`run-all.ps1 -Engine v2`; issue #468); `tests/scenarios/v2-differences.ps1` has its functions and `lib.ps1` (`Initialize-V2Golden`, `Get-GoldenDir`) uses them.
-To make a block: run the scenario with `-Engine v2` and `TEST_WRITES_DIR` set, and compare the record it writes with the golden file (the lines of one that the other lacks are the block's `-` and `+` lines).
+(W9.10e) held differences that were defects until v1's sweep left the saga's items alone; that task removed the lines of v1's merge pickup and of its inline merge from it. The comparison that reads the file is part of the Tier 1 jobs (`tests.yml`,
+`run-all.ps1`; issue #468); `tests/scenarios/v2-differences.ps1` has its functions and `lib.ps1` (`Initialize-V2Golden`, `Get-GoldenDir`) uses them.
+To make a block: run the scenario with `TEST_WRITES_DIR` set, and compare the record it writes with the golden file (the lines of one that the other lacks are the block's `-` and `+` lines).
 
 ## Format
 
@@ -30,7 +30,7 @@ Blocks separated by blank lines. A block names one scenario and the lines of its
 
 ## How the comparison reads it
 
-Only a run with `-Engine v2` reads the file; a v1 run compares with the golden files as they are. At the start of each suite of such a run
+Every run reads the file. At the start of each suite
 (`Initialize-V2Golden`) the golden directory is copied to a temporary *effective golden directory*, and in the copy every block is applied to the
 golden file it names: every `-` line is removed and every `+` line added (a change, a `-` followed by a `+` with the same prefix, takes the place of
 the line it replaces; an addition goes after the last line of its own section, which for a `=` line is after the last caused line of its object).

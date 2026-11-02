@@ -1,11 +1,9 @@
 # Tier 1 scenarios for the PR QC environment, slice S4 (merge gate, approval trigger, sweep teardown, gateway race). Design: docs/design/pr-qc-environment.md 3.5, 3.6, 8.
 # Names start with "qc: gate"; run them alone with -Only "qc: gate". They reuse the helpers of qc.ps1 and owner.ps1.
-#   $QcGateScenarios          peer-approved, owner mode, default timing: the merge gate, qc.approved, label change
 #   $QcGateAutoScenarios      run inside the main QC suite (mergePolicy auto): the auto policy is unchanged
 #   $QcGateIdleScenarios ... one gateway each, with short timing.* values (FACTORY_TIMING_* in run.ps1): idle, lifetime, stale grace, lease loss, qc-waiting
 #   $QcGateRaceScenarios      one gateway with qc.testReconcileDelayMs: a qc-stopped between a sweep's read and the gateway acting on it
 
-function Gate-Head([int]$pr) { Get-Head $pr }
 # Starts a person's run through the admin verb (no link needed) and drives the scripted worker to the given step: 'accepted', 'building', 'running', 'ready'.
 # Worker '' means whichever of qw1 and qw2 is offered the job.
 function Gate-Run($x, [string]$Worker = 'qw1', [string]$Upto = 'ready') {
@@ -33,17 +31,6 @@ function Gate-Drive($x, [string]$Worker, [string]$Upto = 'ready') {
     $r0 = Qc-Report $x "http://$(Qc-Fake)" 'ok' $Worker; CheckExit 'the environment is reported ready' $r0 0
     return $x
 }
-function Gate-Inspect($x) {
-    $r0 = F 'w1' @('approve-pr', '--item', $x.n, '--pr', $x.pr, '--text-file', (TmpFile "gi$($x.n).md" (Insp-Text 'APPROVE'))); CheckExit "inspector approves PR $($x.pr)" $r0 0
-}
-function Gate-Merge($x) { F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr) }
-# A person in humanApprovers approves the given commit on GitHub.
-function Gate-Human($x, [string]$Commit = '') { Gh-As 'fake-testperson' "pulls/$($x.pr)/reviews" @{ event = 'APPROVE'; commit_id = $(if ($Commit) { $Commit } else { Get-Head $x.pr }) } | Out-Null }
-function Gate-ReviewHook($x, [string]$Action = 'submitted', [string]$State = 'approved') {
-    $c = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable); $repo = @{ full_name = "$($c.owner)/$($c.repo)" }; $sha = Get-Head $x.pr
-    $rv = @{ action = $Action; repository = $repo; review = @{ state = $State; commit_id = $sha; user = @{ login = 'factory-worker-testperson[bot]' } }; pull_request = @{ number = $x.pr; head = @{ ref = "factory-worker/$($x.n)-development"; sha = $sha } } }
-    return (Qc-Hook 'pull_request_review' $rv)
-}
 # The owner's mailbox for an item (what Plant.Route delivers), as a list of events.
 function Gate-Mailbox([int]$n) {
     $r0 = Invoke-RestMethod "$(Qc-Base)/api/v1/wait?item=$n&after=0&timeout=1" -Headers @{ Authorization = 'Bearer test-token' }
@@ -61,206 +48,11 @@ function Gate-Stop($x, [string]$Worker = 'qw1') {
 function Gate-TdReason($x) { $r0 = Qc-Rec $x.n $x.pr; if ($r0 -and $r0.ContainsKey('teardown')) { return "$($r0.teardown.reason)" }; return '' }
 function Gate-Journal([int]$n, [string]$Event, [string]$Text = '') { return @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "plant event=$Event" -and ((-not $Text) -or $_.body -match $Text) }).Count }
 
-$QcGateScenarios = [ordered]@{
-
-'qc: gate a non-auto-merge PASS stays on the approval path; merge needs a QC run, then a person, then merges' = {
-    Ensure-QcWorker
-    $x = New-QcOffered
-    $st = Qc-State $x.n
-    Check 'the PASS verdict is not parked for a person (peer-approved with the QC gate)' (-not ($st.ContainsKey('park') -and "$($st.park.reason)" -eq 'pass-without-auto-merge') -and -not $st.verdict.processed) ((Pv $st 'park') | ConvertTo-Json -Compress)
-    $r0 = Gate-Merge $x; CheckExit 'merge before any approval' $r0 10 'approval-missing'
-    Gate-Inspect $x
-    $r0 = Gate-Merge $x; CheckExit 'inspector approved, no QC run: merge refused' $r0 10 'qc-not-run'
-    Check 'the refusal tells the owner to wait for the event, not park' ("$(Pv $r0 'wait_for')" -eq 'qc.approved' -and "$($r0.reason)" -match 'do not park')
-    $x = Gate-Run $x 'qw1' 'building'
-    Check 'the run is recorded only when the environment reaches ready: not yet' (-not (Qc-Rec $x.n $x.pr).ContainsKey('ran_sha'))
-    $r0 = Gate-Merge $x; CheckExit 'an environment that is only building does not count' $r0 10 'qc-not-run'
-    $rep = Qc-Report $x "http://$(Qc-Fake)"; CheckExit 'ready' $rep 0
-    $head = Get-Head $x.pr
-    Check 'ready wrote qc.ran_sha = the head' ((Qc-Rec $x.n $x.pr).ran_sha -eq $head) "$((Qc-Rec $x.n $x.pr).ran_sha)"
-    $r0 = Gate-Merge $x; CheckExit 'a run exists, no person has approved: merge refused' $r0 10 'qc-approval-missing'
-    Gh-As 'fake-reviewer' "pulls/$($x.pr)/reviews" @{ event = 'APPROVE'; commit_id = $head } | Out-Null
-    $r0 = Gate-Merge $x; CheckExit 'the inspector identity is not a person in humanApprovers' $r0 10 'qc-approval-missing'
-    Gate-Human $x 'deadbeef'
-    $r0 = Gate-Merge $x; CheckExit 'a person approving another commit does not count' $r0 10 'qc-approval-missing'
-    Gate-Human $x
-    $r0 = Gate-Merge $x; CheckExit 'a person approved the current head: merge' $r0 0
-    Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
-    $td = Wait-Until -Seconds 60 { @(Get-WorkerEvents 'qw1' | Where-Object { $_.event -eq 'qc.teardown' -and $_.pr -eq $x.pr }).Count -gt 0 }
-    Check 'after the merge the sweep tells the worker to tear the environment down' $td
-}
-
-'qc: gate documentation-only items are exempt from the QC run but not from the approval [full]' = {
-    Ensure-QcWorker
-    $d = New-QcPr $QcLabels @('docs/a.md') $true
-    Gate-Inspect $d
-    $r0 = Gate-Merge $d; CheckExit 'docs-only: no qc-not-run, the missing approval is what stops it' $r0 10 'qc-approval-missing'
-    Gate-Human $d
-    $r0 = Gate-Merge $d; CheckExit 'docs-only with a person approval: merge' $r0 0
-    Check 'merged without a QC environment' ((Pv $r0 'outcome') -eq 'merged' -and $null -eq (Qc-Rec $d.n $d.pr)) "$(Pv $r0 'outcome')"
-}
-
-'qc: gate Auto Merge items are unaffected under peer-approved [full]' = {
-    Ensure-QcWorker
-    $a = New-QcPr @('factory worker', 'Auto Merge')
-    Gate-Inspect $a
-    $r0 = Gate-Merge $a; CheckExit 'Auto Merge item: no QC run and no person needed' $r0 0
-    Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
-    Check 'and no record or offer was made for it' ($null -eq (Qc-Rec $a.n $a.pr) -and (Qc-OfferComments $a.pr).Count -eq 0)
-}
-
-'qc: gate a push to a new head needs a new QC run and a new approval [full]' = {
-    Ensure-QcWorker
-    $x = New-QcOffered
-    Gate-Inspect $x
-    $x = Gate-Run $x 'qw1'
-    Gate-Human $x
-    $old = Get-Head $x.pr
-    Check 'ready for the first head, a person approved it: the gate would pass' ((Qc-Rec $x.n $x.pr).ran_sha -eq $old)
-    Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('src/a.cs', 'src/c.cs') } | Out-Null
-    $new = Get-Head $x.pr
-    Check 'the head moved' ($new -ne $old)
-    $r0 = Gate-Merge $x; CheckExit 'new head: the inspector approval of the old head is gone' $r0 10 'approval-missing'
-    $r0 = F 'w1' @('approve-pr', '--item', $x.n, '--pr', $x.pr, '--text-file', (TmpFile "gp$($x.n).md" (Insp-Text 'APPROVE'))); CheckExit 'the inspector may not approve a head that changed after validation' $r0 10 'escalation-required'
-    $r0 = F 'w1' @('approve-pr', '--item', $x.n, '--pr', $x.pr, '--text-file', (TmpFile "ge$($x.n).md" (Insp-Text 'ESCALATE' 'The branch changed after validation.'))); CheckExit 'the inspector escalates' $r0 0
-    $r0 = Gate-Merge $x; CheckExit 'held: the old approval of the person does not release it' $r0 10 'held'
-    Gate-Human $x
-    $cleared = Wait-Until -Seconds 40 { -not ((Get-FakeIssue $x.n).labels -contains 'Needs Human Review') }
-    Check 'the person''s approval of the NEW head released the hold' $cleared
-    $r0 = Gate-Merge $x; CheckExit 'approved, but the run belongs to the old head: it does not count' $r0 10 'qc-not-run'
-    Check 'the record still names the old run' ((Qc-Rec $x.n $x.pr).ran_sha -eq $old)
-    $x = Gate-Run $x 'qw1'
-    Check 'a run for the new head carries the new ran_sha' ((Qc-Rec $x.n $x.pr).ran_sha -eq $new -and (Qc-Rec $x.n $x.pr).sha -eq $new)
-    $r0 = Gate-Merge $x; CheckExit 'new run and the approval of the new head: merge' $r0 0
-    Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
-}
-
-
-'qc: gate a person''s approval wakes the owner with qc.approved (webhook and sweep), a dismissal clears it, and the retried merge succeeds [full]' = {
-    Ensure-QcWorker
-    # webhook path
-    $x = New-QcOffered
-    Gate-Inspect $x
-    $r0 = Gate-Merge $x; CheckExit 'owner asks to merge: no run yet' $r0 10 'qc-not-run'
-    $x = Gate-Run $x 'qw1'
-    $r0 = Gate-Merge $x; CheckExit 'owner retries: the run exists, nobody approved' $r0 10 'qc-approval-missing'
-    Check 'no qc.approved yet' ((Gate-MailCount $x.n 'qc.approved') -eq 0)
-    Gate-Human $x
-    Check 'the review webhook is accepted' ((Gate-ReviewHook $x) -eq 202)
-    $got = Wait-Until -Seconds 30 { (Gate-MailCount $x.n 'qc.approved') -ge 1 }
-    Check 'the owner mailbox got qc.approved' $got
-    $ev = @(Gate-Mailbox $x.n | Where-Object { $_.event -eq 'qc.approved' })[0]
-    Check 'the event names the PR, the head and the approver, and no URL' ($ev -and $ev.pr -eq $x.pr -and $ev.sha -eq (Get-Head $x.pr) -and $ev.by -eq 'factory-worker-testperson[bot]' -and $ev.ran -eq $true -and (($ev | ConvertTo-Json -Compress) -notmatch 'http')) ($ev | ConvertTo-Json -Compress)
-    $rec = Qc-Rec $x.n $x.pr
-    Check 'the approval is kept in the QC record (a persisted transition)' ($rec.approved.by -eq 'factory-worker-testperson[bot]' -and $rec.approved.sha -eq (Get-Head $x.pr)) ($rec.approved | ConvertTo-Json -Compress)
-    # a dismissal clears it
-    Fake 'review-state' @{ number = $x.pr; user = 'factory-worker-testperson[bot]'; state = 'DISMISSED' } | Out-Null
-    Check 'the dismissal webhook is accepted' ((Gate-ReviewHook $x 'dismissed' 'dismissed') -eq 202)
-    $cleared = Wait-Until -Seconds 30 { -not (Qc-Rec $x.n $x.pr).ContainsKey('approved') }
-    Check 'the dismissed review clears qc.approved from the record' $cleared
-    $r0 = Gate-Merge $x; CheckExit 'merge is refused again after the dismissal' $r0 10 'qc-approval-missing'
-    # approve again: the owner is woken again, and the retry merges
-    Gate-Human $x
-    Check 'the second review webhook is accepted' ((Gate-ReviewHook $x) -eq 202)
-    $again = Wait-Until -Seconds 30 { (Gate-MailCount $x.n 'qc.approved') -ge 2 }
-    Check 'a new approval after a dismissal wakes the owner again' $again
-    $r0 = Gate-Merge $x; CheckExit 'the retried merge succeeds' $r0 0
-    Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
-    # sweep path: no webhook at all
-    $y = New-QcOffered
-    Gate-Inspect $y
-    Gate-Human $y
-    $none = Gate-MailCount $y.n 'qc.approved'
-    $sweepSaw = Wait-Until -Seconds 40 { (Gate-MailCount $y.n 'qc.approved') -ge 1 }
-    Check 'the sweep alone sees the approval and wakes the owner (even before the QC run)' ($none -eq 0 -and $sweepSaw)
-    $r0 = Gate-Merge $y; CheckExit 'approved but not run: merge refused qc-not-run' $r0 10 'qc-not-run'
-    $y = Gate-Run $y 'qw1'
-    $runSeen = Wait-Until -Seconds 40 { @(Gate-Mailbox $y.n | Where-Object { $_.event -eq 'qc.approved' -and $_.ran -eq $true }).Count -ge 1 }
-    Check 'when the QC run completes after the approval the owner is woken again (ran = true)' $runSeen
-    $r0 = Gate-Merge $y; CheckExit 'the retried merge succeeds' $r0 0
-    Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
-}
-
-# Issue 407: the sweep keeps the persisted copy of a person's approval under the item lock, taken without waiting. Here the harness holds the item
-# lock, as a verb of the item does, when a person approves: two full sweeps finish within 30 s and leave the approval (neither the copy nor the
-# owner's wake-up); once the lock is free a later sweep keeps the approval in the record and wakes the owner once.
-'qc: gate a busy item lock does not stall the sweep; a later sweep keeps the approval and wakes the owner once the lock is free (issue 407) [full]' = {
-    Ensure-QcWorker
-    $x = New-QcOffered
-    $x = Gate-Run $x 'qw1'
-    Check 'no qc.approved before the approval' ((Gate-MailCount $x.n 'qc.approved') -eq 0)
-    $lock = Lock-ItemFile $x.n
-    try {
-        Gate-Human $x
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
-        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
-        Check 'and leave the approval for a later sweep' (-not (Qc-Rec $x.n $x.pr).ContainsKey('approved') -and (Gate-MailCount $x.n 'qc.approved') -eq 0) "$((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)"
-    } finally { $lock.Dispose() }
-    Check 'once the lock is free a later sweep keeps the approval in the QC record' (Wait-Until -Seconds 40 { $r0 = Qc-Rec $x.n $x.pr; $r0.ContainsKey('approved') -and "$($r0.approved.by)" -eq 'factory-worker-testperson[bot]' -and "$($r0.approved.sha)" -eq (Get-Head $x.pr) }) "$((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)"
-    Check 'and wakes the owner' (Wait-Until -Seconds 20 { (Gate-MailCount $x.n 'qc.approved') -ge 1 })
-    Wait-Sweeps -Count 2 -Seconds 60
-    Check 'once' ((Gate-MailCount $x.n 'qc.approved') -eq 1) "$(Gate-MailCount $x.n 'qc.approved')"
-}
-
-'qc: gate the requirements can be switched off in the configuration [full]' = {
-    $c = Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable
-    $x = New-QcPr
-    Gate-Inspect $x
-    $cfg = Join-Path $script:Work 'cfg-gate.json'
-    $c.qc.requireRun = $false; $c | ConvertTo-Json -Depth 12 | Set-Content $cfg
-    $r0 = Qc-Server 'merge' @{ item = $x.n; pr = $x.pr } @{ FACTORY_CONFIG = $cfg }
-    CheckExit 'requireRun false: the missing person approval stops it, not the missing run' $r0 10 'qc-approval-missing'
-    $c.qc.requireApproval = $false; $c | ConvertTo-Json -Depth 12 | Set-Content $cfg
-    $r0 = Qc-Server 'merge' @{ item = $x.n; pr = $x.pr } @{ FACTORY_CONFIG = $cfg }
-    CheckExit 'both off: the gate is off and the label is required again, as before S4' $r0 10 'no-auto-merge-label'
-    $y = New-QcPr
-    Gate-Inspect $y
-    $c.qc.requireRun = $true; $c.qc.requireApproval = $false; $c | ConvertTo-Json -Depth 12 | Set-Content $cfg
-    $r0 = Qc-Server 'merge' @{ item = $y.n; pr = $y.pr } @{ FACTORY_CONFIG = $cfg }
-    CheckExit 'requireRun true, requireApproval false: the run is what is missing' $r0 10 'qc-not-run'
-}
-
-'qc: gate a sweep that is still writing the QC offer does not undo an approval recorded meanwhile [full]' = {
-    # the flaky check of the hosted runners, made certain: the sweep read the item's state, GitHub is slow while it posts the two offer comments,
-    # and the inspector's approval is recorded in between. The sweep must not save what it read before.
-    $x = $null
-    try {
-        Fake 'latency' @{ ms = 12000; match = '(?s)^POST /repos/[^\n]+/issues/\d+/comments\n.*qc link pr=' } | Out-Null
-        $x = New-QcPr
-        $inside = Wait-Until -Seconds 90 { (Qc-OfferComments $x.pr).Count -gt 0 -and (Qc-ItemOffer $x.n).Count -eq 0 }
-        Check 'the sweep is between its two offer comments (it read the state before the approval)' $inside
-        Gate-Inspect $x
-        $posted = Wait-Until -Seconds 90 { (Qc-ItemOffer $x.n).Count -gt 0 }
-    } finally { Fake 'latency' @{ ms = 0 } | Out-Null }
-    $key = "qc-offered|$($x.pr)|$(Get-Head $x.pr)"
-    $saved = Wait-Until -Seconds 60 { $s0 = Qc-State $x.n; $s0 -and $s0.ContainsKey('journal') -and (@($s0.journal.keys) -contains $key) }
-    Check 'the sweep finished the offer and recorded its journal line in the state' ($posted -and $saved)
-    $s0 = Qc-State $x.n
-    Check 'the approval recorded during the sweep is still in the state' ($s0.ContainsKey('approval') -and "$($s0.approval.sha)" -eq (Get-Head $x.pr)) ($s0 | ConvertTo-Json -Depth 4 -Compress)
-    $r0 = Gate-Merge $x; CheckExit 'merge is refused for the missing QC run, not for a missing approval' $r0 10 'qc-not-run'
-}
-
-
-}
-
 # Run inside the main QC suite (mergePolicy auto).
 $QcGateAutoScenarios = [ordered]@{
 
-'qc: gate under the auto policy nothing changed: the label is required and QC is not a gate [full]' = {
-    Ensure-QcWorker
-    $x = New-QcOffered
-    $r0 = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
-    Check 'no label: merge is refused as before (the PASS was parked for a person)' ($r0.exit -eq 10 -and ("$($r0.code)" -in 'no-auto-merge-label', 'no-pass-verdict')) "$($r0.exit) $($r0.code)"
-    $st = Qc-State $x.n
-    Check 'the verdict was parked for a person as before' ($st.verdict.processed -and "$($st.park.reason)" -eq 'pass-without-auto-merge') ($st.park | ConvertTo-Json -Compress)
-    $a = New-QcPr @('factory worker', 'Auto Merge')
-    $m = F 'w1' @('merge', '--item', $a.n, '--pr', $a.pr); CheckExit 'an Auto Merge item merges without QC' $m 0
-    Check 'merged (by the gateway at the verdict; the session''s merge confirms it)' ((Pv $m 'outcome') -in 'merged', 'already-merged' -and (Get-FakePr $a.pr).merged) "$(Pv $m 'outcome')"
-}
-
-# Moved from the peer-approved suite 'qc-gate' (W9.10d, #552): what these two check is the QC environment's own record and lifecycle, not the merge gate, and they run under the auto policy as well:
-# the reset carries the run's head over (ran_sha), and an Auto Merge label added to an item whose environment is live tears it down (label-changed). The rest of qc-gate is the dropped policy (v1-only in v2-claims.txt).
+# What these two check is the QC environment's own record and lifecycle, not the merge gate, and they run under the auto policy as well:
+# the reset carries the run's head over (ran_sha), and an Auto Merge label added to an item whose environment is live tears it down (label-changed).
 
 'qc: gate a reset keeps the record of the run for the same head [full]' = {
     Ensure-QcWorker

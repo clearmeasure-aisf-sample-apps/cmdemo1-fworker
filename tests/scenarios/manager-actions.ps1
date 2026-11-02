@@ -248,7 +248,6 @@ $ManagerActionScenarios['act: the plan offers a top item before a high one befor
 # profile saga-docs of run.ps1 has it), a Todo item is pulled by the intake, the owner session sg1 of the suite 'saga' is offered it, and the supervisor acts on it through the real client. What is checked is what the saga's history
 # (the dashboard's v2Items) and the item's state comment say afterwards. The last scenario keeps the plant in the database: the gateway is stopped as the platform stops it and started again, and the offer and the owner come back from SQL.
 # On v1 there is no saga (the sweep and the plant do this, and the scenarios above test that): the scenarios say so and pass.
-function Ma-V2Only { if ($script:GoldenEngine -eq 'v2') { return $true }; Check 'v2 only: on v1 the item has no saga, the scenarios above test the same actions (the plant''s flow)' $true; return $false }
 # Runs the body against the suite's gateway restarted with the intake on and, with -Snapshot, with the plant kept in the database (FACTORY_PLANT_SNAPSHOT is 0 in every suite so that the plant of one scenario never reaches the next one);
 # afterwards the owner session ends and the gateway comes back as the suite started it.
 $script:MaSagaItems = @()
@@ -312,7 +311,6 @@ function Ma-OwnerOf([int]$n) { $o = (Ma-Plant).owners; if ($o.ContainsKey("$n"))
 function Ma-SagaView($n) { $v = Saga-View $n; if ($null -eq $v) { return '(no saga)' }; return ($v | ConvertTo-Json -Compress -Depth 4) }
 
 $ManagerActionScenarios['act: saga item: unpark ends the park of a saga item, the saga resumes it (decision resumed) and the owner session is offered it again'] = {
-    if (-not (Ma-V2Only)) { return }
     Ma-OnSaga {
         $x = Ma-SagaOffer 70; if (-not $x) { return }; $n = $x.n
         [void](Ma-SagaAccept $x)
@@ -337,7 +335,6 @@ $ManagerActionScenarios['act: saga item: unpark ends the park of a saga item, th
 }
 
 $ManagerActionScenarios['act: saga item: release-owner ends the owner''s lease, the saga records the decision (owner-release-asked) and keeps its step, and the session that takes the new offer keeps its claim'] = {
-    if (-not (Ma-V2Only)) { return }
     Ma-OnSaga {
         $x = Ma-SagaOffer 80; if (-not $x) { return }; $n = $x.n
         [void](Ma-SagaAccept $x)
@@ -366,7 +363,6 @@ $ManagerActionScenarios['act: saga item: release-owner ends the owner''s lease, 
 }
 
 $ManagerActionScenarios['act: saga item: requeue puts a saga item that nobody holds back to be offered, the saga records the decision (requeued) and keeps its step'] = {
-    if (-not (Ma-V2Only)) { return }
     Ma-OnSaga {
         $x = Ma-SagaOffer 90; if (-not $x) { return }; $n = $x.n
         $sup = Start-ManagerClient 'act-sg-c'
@@ -401,7 +397,6 @@ function Ma-RestartKeepingPlant {
 }
 
 $ManagerActionScenarios['act: saga item: the plant is kept in SQL: the offer of a saga item and then its owner come back after the gateway is stopped and started, under the id the worker holds'] = {
-    if (-not (Ma-V2Only)) { return }
     Ma-OnSaga -Snapshot {
         $x = Ma-SagaOffer 100; if (-not $x) { return }; $n = $x.n
         $id = "$($x.ev.assignment)"

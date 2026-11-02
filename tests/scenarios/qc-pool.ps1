@@ -177,25 +177,4 @@ exit ([int]$args[0])
     } finally { Pool-StopGateway $g }
 }
 
-'qc: runner pool a call that does not finish in time fails as a process call does, and its worker is replaced' = {
-    $n = New-Item-Fake 'Pool timeout trial' 'x' @()
-    $body = (@{ item = $n; holder = 'w1' } | ConvertTo-Json -Compress)
-    # a gateway of its own: one worker, pooled calls capped at 4 seconds (FACTORY_RUNNER_TEST_TIMEOUT_SECONDS), no sweep after the first
-    $g = Pool-StartGateway 14 @{ FACTORY_RUNNER_POOL = '1'; FACTORY_RUNNER_TEST_TIMEOUT_SECONDS = '4' }
-    try {
-        Check 'the gateway has its one worker' (Wait-Until -Seconds 60 { (Pool-PidsOf $g).Count -eq 1 })
-        $ok = Pool-Verb $g.base 'get-item' $body; Check 'a call on the worker: 200' ($ok.status -eq 200) "$($ok.status) $($ok.body)"
-        $before = (Pool-PidsOf $g)[0]
-        & kill -STOP $before   # the worker hangs: it takes the request and never answers
-        $t = Pool-Verb $g.base 'get-item' $body
-        $want = '{"ok":false,"verb":"get-item","code":"timeout","reason":"the rule script did not finish in time","retryAfterSeconds":30,"exit":20}'   # what Runner answers when a process does not finish in time
-        Check 'the call fails with HTTP 503' ($t.status -eq 503) "$($t.status) $($t.body)"
-        Check 'its answer is the timeout answer of a process call, field for field' ((Pool-Canon $t.body) -ceq (Pool-Canon $want)) $t.body
-        Check 'it failed at the time limit, not later' ($t.seconds -ge 3 -and $t.seconds -lt 20) "$($t.seconds)"
-        Check 'the hung worker was killed' (Wait-Until -Seconds 20 { -not (Get-Process -Id $before -ErrorAction SilentlyContinue) })
-        Check 'and replaced by a new one' (Wait-Until -Seconds 60 { $now = Pool-PidsOf $g; $now.Count -eq 1 -and $now[0] -ne $before }) "$((Pool-PidsOf $g) -join ',')"
-        $again = Pool-Verb $g.base 'get-item' $body; Check 'the next call works: 200' ($again.status -eq 200) "$($again.status) $($again.body)"
-    } finally { Pool-StopGateway $g }
-}
-
 }

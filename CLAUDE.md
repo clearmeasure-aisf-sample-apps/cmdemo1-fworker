@@ -60,18 +60,18 @@ Octopus key present), so a deploy override that adds a handler is covered by the
 
 ## Test
 
-Build first (above); the suites start the built binaries. Nothing here needs a secret or the network.
+Build first (above); the suites start the built binaries. Nothing here needs a secret or the network, but the scenario suites need a SQL Server of your own
+(`FACTORY_TEST_SQL`, a connection string without a database; a local container: see "Database"): every Tier 1 process makes a database of its own on it, and a run without one exits 2.
 
 ```bash
 pwsh -NoProfile -File tests/smoke.ps1                                                  # seconds; "all passed"
+export FACTORY_TEST_SQL='Server=localhost,1433;User Id=sa;Password=...;TrustServerCertificate=True;Encrypt=False'   # the SQL Server of the scenario suites
 pwsh -NoProfile -File tests/scenarios/run.ps1 -Suite owner -Tier full -NoBuild         # one suite
 pwsh -NoProfile -File tests/scenarios/run.ps1 -Suite messaging -Tier full -NoBuild     # qc, messaging and manager split into 4 groups by themselves
 pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Tier fast -NoBuild                  # the curated subset of every suite, 4 suites at a time
 pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Tier full -NoBuild                  # everything (about 30 minutes on 4 cores)
 pwsh -NoProfile -File tests/scenarios/run.ps1 -Suite auto -Only 'substring of a scenario name' -NoBuild
 pwsh -NoProfile -File tests/scenarios/run.ps1 -ListSuites
-FACTORY_TEST_SQL='Server=localhost,1433;User Id=sa;Password=...;TrustServerCertificate=True;Encrypt=False' \
-  pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Engine v2 -Tier full -NoBuild      # the claims of tests/scenarios/v2-claims.txt on the v2 engine (a SQL Server of your own; a database per process)
 ```
 
 Rules of the runners:
@@ -87,13 +87,12 @@ Rules of the runners:
   `.github/workflows/tests.yml` (the workflow fails when one is missing). A scenario tagged ` [full]` in its name is left out of the fast tier.
   A suite's groups listen on `10000 + 1000 * slot + 100 * group` and up, and the jobs move the machine's ephemeral port range to 50000-60999 so that an
   outgoing connection cannot hold such a port: the step "Ephemeral ports above the test ports" fails when the last slot reaches 50000 (slot 40).
-- The v2 engine has a second Tier 1, the matrix jobs `Tier 1 (v2 ...)` of `tests.yml`: they run the suites and scenarios named in `tests/scenarios/v2-claims.txt` again with
-  `run-all.ps1 -Engine v2` (`run.ps1 -Engine v2 -V2Profile`; `FACTORY_ENVIRONMENT` v2ci, or the suite's own name where it sets one (tdd for copilot, promote, envscope), or unset as in v1 (tdd) for owner, messaging, cursor, cursor-deadline and runtime,
-  `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of `FACTORY_TEST_SQL`; a machine without one exits 2). A claim names its profile:
-  `saga-docs` and `saga-feature` turn the engine's intake on, so that the Todo items of the suite `saga` start sagas. The entries of the matrix name their suites after `claims:` (not `suites:`:
-  they are not shards), and `python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml --require-complete` (run by the coverage job) proves that every claim is in exactly one of them and that every suite of `run.ps1 -ListSuites` is claimed whole or declared `v1-only`; a scenario of a claimed suite that tests v1's behaviour is declared `v1-only-scenarios <suite> | <regex> | <reason>` (run.ps1 -Engine v2 neither lists nor runs it).
-  Where v2 writes differently on purpose, `tests/scenarios/golden/v2-differences.txt` says so. `Tests result` fails when one of them fails (`V2_BLOCKING` true there, since the
-  first green run of `Tests` on master), so they are part of the required `Build result`. The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`. The unit tests that need a SQL Server are `[SqlFact]`:
+- v2 is the only engine of Tier 1 (the `tier1` matrix of `tests.yml`; V3.1 of the v2-only plan removed v1's shards, `v2-claims.txt`, `V2_BLOCKING` and `-Engine`). The gateway under test
+  runs with `FACTORY_ENVIRONMENT` v2ci, or the suite's own name where it sets one (tdd for copilot, promote, envscope), or unset as in v1 (tdd) for owner, messaging, cursor, cursor-deadline and runtime,
+  `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of `FACTORY_TEST_SQL`. `run.ps1 -V2Profile` is the gateway's test profile: `saga-docs` and `saga-feature`
+  turn the engine's intake on, so that the Todo items of the suite `saga` start sagas; `run-all.ps1` runs each scenario of `saga` on the profile of its plan (`$ProfiledSuites` there, which must list every
+  scenario of the suite once: a new saga scenario needs a regular expression in it). Where the engine writes differently from the golden files on purpose, `tests/scenarios/golden/v2-differences.txt` says so.
+  The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`. The unit tests that need a SQL Server are `[SqlFact]`:
   without `FACTORY_TEST_SQL` a run reports them as skipped.
 - `run-all.ps1` rewrites `tests/scenarios/suite-times.json` (and a full run `scenario-stats.json`): commit them only when the timings
   really changed.
@@ -131,7 +130,7 @@ Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 ho
 - **Expand, then contract.** Every script is expand-only (add tables, nullable or defaulted columns, indexes): the previous gateway process still runs during the lease hand-over. A script that
   drops something ships only after no running image uses it, and needs the owner's word. `__EFMigrationsHistory` on tdd stays until then (a revert of the pull request needs it).
 - **Tests need SQL Server.** The SQL-backed tests run where `FACTORY_TEST_SQL` is set (a local container: `docker run -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=... -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest`);
-  without it they return at once. `tests/scenarios/run.ps1 -Engine v2` sets `FACTORY_DB_CREATE=1` so the gateway creates its per-process database; nothing deployed ever sets it.
+  without it they return at once. `tests/scenarios/run.ps1` sets `FACTORY_DB_CREATE=1` so the gateway creates its per-process database; nothing deployed ever sets it.
 
 ## Release
 

@@ -1,6 +1,6 @@
 # The declared differences of the v2 engine (issue #468, W2.4b): the pure functions that read tests/scenarios/golden/v2-differences.txt and apply it to the
 # golden files. Format and rules: tests/scenarios/golden/v2-differences.README.md. Dot-sourced by lib.ps1 (the Tier 1 harness) and by tests/smoke.ps1; it
-# defines functions only and has no side effect. Nothing here runs for the v1 engine: lib.ps1 reads the golden directory as it is unless -Engine v2.
+# defines functions only and has no side effect. lib.ps1 reads them for every suite.
 #
 # The comparison itself is the one of lib.ps1 (Compare-WritesFiles), unchanged: a v2 run compares its record with an *effective* golden directory, a copy of
 # tests/scenarios/golden in which each declared block has been applied to the golden file it names. So a caused ('= ') line v2 writes that no block declares

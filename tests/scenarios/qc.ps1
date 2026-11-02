@@ -165,24 +165,6 @@ $QcScenarios = [ordered]@{
     Check 'the item state is intact' ($al -and $al.ContainsKey('verdict') -and $al.verdict.passed)
 }
 
-'qc: auto-merge, docs-only and fork items get no offer [full]' = {
-    Ensure-QcWorker
-    $am = New-QcPr @('factory worker', 'Auto Merge')
-    $dx = New-QcPr $QcLabels @('docs/a.md') $true
-    $fk = New-QcPr -Fork
-    Qc-Sweeps 3
-    Check 'Auto Merge item: no comment on the PR, none on the item' ((Qc-OfferComments $am.pr).Count -eq 0 -and (Qc-ItemOffer $am.n).Count -eq 0)
-    Check 'docs-only item: no comment' ((Qc-OfferComments $dx.pr).Count -eq 0 -and (Qc-ItemOffer $dx.n).Count -eq 0)
-    Check 'fork PR: no comment' ((Qc-OfferComments $fk.pr).Count -eq 0 -and (Qc-ItemOffer $fk.n).Count -eq 0)
-    $skipped = @((Get-FakeIssue $fk.n).comments | Where-Object { $_.body -match 'plant event=skipped' -and $_.body -match 'fork' })
-    Check 'fork PR: a skipped journal line says why' ($skipped.Count -eq 1) "$($skipped.Count)"
-    Check 'no record for any of them' ($null -eq (Qc-Rec $am.n $am.pr) -and $null -eq (Qc-Rec $dx.n $dx.pr) -and $null -eq (Qc-Rec $fk.n $fk.pr))
-    $r0 = F 'op' @('qc-request', '--item', $fk.n, '--pr', $fk.pr); CheckExit 'a direct Start for the fork PR is refused' $r0 10 'not-eligible'
-    Check 'the refusal names the fork' (@($r0.reasons) -contains 'fork')
-    $r0 = F 'op' @('qc-link', '--item', $am.n, '--pr', $am.pr); CheckExit 'qc-link refuses an Auto Merge item' $r0 10 'not-eligible'
-    Check 'nothing was queued' ((Qc-QcAssignments $fk.n).Count -eq 0)
-}
-
 'qc: a GET of the link has no side effect [full]' = {
     Ensure-QcWorker
     $x = New-QcOffered

@@ -8,7 +8,7 @@ sealed class DatabaseOptions
 {
     public const string EnvironmentVariable = "FACTORY_DB_CONNECTION";
 
-    /// <summary>FACTORY_DB_CREATE=1 lets the gateway create the database when it is missing. Only tests/scenarios/run.ps1 -Engine v2 sets it; it is never set in config or overrides:
+    /// <summary>FACTORY_DB_CREATE=1 lets the gateway create the database when it is missing. Only tests/scenarios/run.ps1 sets it; it is never set in config or overrides:
     /// the identity of a deployed gateway cannot CREATE DATABASE (bicep creates the database).</summary>
     public const string CreateEnvironmentVariable = "FACTORY_DB_CREATE";
 

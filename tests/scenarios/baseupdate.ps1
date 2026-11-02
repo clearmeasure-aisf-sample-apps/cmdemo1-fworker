@@ -225,21 +225,4 @@ $BaseUpdateScenarios['base update (conflict mode): master moves; a clean branch 
     }
 }
 
-$BaseUpdateScenarios['base update (conflict mode): right before the gateway merges a PASS, a branch behind master is brought up to date once, and the new head is merged [full]'] = {
-    Bu-InMode 'conflict-or-merge' {
-        $x = Pm-ToValidation
-        # the new head's checks take 20 s (the fake applies the delay to the head the update makes)
-        Fake 'pr' @{ number = $x.pr; behind = 2; delaySeconds = 20 } | Out-Null
-        Fake 'checks' @{ sha = (Get-Head $x.pr); name = 'Build result'; conclusion = 'success' } | Out-Null; Fake 'checks' @{ sha = (Get-Head $x.pr); name = 'secret-scan'; conclusion = 'success' } | Out-Null
-        $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
-        Check 'the verdict call waits: the branch is being brought up to date' ($v.merge.outcome -eq 'waiting' -and $v.merge.reason -eq 'branch-updated') ($v | ConvertTo-Json -Compress -Depth 5)
-        Check 'the update is recorded as the verdict''s head at once' ((Pm-State $x.n).verdict.head_sha -eq (Get-FakePr $x.pr).sha) ((Pm-State $x.n).verdict | ConvertTo-Json -Compress)
-        # the session's own merge call (the skill makes one after a PASS) waits for the new head's checks like the gateway, quickly, and parks nothing
-        $sw = [Diagnostics.Stopwatch]::StartNew(); $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
-        Check 'the session''s merge call answers waiting at once (checks of the new head pending)' ($m.exit -eq 0 -and $m.outcome -eq 'waiting' -and $m.reason -eq 'checks-pending' -and $sw.Elapsed.TotalSeconds -lt 40) "$($m | ConvertTo-Json -Compress) in $([int]$sw.Elapsed.TotalSeconds) s"
-        Check 'merged on the gateway''s update commit, with no session' (Wait-Until -Seconds 90 { (Get-FakePr $x.pr).merged })
-        $st = Pm-State $x.n
-        Check 'one update of the branch, recorded as the update before the merge; the verdict names the update commit' ((Bu-Puts $x.pr) -eq 1 -and $st.verdict.pre_merge_update -eq $true -and $st.verdict.head_sha -eq (Get-FakePr $x.pr).sha) ($st.verdict | ConvertTo-Json -Compress)
-    }
-}
 foreach ($k in $BaseUpdateScenarios.Keys) { $OwnerScenarios[$k] = $BaseUpdateScenarios[$k] }

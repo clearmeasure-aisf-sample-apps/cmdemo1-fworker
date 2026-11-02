@@ -234,7 +234,7 @@ $cyOpen = Get-ItemCycle 6 @{ state = @{ item = 6; flow = @(@{ c = 'Development';
 Check 'flow metrics: an item with no merge time is not measured (no journal either)' ($null -eq $cyOpen)
 $cyOld = Get-ItemCycle 7 @{ state = @{ item = 7; merge = @{ merged_at = '2026-01-01T00:20:00Z' } }; comments = @() } 'bot'
 Check 'flow metrics: a state without flow has an empty flow and the old fields' (@($cyOld.flow).Count -eq 0 -and $cyOld.times.merged -and $cyOld.columns -is [hashtable])
-# The declared differences of v2 (issue #468): tests/scenarios/v2-differences.ps1, the pure functions the Tier 1 harness (lib.ps1) uses for -Engine v2
+# The declared differences of v2 (issue #468): tests/scenarios/v2-differences.ps1, the pure functions the Tier 1 harness (lib.ps1) uses for every suite
 'v2 declared differences'
 . (Join-Path $root 'tests/scenarios/v2-differences.ps1')
 $vd = Join-Path ([IO.Path]::GetTempPath()) "v2diff-smoke-$([guid]::NewGuid().ToString('N').Substring(0, 8))"

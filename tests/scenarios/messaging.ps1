@@ -146,7 +146,7 @@ function Msg-StartGateway([hashtable]$Env, [int]$ReadySeconds = 40) {
     finally { foreach ($k in $all.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
     $script:Procs += $p
     [void](Wait-Until -Seconds $ReadySeconds { try { [bool](Invoke-RestMethod "http://127.0.0.1:$port/ready" -TimeoutSec 2) } catch { $false } })
-    # -Engine v2 (the process has FACTORY_DB_CONNECTION, so the second gateway does too): the first /api/v1/status of a process reads the database cold (a connection, the model, the first queries) while the Wolverine
+    # (the process has FACTORY_DB_CONNECTION, so the second gateway does too): the first /api/v1/status of a process reads the database cold (a connection, the model, the first queries) while the Wolverine
     # host starts beside it, and on a loaded runner that took more than the 5 s the helpers (Msg-Api) wait for an answer ("op: with operator.enabled false ...: The request was canceled due to the configured
     # HttpClient.Timeout of 5 seconds elapsing", three runs of the job "Tier 1 (v2 small)"). The call is made here with a long wait; its answer is not looked at.
     if ($env:FACTORY_DB_CONNECTION) { try { [void](Invoke-WebRequest "http://127.0.0.1:$port/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck -TimeoutSec 60) } catch { } }
