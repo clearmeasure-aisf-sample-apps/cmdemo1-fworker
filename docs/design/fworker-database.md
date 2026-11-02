@@ -218,7 +218,7 @@ An EF model change follows the same steps: write `0NN_<Change>.sql` by hand, the
 ## 11. Risks
 
 - `/ready` waits for the schema where a database is configured **and v2 acts** (W9.10o; before it, also in shadow). Where v2 acts a database outage during a start keeps `/ready` at 503
-  with `waitingFor: schema`: that calls for `FACTORY_V2_OFF` or a database fix, not for a revert of an unrelated pull request. A `FACTORY_DB_CONNECTION` that is set and is not a
+  with `waitingFor: schema`: that calls for a database fix (there is no kill switch), not for a revert of an unrelated pull request. A `FACTORY_DB_CONNECTION` that is set and is not a
   connection string is treated as not configured (`/api/v1/status` `database.malformed`).
 - The first tdd start depends on the guards matching what EF and Weasel built there; nobody has read tdd's catalog for this design. The rehearsal is in CI. If tdd differs
   anyway, the check reports it in `/api/v1/status` `schema.differences` and `/ready` stays 503; roll back by reverting the pull request.

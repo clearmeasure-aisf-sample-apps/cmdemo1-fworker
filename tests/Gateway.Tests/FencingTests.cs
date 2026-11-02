@@ -103,6 +103,65 @@ public sealed class FencingTests
         Assert.Equal(0, r.FencedInFlight);
     }
 
+    // V3.2: the rule scripts carry no lease, so a standby that retakes a lost lock within seconds must not find one still writing: the hand-over ends them before anything else of it
+    sealed class SlowStore : Fworker.Workflows.PlantState.IPlantStateStore
+    {
+        public Func<Task>? BeforeSave; public bool Saved;
+        public Task<bool> Save(System.Text.Json.Nodes.JsonObject snapshot, long epoch, string holder, CancellationToken ct = default) => SaveAsync();
+        async Task<bool> SaveAsync() { if (BeforeSave != null) await BeforeSave(); Saved = true; return true; }
+        public Task<Fworker.Workflows.PlantState.PlantStateRead?> Load(CancellationToken ct = default) => Task.FromResult<Fworker.Workflows.PlantState.PlantStateRead?>(null);
+    }
+
+    sealed class NoRevocations : IRevocationService
+    {
+        public Task Loaded => Task.CompletedTask; public bool IsLoaded => true; public int FailedAttempts => 0; public DateTime Since => DateTime.UtcNow; public bool Off => true; public string SkipReason => "";
+        public System.Text.Json.Nodes.JsonObject Status() => new();
+        public Task<(bool Ok, int Generation, bool Closed)> RevokeAsync(string name, string by) => Task.FromResult((false, 0, false));
+    }
+
+    sealed class FakeLifetime : Microsoft.Extensions.Hosting.IHostApplicationLifetime
+    {
+        public CancellationToken ApplicationStarted => CancellationToken.None; public CancellationToken ApplicationStopping => CancellationToken.None; public CancellationToken ApplicationStopped => CancellationToken.None;
+        public void StopApplication() { }
+    }
+
+    [Fact]
+    public async Task OnSuperseded_EndsTheRunningFencedScripts_BeforeTheFirstWriteOfThePlant()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = SlowPwsh();
+        var runner = NewRunner(null);
+        var call = runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(120));
+        var sw = Stopwatch.StartNew();
+        while (runner.FencedInFlight == 0 && sw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(20);
+        Assert.Equal(1, runner.FencedInFlight);
+        await Task.Delay(300);   // the process has started
+        var leader = new GatewayLeader(new LeaderSettings { On = true });
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
+        var scriptStillRunningAtTheFirstWrite = true;
+        var store = new SlowStore { BeforeSave = async () => { await Task.Delay(500); scriptStillRunningAtTheFirstWrite = !call.IsCompleted; } };
+        var snapshots = new SnapshotCoordinator(true, leader, store, plant, new SweepGap());
+        await snapshots.RestoreAsync("start");
+        var svc = new LeadershipService(leader, snapshots, new NoRevocations(), plant, new FakeLifetime(), runner);
+        await leader.OnSuperseded!(new System.Text.Json.Nodes.JsonObject { ["holder"] = "the-newer" });
+        Assert.True(store.Saved);
+        Assert.False(scriptStillRunningAtTheFirstWrite);   // the script was ended before the plant was written, not after
+        await call.WaitAsync(TimeSpan.FromSeconds(10));
+        _ = svc;
+    }
+
+    [Fact]
+    public async Task AFencedVerbOnTheScriptPath_IsRefusedOnceTheLockIsLost_AndNoScriptStarts()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = SlowPwsh();
+        var r = NewRunner(null);
+        r.MayAct = () => false;
+        var (code, output) = await r.RunScriptAsync("sync-board", "{}", TimeSpan.FromSeconds(30));
+        Assert.Equal(20, code); Assert.Contains("lease-lost", output);
+        Assert.Equal(0, r.FencedInFlight);
+    }
+
     [Fact]
     public async Task Drain_AScriptThatFinishesInTime_IsNotEnded()
     {
@@ -187,7 +246,7 @@ public sealed class FencingTests
     }
 
     [Fact]
-    public async Task WhereTheEngineDoesNotAct_ThereAreNoRoutes_AndNothingIsAskedOfTheLeaseHere()
+    public async Task WhereTheEngineDoesNotAct_ThereAreNoRoutes_AndTheScriptPathAsksTheLockAndRefusesAFencedVerbWithoutIt()
     {
         var asked = 0;
         var r = NewRunner(() => (7, "gw"));
@@ -195,9 +254,9 @@ public sealed class FencingTests
         Assert.Null(r.Routes);
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        env.Apply();   // the ordinary stub answers {"ok":true}: the script path is v1's, fenced by the lease in its input
-        Assert.Equal(0, (await r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30))).Code);
-        Assert.Equal(0, asked);
+        env.Apply();
+        Assert.Equal(20, (await r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30))).Code);   // the script path asks the lock now (the scripts carry no lease): a fenced verb is refused without it
+        Assert.Equal(1, asked);
     }
 
     [Fact]

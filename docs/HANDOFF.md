@@ -842,9 +842,8 @@ The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover
 for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
 Copilot on-demand manager of tdd, which needs the Copilot runtime.
 
-- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository. Under it v1's intake
-  stays off (the sweep sends no `intake` block, section 6c), so v1 takes no item: the gateway then only settles and promotes what already exists.
-- **Rollback.** `FACTORY_V2_OFF=1` as above, or a revert of the cutover pull request (about 4 minutes to tdd).
+- **No kill switch.** `FACTORY_V2_OFF` is not read any more (the owner's decision D1 of 2026-11-01); its entry in cmdemo1-system `system.json` is deleted by the cmdemo1 session after the deploy of the pull request that removed it (#631). A revision that still carries it behaves as if it were not there.
+- **Rollback.** A redeploy of the previous fworker release (about 4 minutes to tdd), or a revert of the pull request in question.
 - **Before the deploy.** Confirm that no item is owned by a running Copilot task or Cursor agent (those runtimes are switched off by this change). Deploy with the
   plant quiet: no running sessions and no PASS waiting to merge.
 - **After the deploy.** Check the start-up line `runtime: octopus, enabled`, `/ready` 200 and `/_build` as in the release rule of CLAUDE.md.

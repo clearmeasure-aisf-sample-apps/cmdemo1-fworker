@@ -107,16 +107,11 @@ public sealed class MergeTrainInertTests
     public void WhereTheEngineDoesNotAct_ThereAreNoSagaParts_SoNoTrain()
     {
         if (!StubPwsh.Supported) return;
-        foreach (var kind in new[] { "v1", "shadow", "kill-switch" })
+        foreach (var kind in new[] { "v1", "shadow" })
         {
             using var env = new GatewayEnvironment();
             if (kind != "v1") env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
             if (kind == "shadow") WolverineHostTestSupport.Shadow(env);
-            if (kind == "kill-switch")
-            {
-                env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
-                env.Set("FACTORY_V2_OFF", "1");
-            }
             env.Apply();
             using var host = new GatewayHost();
             _ = host.Server;

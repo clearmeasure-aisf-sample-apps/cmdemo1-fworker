@@ -111,7 +111,14 @@ sealed class Runner(string entry)
             return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "github-budget", reason = $"the gateway's GitHub budget ({low.Resource}) is below its reserve; this call waits for the reset", retryAfterSeconds = Math.Max(1, (int)(low.ResetAt - DateTime.UtcNow).TotalSeconds), resetAt = low.ResetAt.ToString("o"), exit = 20 }));
         }
         var fenced = FencedVerbs.Contains(verb);
-        if (fenced) Interlocked.Increment(ref fencedInFlight);
+        if (fenced) Interlocked.Increment(ref fencedInFlight);   // (counted first, then the check: a drain that ran between the two finds the call and waits for or ends it)
+        if (fenced && MayAct?.Invoke() == false)
+        {
+            Interlocked.Decrement(ref fencedInFlight);
+            var lost = (20, JsonSerializer.Serialize(new { ok = false, verb, code = "lease-lost", reason = $"this gateway no longer holds the leader lock; the step was not performed: {verb}", exit = 20 }));
+            NoteFenced(verb, lost.Item1, lost.Item2);
+            return lost;
+        }
         int code; string output;
         try { (code, output) = await RunProcessAsync(verb, InjectLease(verb, stdin), timeout); }
         finally { if (fenced) Interlocked.Decrement(ref fencedInFlight); }

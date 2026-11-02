@@ -87,8 +87,12 @@ function Assert-NoServerErrors([string]$Suite) {
     # every gateway log of the suite, including those of a restarted gateway (gateway-xxxx.out, gateway-restarted.err)
     foreach ($f in @(Get-ChildItem -Path $script:Work -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'gateway*.out' -or $_.Name -like 'gateway*.err' })) {
         $lines = @(Select-String -Path $f.FullName -Pattern 'sweepError|internal error|"sweep":"error"|"sweep":"failed"' | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) })
-        # A gateway that stood down for a newer process ends the rule scripts it still runs before it lets the lock go (the scripts carry no lease any more, LeadershipService): a sweep it killed (exit 137) is that, not an error.
-        if (@(Select-String -Path $f.FullName -Pattern '"gateway":"fenced-drain".*"killed":[1-9]').Count -gt 0) { $lines = @($lines | Where-Object { $_ -notmatch '"sweep":"failed".*"exit":137' }) }
+        # A gateway that stood down ends the rule scripts it still runs before it lets the lock go (LeadershipService; they carry no lease): its "fenced-drain" line says how many it killed, and at most that many sweeps
+        # that exited 137 are that and not errors (the killed sweep's line and the drain's line race, so their order is not asked).
+        $killedLeft = 0
+        foreach ($l in @(Select-String -Path $f.FullName -Pattern '"gateway":"fenced-drain".*"killed":(\d+)')) { $killedLeft += [int]$l.Matches[0].Groups[1].Value }
+        $kept = @(); foreach ($l in $lines) { if ($killedLeft -gt 0 -and $l -match '"sweep":"failed".*"exit":137') { $killedLeft-- } else { $kept += $l } }
+        $lines = $kept
         $bad += $lines
     }
     $script:Current = "$Suite invariants"

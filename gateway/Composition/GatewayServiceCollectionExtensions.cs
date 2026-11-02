@@ -69,9 +69,9 @@ static class GatewayServiceCollectionExtensions
         // listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off. It needs a database and a home repository; a process without them keeps no plant (the sweep rebuilds it from the board).
         var keepsPlant = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0"
             && c.WolverineHost && c.Database.ConnectionString != null && c.Instance.Home != null;
-        // The leader lease (Leader.cs, issue 94): only the process that holds the SQL application lock acts. Owner mode with a GitHub identity and a database, not the suites' second gateways;
+        // The leader lease (Leader.cs, issue 94): only the process that holds the SQL application lock acts. Owner mode with a GitHub identity and a database (any process with a database takes the SQL lease, whatever engine it runs), not the suites' second gateways;
         // FACTORY_LEADER_LEASE=0 switches it off (every process acts). A process with no database has no lease, and so none to arbitrate: every such process acts (uat and prod are inert on the board).
-        var leaderOn = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && c.Revocation.GitHubConfigured && c.WolverineHost;
+        var leaderOn = gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && c.Revocation.GitHubConfigured && c.Database.Configured;
         var leaderSettings = LeaderSettings.Load(gw.ScriptsDir, leaderOn);
         services.AddSingleton(leaderSettings);
         var leader = new GatewayLeader(leaderSettings);
@@ -102,6 +102,7 @@ static class GatewayServiceCollectionExtensions
             var snapshots = new SnapshotCoordinator(true, leader, new Fworker.Workflows.PlantState.SqlPlantStateStore(() => WorkItemWiring.Open(cs)), plant, sweepGap);
             var correction = new PlantRestoreCorrection(plant, new Fworker.Workflows.WorkItem.SqlWorkItemStore(() => WorkItemWiring.Open(cs)), home, (item, ct) => PlantRestoreCorrection.HolderOf(sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), item, ct));
             snapshots.Correct = () => correction.Run();
+            snapshots.LastFullSweep = () => sp.GetRequiredService<EventHub>().LastSweep;
             snapshots.SchemaReady = ct => SnapshotCoordinator.WaitForTablesAsync(sp.GetRequiredService<FactorySchemaStatus>(), leader, ct);
             return snapshots;
         });
@@ -281,9 +282,6 @@ static class GatewayServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
-        // W9.9b: a process that the kill switch turned back to v1 in an environment the configuration names for v2 leaves the marker the engine's next adoption reads (nothing is made or written in any other case)
-        if (c.Engine.KillSwitch && c.Engine.Configured == EngineMode.V2 && c.Database.Configured && c.Instance.Home != null)
-            services.AddHostedService(sp => new KillSwitchMarkerService(new Fworker.Workflows.Adoption.SqlEngineMarkers(() => ItemMergedWiring.Open(c.Database.ConnectionString!)), Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node));
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
         // W4.2: the Octopus watcher, read only; v1 promotes with the rule scripts. W5.2: it also runs in the shadow run of the delivery train (slower, a smaller call budget)
         var shadowTrain = c.Engine.ShadowRuns && c.WolverineHost && c.Instance.Home != null;

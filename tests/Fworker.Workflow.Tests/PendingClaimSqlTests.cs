@@ -186,7 +186,7 @@ public class PendingClaimSqlTests
         Assert.True(second.Retry); Assert.Equal(FailureKind.Transient, second.Result.Failure);
         gate.Release.SetResult();
         Assert.IsType<RuntimeSessionStarted>((await first.WaitAsync(TimeSpan.FromSeconds(10))).Message);
-        Assert.IsType<RuntimeSessionStarted>((await newNode.Process(Start())).Message);   // and then it is answered from the ledger
+        Assert.IsType<RuntimeSessionStarted>((await newNode.Process(Start()).WaitAsync(TimeSpan.FromSeconds(10))).Message);   // and then it is answered from the ledger
         Assert.Equal(1, port.Calls);
     }
 

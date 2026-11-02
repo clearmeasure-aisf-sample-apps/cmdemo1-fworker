@@ -29,6 +29,29 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     // The stored plant could not be read at the start: this process runs on an empty plant (the sweep rebuilds it from the board) and writes none, so that the plant of the term before survives for the next restore
     // instead of being overwritten with an empty one.
     volatile bool loadFailed;
+    DateTime loadFailedAt; bool skipLogged;
+    /// <summary>When the first full sweep finished (EventHub.LastSweep): the board has then rebuilt the plant that could not be read, so a term whose first read failed may write it again.</summary>
+    public Func<DateTime?>? LastFullSweep { get; set; }
+    // Whether the plant may be written: not while the first read of the term failed. After the first full sweep (the board has rebuilt what it holds) the stored plant is read once more: if it reads now, it is restored
+    // into the rebuilt one (Plant.Restore keeps what is already there) and writes are allowed; if it still does not read, the block stays, so an empty or partial plant never replaces the stored one.
+    async Task<bool> WritesBlockedAsync()
+    {
+        if (!loadFailed) return false;
+        if (LastFullSweep?.Invoke() is { } t && t > loadFailedAt && store != null)
+        {
+            try
+            {
+                var stored = await store.Load();
+                if (stored != null) plant.Restore(stored.Snapshot, 60 * 24);
+                loadFailed = false; skipLogged = false;
+                Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["writes"] = "allowed-after-first-sweep", ["merged"] = stored != null }.ToJsonString());
+                return false;
+            }
+            catch (Exception) { /* still unreadable: stay blocked */ }
+        }
+        if (!skipLogged) { skipLogged = true; Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["skipped"] = "load-failed" }.ToJsonString()); }
+        return true;
+    }
 
     /// <param name="on">The plant is kept (owner mode, not a suite's second gateway, FACTORY_PLANT_SNAPSHOT not 0); it also needs a store: without a database there is none, and the plant starts empty and is rebuilt from the board.</param>
     public SnapshotCoordinator(bool on, GatewayLeader leader, IPlantStateStore? store, Plant plant, SweepGap sweepGap)
@@ -87,7 +110,8 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     {
         try
         {
-            if (!restored.Task.IsCompleted || store == null || loadFailed) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{(loadFailed ? "load-failed" : "not-restored-yet")}\"}}"); return; }
+            if (!restored.Task.IsCompleted || store == null) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"not-restored-yet\"}}"); return; }
+            if (WritesBlockedAsync().GetAwaiter().GetResult()) return;
             var snap = plant.Snapshot();
             using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var saved = store.Save(snap, leader.ClaimEpoch, leader.Holder, limit.Token).GetAwaiter().GetResult();
@@ -101,7 +125,7 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     public async Task<bool> SaveAsync(bool final, TimeSpan timeout)
     {
         if (store == null) return false;
-        if (loadFailed) { Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["skipped"] = "load-failed", ["final"] = final }.ToJsonString()); return false; }
+        if (await WritesBlockedAsync()) return false;
         // one write at a time, and none that waits longer than it may take: at a stop the final write must not queue behind a periodic one
         if (!await write.WaitAsync(timeout)) return false;
         try
@@ -160,7 +184,7 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
             }
             if (failed != null)
             {
-                loadFailed = true;
+                loadFailed = true; loadFailedAt = DateTime.UtcNow; skipLogged = false;
                 if (via == "reacquired") plant.ClearForRestore();
                 Console.Error.WriteLine($"plant state load: {failed.GetType().Name}");
                 lock (state) state["restore"] = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = 0, ["owners"] = 0, ["skipped"] = "load-failed", ["how"] = "sql", ["via"] = via };
@@ -175,7 +199,7 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
                 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-restore", ["how"] = "sql", ["skipped"] = "none", ["epoch"] = leader.Epoch }.ToJsonString());
                 return;
             }
-            loadFailed = false;
+            loadFailed = false; skipLogged = false;
             if (via == "reacquired") plant.ClearForRestore();   // the plant of this process's earlier term is older than the stored one: the stored one replaces it, it is not merged into it
             var (na, no, skipped) = plant.Restore(stored.Snapshot, 60 * 24);
             Interlocked.Exchange(ref heldEpoch, skipped == "" ? stored.Epoch : -1);

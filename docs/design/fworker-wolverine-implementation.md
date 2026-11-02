@@ -2058,11 +2058,13 @@ The GitHub-ref lease (`refs/factory/<instance>/gateway-leader`), the ref snapsho
   that lost the lock while it restored (a newer one asked, or the connection dropped) stands by without acting, and the standby loop takes the lock again when it is free and no newer process asked for it.
 - *The hand-over.* Holder: node leaves, final plant to the database, streams end, the lock goes (in that order). The newcomer takes the lock with the next epoch, so it reads the final plant; a dead holder's last periodic write is
   what it reads. The store refuses a writer of an older epoch than the stored one (`PlantStateStore.Save`).
-- *A plant that cannot be read at the start* (three tries) starts empty and writes none for the whole term, so the plant of the term before is never overwritten with an empty one; the sweep rebuilds from the board.
+- *A plant that cannot be read at the start* (three tries) starts empty and writes none until the term's first full sweep, so the plant of the term before is never overwritten with an empty one; the sweep rebuilds from the board.
 - *The gap* handed to the first full sweep is the time the stored plant was written (`restore.gapSince`).
-- *Claim-epoch guard* (item 5 of #578). `SqlIdempotencyLedger.Claim` takes over at once a claim of an older term (its process no longer holds the lock) and refuses any claim of a process whose own term is older than the one on
-  `factory.Leadership` (it lost the lock and has not noticed yet): the SQL lock is the only fence, and the ledger honours it.
-- *Without a database* (uat, prod today; a suite's second gateway; `FACTORY_LEADER_LEASE=0`) there is no lease: the process acts at once and keeps no plant.
+- *Claim-epoch guard* (item 5 of #578). `SqlIdempotencyLedger.Claim` refuses any claim of a process whose own term is older than the one on `factory.Leadership` (it lost the lock and has not noticed yet): the SQL lock is the
+  only fence, and the ledger honours it. A live claim of an older term is still waited for until it runs out, not taken over: its handling may still be inside the call while the node leaves (the overlap of a release).
+- *Without a database* (uat, prod today; a suite's second gateway; `FACTORY_LEADER_LEASE=0`) there is no lease: the process acts at once and keeps no plant. Any process with a database takes the lease, whatever engine it runs; `FACTORY_V2_OFF` is no longer read (D1).
+- *A holder that hangs* but keeps its connection holds the lock until a liveness probe of the platform ends the process; a holder that dies or loses its network frees it.
+- *A plant that could not be read at the start* is written again after the term's first full sweep (the board has rebuilt it), not before.
 - *The status.* `leader`: `enabled`, `role`, `holder`, `epoch` (the SQL term), `revision`, `replica`, `acquiredAt`, `acquisitions`, `supersededAt`, `supersededBy`, and `sql` (`held`, `epoch`, `acquisitions`, `lost`, `yielded`, `failures`,
   `lastFailure`, `lostAt`, `previousHolder`, `checkSeconds`). Removed with the ref: `predecessor`, `renewedAt`, `until`, `renewals`, `checks`, `failures` (of the ref), `leaseSeconds`, `renewSeconds`, `checkSeconds`, `handoverSeconds`,
   `sql.fencesActing`. `plantSnapshot`: `enabled`, `leader`, `restore` (`how` is always `sql`; `predecessorEpoch` is gone), `saves`, `saveFailures`, `lastSave`, `heldEpoch`; `maxAgeMinutes` is gone. The release check

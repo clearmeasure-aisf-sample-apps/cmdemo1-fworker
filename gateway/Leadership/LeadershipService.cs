@@ -35,18 +35,18 @@ sealed class LeadershipService : IHostedService
         // rule scripts are awaited for at most 45 s and ended
         leader.OnSuperseded = async cur =>
         {
-            // W9.10a: the Wolverine node leaves before anything else of the hand-over: it drains and releases its rows while this process still holds the plant,
+            // W9.10a: the Wolverine node leaves right after the scripts end (below): it drains and releases its rows while this process still holds the plant,
             // so the successor's node (which clears the node table and releases every row of "node 1" when it starts) finds nothing of a running node
+            // the rule scripts that act on the board end FIRST: they carry no lease, and on a lost lock the server may have freed it already, so a standby could retake it within seconds while a sync-board still writes
+            var (waitedMs, killed) = await runner.DrainFencedAsync(TimeSpan.Zero);
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced-drain", ["epoch"] = leader.Epoch, ["waitedMs"] = waitedMs, ["killed"] = killed }.ToJsonString());
             await leader.RunBeforeHandOverAsync("superseded");
             // the final snapshot and the release of the lock come NEXT: the successor waits for them, and a SIGTERM during a drain would skip them
             var saved = snapshots.On && snapshots.Restored.IsCompleted && await snapshots.SaveAsync(true, TimeSpan.FromSeconds(30));
             // a write that failed (the database hiccuped) is tried once more before the lock goes: the successor restores what is there when it takes the lock
             if (!saved && snapshots.On && snapshots.Restored.IsCompleted) saved = await snapshots.SaveAsync(true, TimeSpan.FromSeconds(20));
-            // the rule scripts that act on the board are ended now, before the lock goes: they carry no lease any more, so a script left running would write beside the successor
-            var (waitedMs, killed) = await runner.DrainFencedAsync(TimeSpan.Zero);
             var n = plant.HandOver("a newer gateway process took over the plant; connect again");
             Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "handed-over", ["epoch"] = leader.Epoch, ["finalSnapshot"] = saved, ["streamsEnded"] = n, ["to"] = cur?["holder"]?.DeepClone() }.ToJsonString());
-            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced-drain", ["epoch"] = leader.Epoch, ["waitedMs"] = waitedMs, ["killed"] = killed }.ToJsonString());
         };
         // a standby that takes the lock again restores from the database and writes one of its own epoch at once
         leader.OnReacquired = async () => { await snapshots.RestoreAsync("reacquired"); snapshots.ResetCadence(); };

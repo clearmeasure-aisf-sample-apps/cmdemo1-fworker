@@ -92,7 +92,6 @@ public sealed class CutoverSafetyTests
     }
 
     [Theory]
-    [InlineData("tdd", true, "kill switch")]
     [InlineData("uat", false, "uat: the image has intake.enabled true and v1 acts")]
     [InlineData("prod", false, "prod: the same")]
     public async Task WhereTheEngineDoesNotAct_V1TakesNoTodoItem(string environment, bool killSwitch, string why)
@@ -252,21 +251,6 @@ public sealed class CutoverSafetyTests
         var log = File.Exists(env.StubLog + ".in") ? File.ReadAllText(env.StubLog + ".in") : "";
         Assert.DoesNotContain("qc-report", log);          // (the stub rule script was never asked)
         Assert.DoesNotContain("qc-", log);
-    }
-
-    [Fact]
-    public async Task V2WithoutADatabase_AndTheKillSwitch_IsReady_AndV1Sweeps()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        Cutover(env, database: false, killSwitch: true);
-        env.Apply(); WriteAnswer(env);
-        using var host = new GatewayHost();
-        _ = host.Server;
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromSeconds(30) && (await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status != 200) await Task.Delay(100);
-        Assert.Equal(200, (await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status);
-        Assert.NotEmpty(await WaitForSweeps(env, 40));
     }
 
     // ---- 3. no sweep before the term's adoption ---------------------------------------------------------------------------------------------------

@@ -707,12 +707,12 @@ jobs:
           retention-days: 14
 
   # The image starts without a database (issue 459, the kill-switch case of W2.0; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
-  # image job is a sibling of this workflow's caller, not an input of it) and run three times with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
+  # image job is a sibling of this workflow's caller, not an input of it) and run twice with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
   # placeholder unset, so it does not wait for revocations) and with the secrets it requires at start and owner mode (the deployed settings need it; the secrets are made at run time):
   #  1. as uat (FACTORY_ENVIRONMENT=uat, where uat and prod run v1 with no database): /ready answers 200 within two minutes;
   #  2. as tdd with v2 configured (engine.v2Environments names tdd: the file of the image with that one setting made, so that the run means the same before and after the cutover reached the overrides) and no database:
   #     the container stays up, /health answers 200 and /ready answers 503 {"waitingFor":"database"} for at least 30 seconds: v2 is inert, it does not crash and v1 does not take its place (EngineOptions.NoDatabase);
-  #  3. as tdd with v2 configured, no database and the kill switch FACTORY_V2_OFF=1: /ready answers 200 (v1 runs).
+  # (There is no kill switch any more, D1 of 2026-11-01: FACTORY_V2_OFF is not read; the way back is a redeploy of the previous release.)
   # Any other answer fails the job with the container's log.
   image-start:
     name: Image starts without a database
@@ -786,13 +786,9 @@ jobs:
           done
           docker rm --force fworker-start-v2 >/dev/null
 
-          echo "== 3. tdd, v2 configured, no database, kill switch"
-          start fworker-start-off -e FACTORY_ENVIRONMENT=tdd -e FACTORY_V2_OFF=1 -v "$RUNNER_TEMP/instance.v2.json:/app/config/instance.v2.json:ro" -e FACTORY_CONFIG=/app/config/instance.v2.json
-          ready_200 fworker-start-off
-
       - name: Stop the containers
         if: always()
-        run: docker rm --force fworker-start-uat fworker-start-v2 fworker-start-off fworker-config || true
+        run: docker rm --force fworker-start-uat fworker-start-v2 fworker-config || true
 
   # Every scenario of every suite runs in exactly one shard: the scenarios each matrix entry lists (run.ps1 -ListScenarios -Suite s, with
   # -Groups n -Group g for a shard, every group of an @all/n), added up, are exactly those of run.ps1 -ListScenarios (the full tier), none

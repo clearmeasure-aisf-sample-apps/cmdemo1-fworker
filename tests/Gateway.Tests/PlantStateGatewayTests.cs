@@ -107,6 +107,25 @@ public sealed class PlantStateGatewayTests
     }
 
     [Fact]
+    public async Task APlantWhoseFirstReadFailed_IsWrittenAgainOnlyAfterAFullSweep_AndOnlyOnceTheStoredOneReadsAndIsMergedIn()
+    {
+        var store = new MemoryStore { FailLoad = true, Row = new PlantStateRead(Seed(), 0, "old", DateTimeOffset.UtcNow) };
+        DateTime? sweep = null;
+        var plant = NewPlant();
+        var c = Coordinator(plant, store);
+        c.LastFullSweep = () => sweep;
+        await c.RestoreAsync("start");
+        Assert.False(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // blocked, and no sweep yet
+        sweep = DateTime.UtcNow.AddMinutes(1);
+        Assert.False(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // a sweep has run, but the stored plant still does not read: blocked
+        Assert.Equal(0, store.Saves);
+        store.FailLoad = false;
+        Assert.True(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));       // it reads now: merged into the plant, and written
+        Assert.Equal("alice", plant.Snapshot()["owners"]!["12"]!.ToString());
+        Assert.Equal(1, store.Saves);
+    }
+
+    [Fact]
     public async Task TheGapOfTheRestore_IsTheTimeTheStoredPlantWasWritten_AndTheStatusSaysWhereItCameFrom()
     {
         var store = new MemoryStore(); var gap = new SweepGap();

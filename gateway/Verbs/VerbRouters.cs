@@ -45,7 +45,7 @@ static class InertVerbs
     public static bool RunnerMayRun(string verb) => ReadOnly.Contains(verb) || Housekeeping.Contains(verb);
 
     public static VerbAnswer Refusal(string verb) =>
-        BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one, or FACTORY_V2_OFF=1", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 });
+        BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one, or a redeploy of the previous release", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 });
 }
 
 // The router in front of the verb endpoint of such a gateway: the verbs that only read pass through, every other is refused.
