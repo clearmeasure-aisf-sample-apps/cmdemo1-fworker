@@ -58,6 +58,32 @@ public class PendingClaimSqlTests
         Assert.Equal(1, await db.Count("SELECT COUNT(*) FROM factory.IdempotencyClaims"));
     }
 
+    // V3.2 (item 5 of #578): the SQL application lock is the only fence, and the epoch of its term is on factory.Leadership. A process of an older term (it lost the lock and has not noticed) takes no claim.
+    [Fact]
+    public async Task AProcessOfAnOlderTerm_TakesNoClaim_WhileALiveClaimOfAnOlderTermIsStillWaitedFor()
+    {
+        if (!TestDatabase.Available) return;
+        await using var db = await TestDatabase.CreateAsync("fw_claimterm_");
+        await db.Execute("INSERT INTO factory.Leadership (Id, Epoch, Holder, AcquiredAt) VALUES (1, 4, N'holder-4', SYSDATETIMEOFFSET())");
+        var term4 = Process(db.ConnectionString, "p4", epoch: 4).Ledger;
+        Assert.Equal(ClaimState.Claimed, term4.Claim("k").State);
+        Assert.Equal(ClaimState.Pending, Process(db.ConnectionString, "p4b", epoch: 4).Ledger.Claim("k").State);   // the same term: a live claim is waited for
+
+        // a newer process takes the lock (the term is 5): the old holder's node has left, its claim is no longer anyone's
+        await db.Execute("UPDATE factory.Leadership SET Epoch = 5, Holder = N'holder-5' WHERE Id = 1");
+        var term5 = Process(db.ConnectionString, "p5", epoch: 5).Ledger;
+        Assert.Equal(ClaimState.Pending, term5.Claim("k").State);                           // the old handling may still be inside its call: its claim is waited for until it runs out
+
+        // the old process has not noticed yet: it takes no claim, and holds no key the newer term could hold
+        var late = term4.Claim("other");
+        Assert.Equal(ClaimState.Pending, late.State); Assert.Equal(5, late.Holder!.Epoch);
+        Assert.Equal(0, await db.Count("SELECT COUNT(*) FROM factory.IdempotencyClaims WHERE [Key] = N'other'"));
+        Assert.Equal(ClaimState.Pending, term4.Claim("k").State);                           // nor does it take the key back
+
+        // a process without a lease (epoch 0) is not fenced by the row
+        Assert.Equal(ClaimState.Claimed, Process(db.ConnectionString, "plain", epoch: 0).Ledger.Claim("free").State);
+    }
+
     [Fact]
     public async Task ARecordedKey_IsDone_ItsClaimIsGone_AndTheFirstResultStays()
     {

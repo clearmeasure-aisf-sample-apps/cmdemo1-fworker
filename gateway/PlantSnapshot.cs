@@ -53,6 +53,12 @@ sealed partial class Plant
     // Restores a snapshot read at start. Returns what was restored, or why nothing was ("" when it was read). Merged key by key: an assignment, owner
     // or bot holder that a verb or a sweep set before the restore ran has fresher facts and wins. A worker that reconnected before the restore is
     // told at once what it owns and which offers wait for it, as its registration would have told it.
+    /// <summary>Empties what a restore fills (assignments, owners, bot holders, drains, the owned-since and owned-info maps) before a standby that takes the lock again restores the plant the term before it wrote: Restore keeps what is already there.</summary>
+    public void ClearForRestore()
+    {
+        lock (gate) { assignments.Clear(); ownerOf.Clear(); botOf.Clear(); drainedNames.Clear(); mgrDrained.Clear(); ownedSince.Clear(); ownedInfo.Clear(); }
+    }
+
     public (int Assignments, int Owners, string Skipped) Restore(JsonNode? snap, double maxAgeMinutes)
     {
         if (snap is not JsonObject s || s["v"]?.ToString() != "1") return (0, 0, "unreadable");

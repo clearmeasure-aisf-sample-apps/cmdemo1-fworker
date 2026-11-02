@@ -152,10 +152,10 @@ Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 ho
    deployment, treat it as an outage: find the cause or roll back.
 7. uat and prod are manual promotions by the operator (Octopus sign-off, the demo-environment kit). A session does not promote to them.
 
-A gateway restart drops the in-memory state (below) except the plant: the process that holds the leader lease (`gateway/Leader.cs`) snapshots it
-to GitHub on every change and at its stop, and hands it over to the next process (which waits for that snapshot before its first sweep, and
-renews the owners' claims that ran out while no gateway was up). Deploy to tdd only when the plant is quiet, say so beforehand, and check
-afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `plantSnapshot.restore.how`). Roll back by reverting the pull request.
+A gateway restart drops the in-memory state (below) except the plant: the process that holds the SQL lock (`gateway/Leader.cs`, `gateway/Leadership/`) keeps it
+in the database (`factory.PlantState` and the rows beside it) on every change and at its stop, and the next process restores it from there before its first
+sweep (and renews the owners' claims that ran out while no gateway was up). Deploy to tdd only when the plant is quiet, say so beforehand, and check
+afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `leader.sql.held` true, `leader.epoch` the term, `plantSnapshot.restore.how` sql). Roll back by reverting the pull request.
 
 ## Rules
 
@@ -174,12 +174,10 @@ afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting,
   and the revocation refs in the work-orders repository. Do not design a feature that assumes a message survives a restart.
 - **The plugin assumes nothing about the worker's machine**: any OS, x64 or arm64, only what the prompt downloads or clones; no fixed
   paths, no preinstalled `gh`, `jq`, `python` or `dotnet`, no shell variables in commands of skills and agents. The author suite checks this.
-- **Only one gateway may sweep the board.** The leader lease enforces it: the newest process with a GitHub identity takes the lease and the
-  one before stands down. So do not start `run-gateway.sh` or `run-owner-gateway.sh` against the real repository while tdd is the acting
-  gateway: it would take the plant over from tdd (`FACTORY_LEADER_LEASE=0` turns the lease off for a local gateway, and then two would sweep).
-  Where a database is configured (tdd, the v2 CI gateways) the process must also hold the SQL application lock `fworker:leader`
-  (`gateway/Leadership/SqlLease.cs`, row `factory.Leadership`, status `leader.sql`): the Wolverine node runs only on its holder, and where
-  the engine acts so does everything else. A process without a database (v1 under the kill switch, uat, prod) is arbitrated by the ref alone.
+- **Only one gateway may act on the board.** The SQL application lock `fworker:leader` enforces it (`gateway/Leadership/SqlLease.cs`, row `factory.Leadership`, status `leader.sql`): the newest process asks the holder,
+  which stops its Wolverine node, saves the plant to the database and lets the lock go, and then takes the lock with the next epoch; everything that acts (the node, the sweep, the ticks) runs only while the lock is held.
+  The GitHub ref lease and the ref snapshot of the plant are gone. So do not start `run-gateway.sh` or `run-owner-gateway.sh` against the real repository and tdd's database while tdd is the acting gateway: it would
+  take the plant over from tdd (`FACTORY_LEADER_LEASE=0` turns the lease off for a local gateway, and then two would act). A process without a database (uat, prod today) has no lease and is inert on the board.
 - **Protected areas need the owner**: credentials and tokens, authorization, revoke, the deploy pipeline (`.github/workflows/`,
   `Dockerfile`, `config/deploy.overrides.json`), uat and prod. `build.yml`, `release.yml`, `secret-scan.yml` and `architecture.yml` come
   from the demo-environment kit: the only local addition is the `tests` job of `build.yml`.

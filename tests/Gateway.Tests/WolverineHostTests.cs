@@ -155,13 +155,6 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
     }
 }
 
-/// <summary>The stop with the lease on and the Wolverine host registered (its database does not answer): hand-over, then the transcripts' flush, within the grace.</summary>
-public sealed class WolverineHostStopOrderTests
-{
-    [Fact]
-    public Task StopOrder_HandOverBeforeTranscriptFlush_WithTheHostRegistered_Within30Seconds() => StopOrderTests.Run(env => { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); });
-}
-
 /// <summary>The service itself, without a database: retries, never waits for it, leaves with the lease, comes back, stops at shutdown.</summary>
 public sealed class WolverineHostServiceTests
 {
@@ -175,7 +168,7 @@ public sealed class WolverineHostServiceTests
     }
 
     /// <summary>A leader that is not acting yet: the lease is on and has not been taken (W9.10a: the node does not start).</summary>
-    static GatewayLeader WaitingLeader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
+    static GatewayLeader WaitingLeader() => new(new LeaderSettings { On = true });
 
     /// <summary>The holder: the lease is taken and the predecessor's snapshot seen, as LeadershipService reports with StartActing.</summary>
     static GatewayLeader Leader() { var l = WaitingLeader(); l.StartActing(); return l; }
@@ -397,7 +390,7 @@ public sealed class WolverineHostServiceTests
     [Fact]
     public async Task WithTheLeaseOff_TheNodeStartsAtTheStartOfTheHost_AsItDid()
     {
-        var leader = new GatewayLeader(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = false }, "0.0.0");
+        var leader = new GatewayLeader(new LeaderSettings { On = false });
         var svc = Service(leader, (_, _) => new FakeHost());
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);

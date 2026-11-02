@@ -2048,3 +2048,24 @@ prerequisite), #500 (the wake after a restart is a W9.9 precondition and a W5 ga
   gateway's ledger, the comment while the lock is held and the state after it frees (the post is outside the lock by W9.10l's design).
 - *Scenarios adapted for both engines.* The plant snapshot of the graceful restart is a row in SQL on v2 (the log line says `store: sql`); the two `leader:` scenarios take `restore.how` `sql` with the epoch of the predecessor's SQL term (`leader.sql.epoch`) where v1 says `handover` or `released` with the ref's epoch; the budget scenario asks until the sweep has reported the new window; the CI-release check does not
   count the state comment (it holds `journal.ciReleased` as soon as the engine records it).
+
+### V3.2 as built: leadership on the SQL lease only
+
+The GitHub-ref lease (`refs/factory/<instance>/gateway-leader`), the ref snapshot of the plant and the rule-script calls that kept them (`leader-lease`, `plant-snapshot-save`, `-load`, `-clear`, `-await`) are gone from the gateway.
+`GatewayLeader` is one state machine on the SQL application lock `fworker:leader` (`SqlLease.cs`); `SnapshotCoordinator` keeps the plant in the database (script 240) and reads it back; `LeadershipService` decides when each runs.
+
+- *The start.* The lock first (the newest process writes a takeover request and the holder makes room), then the restore of the plant from the database, then the confirmation that the lock is still held, then acting. A process
+  that lost the lock while it restored (a newer one asked, or the connection dropped) stands by without acting, and the standby loop takes the lock again when it is free and no newer process asked for it.
+- *The hand-over.* Holder: node leaves, final plant to the database, streams end, the lock goes (in that order). The newcomer takes the lock with the next epoch, so it reads the final plant; a dead holder's last periodic write is
+  what it reads. The store refuses a writer of an older epoch than the stored one (`PlantStateStore.Save`).
+- *A plant that cannot be read at the start* (three tries) starts empty and writes none for the whole term, so the plant of the term before is never overwritten with an empty one; the sweep rebuilds from the board.
+- *The gap* handed to the first full sweep is the time the stored plant was written (`restore.gapSince`).
+- *Claim-epoch guard* (item 5 of #578). `SqlIdempotencyLedger.Claim` takes over at once a claim of an older term (its process no longer holds the lock) and refuses any claim of a process whose own term is older than the one on
+  `factory.Leadership` (it lost the lock and has not noticed yet): the SQL lock is the only fence, and the ledger honours it.
+- *Without a database* (uat, prod today; a suite's second gateway; `FACTORY_LEADER_LEASE=0`) there is no lease: the process acts at once and keeps no plant.
+- *The status.* `leader`: `enabled`, `role`, `holder`, `epoch` (the SQL term), `revision`, `replica`, `acquiredAt`, `acquisitions`, `supersededAt`, `supersededBy`, and `sql` (`held`, `epoch`, `acquisitions`, `lost`, `yielded`, `failures`,
+  `lastFailure`, `lostAt`, `previousHolder`, `checkSeconds`). Removed with the ref: `predecessor`, `renewedAt`, `until`, `renewals`, `checks`, `failures` (of the ref), `leaseSeconds`, `renewSeconds`, `checkSeconds`, `handoverSeconds`,
+  `sql.fencesActing`. `plantSnapshot`: `enabled`, `leader`, `restore` (`how` is always `sql`; `predecessorEpoch` is gone), `saves`, `saveFailures`, `lastSave`, `heldEpoch`; `maxAgeMinutes` is gone. The release check
+  (CLAUDE.md) reads `leader.role` acting, `leader.sql.held` true and `plantSnapshot.restore.how` sql.
+- *Settings removed:* `timing.leaderLeaseSeconds`, `leaderRenewSeconds`, `leaderCheckSeconds`, `leaderHandoverSeconds`. `leaderSqlCheckSeconds` (5) stays.
+- *Left for V3.3:* the plugin's `Leader.ps1` and `PlantSnapshot.ps1` verbs and the fencing in `Core.ps1` (the gateway no longer sends `_lease`, so the scripts run unfenced), the verb-policy names.

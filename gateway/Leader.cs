@@ -2,33 +2,24 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using Microsoft.Data.SqlClient;
 
-// One acting gateway across releases (issue 94). In single-revision mode the platform starts the new revision before it stops the old one, so for a
-// while two processes run: before this, both swept the board, the new one restored no plant (the old one wrote it only at its SIGTERM, later), and
-// sessions kept their stream on the old one while their calls reached the new one (#68). The item lock is a file of one container and excludes
-// nothing across the two.
+// One acting gateway across releases (issue 94; the lease is the SQL application lock since W9.10b and the only one since V3.2). In single-revision mode the platform starts the new revision before it stops
+// the old one, so for a while two processes run. The one that holds the application lock "fworker:leader" (SqlLease.cs, factory.Leadership) acts: it sweeps, ticks, runs the Wolverine node, the jobs and the
+// back-merge trigger, and keeps the plant in the database (SnapshotCoordinator). The lock lives exactly as long as the connection it was taken on, so a holder that dies or loses its network has lost it
+// without anyone having to notice; the epoch of its term (one more each time a process takes the lock) is what the claims of the idempotency ledger and the plant state carry.
 //
-// The lease (plugin/scripts/lib/Leader.ps1) is a ref in the work-orders repository whose commit message is the lease record; every change is a
-// compare-and-swap with an epoch that only grows. A starting process takes the lease at once with the next epoch (the newest process acts). Only
-// the holder acts: it sweeps, ticks (offers that lapse, lease take-backs, QC), runs the back-merge trigger and writes its plant snapshot. It renews
-// the lease every timing.leaderRenewSeconds (120; the lease runs timing.leaderLeaseSeconds, 360) and between renewals checks it every
-// timing.leaderCheckSeconds (15) with one conditional read (an unchanged ref answers 304, which GitHub does not count against the rate limit).
+// The newest process wins. A starting process that finds the lock taken writes a takeover request and waits; the holder sees it at its next look (every timing.leaderSqlCheckSeconds, 5) and steps down: first its
+// Wolverine node (drained and released, so the successor's node never starts beside a running one), then the final plant snapshot into the database, then the streams end with stream.replaced (reconnect: the
+// session's client connects again, and the platform routes it to the new process); only then does it let the lock go. The newcomer takes the lock with the next epoch, restores the plant from the database and
+// only then acts. A stepped-down process answers every further call 503 gateway-replaced and stays a standby: when the lock is free (and no newer process asked for it) it takes it again, so the last process
+// standing always acts. A holder that loses its connection stops acting at its next look (at most about twice the command timeout later, the watchdog of SqlLease.CheckAsync; MayAct is false from then on)
+// and steps down the same way.
 //
-// A holder that finds a later epoch is superseded: it stops acting, first its Wolverine node (W9.10a: drained and released, so the successor's node never starts beside
-// a running one), then writes its final snapshot (tagged with its epoch), ends its streams with
-// stream.replaced (reconnect: the session's client connects again, and the platform routes it to the new process) and answers every further call
-// 503 gateway-replaced. It stays a standby: when the lease is released (a graceful stop of the holder) or runs out (the holder died), it takes the
-// lease again, so the last process standing always acts. A process that stops gracefully while it holds the lease writes its final snapshot and
-// releases the lease, so its successor does not wait (its node has stopped before either: BeforeHandOver).
-//
-// Beside the ref (W9.10b): where the gateway has a database, the same process must also hold the SQL application lock (SqlLease.cs, factory.Leadership). The Wolverine node starts only on the holder of
-// both, and where the engine acts (V2) the lock is part of acting itself (MayAct): a holder whose connection drops, or that is asked to make room by a newer process, stops its node, saves the plant and
-// stands by (the same hand-over as a superseded holder); the newest process asks, the holder releases, the newcomer takes the lock with the next epoch and then the ref. In the shadow run (v1 acts, the
-// node is inert) the lock gates the node only, so that a database outage never stops v1. A process without a database (v1 under the kill switch, uat, prod) has no SQL lease and is arbitrated by the ref alone.
+// A process that has no database (uat and prod today, a suite's second gateway, FACTORY_LEADER_LEASE=0) has no lease: LeaderSettings.On is false, every such process acts at once, and none keeps a plant.
 sealed class LeaderSettings
 {
     public bool On;
-    public double LeaseSeconds = 360, RenewSeconds = 120, CheckSeconds = 15, HandoverSeconds = 90, GapRenewMaxMinutes = 120, SnapshotDebounceSeconds = 30, SnapshotRefreshMinutes = 10;
-    /// <summary>W9.10b: how often the holder looks at its SQL lock (a dropped connection, a takeover request) and a starting process tries to take it. A takeover request is fresh for four of these (at least 20 s).</summary>
+    public double GapRenewMaxMinutes = 120, SnapshotDebounceSeconds = 30, SnapshotRefreshMinutes = 10;
+    /// <summary>How often the holder looks at its SQL lock (a dropped connection, a takeover request) and a standby or a starting process tries to take it. A takeover request is fresh for four of these (at least 20 s).</summary>
     public double SqlCheckSeconds = 5;
     public int SqlRequestFreshSeconds => (int)Math.Max(20, Math.Ceiling(SqlCheckSeconds * 4));
 
@@ -38,26 +29,16 @@ sealed class LeaderSettings
         JsonNode? t = null; try { t = JsonNode.Parse(File.ReadAllText(path))?["timing"]; } catch { }
         static bool Num(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
         double D(string k, double d) => Num(Environment.GetEnvironmentVariable("FACTORY_TIMING_" + k), out var e) ? e : Num(t?[k]?.ToString(), out var v) ? v : d;
-        var s = new LeaderSettings
+        return new LeaderSettings
         {
-            On = on, LeaseSeconds = D("leaderLeaseSeconds", 360), RenewSeconds = D("leaderRenewSeconds", 120), CheckSeconds = D("leaderCheckSeconds", 15),
-            HandoverSeconds = D("leaderHandoverSeconds", 90), GapRenewMaxMinutes = D("gapRenewMaxMinutes", 120),
+            On = on, GapRenewMaxMinutes = D("gapRenewMaxMinutes", 120),
             SnapshotDebounceSeconds = D("plantSnapshotDebounceSeconds", 30), SnapshotRefreshMinutes = D("plantSnapshotRefreshMinutes", 10),
             SqlCheckSeconds = D("leaderSqlCheckSeconds", 5)
         };
-        // a renewal must come well inside the lease
-        if (s.RenewSeconds > s.LeaseSeconds / 2) s.RenewSeconds = s.LeaseSeconds / 2;
-        return s;
     }
 }
 
-/// <summary>The rule-script call the lease makes (Runner implements it; a test stands in for the GitHub ref).</summary>
-interface IRuleScriptCalls
-{
-    Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout);
-}
-
-sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string version) : ILeadership
+sealed class GatewayLeader(LeaderSettings cfg) : ILeadership
 {
     public enum Role { Off, Starting, Acting, Superseded, Stopping }
     readonly object gate = new();
@@ -65,57 +46,49 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
     // this process: unique per start; the platform's revision and replica names make the log lines readable
     public readonly string Holder = $"{Clean(Environment.MachineName)}:{Environment.ProcessId}:{Guid.NewGuid().ToString("N")[..6]}";
     readonly string revision = Clean(Environment.GetEnvironmentVariable("CONTAINER_APP_REVISION") ?? ""), replica = Clean(Environment.GetEnvironmentVariable("CONTAINER_APP_REPLICA_NAME") ?? Environment.MachineName);
-    long epoch; string sha = "", tree = "", etag = "";
-    DateTime acquiredAt, renewedAt, until;
-    JsonObject? predecessor, supersededBy, standbyCurrent;
+    DateTime acquiredAt;
+    JsonObject? supersededBy;
     DateTime? supersededAt;
-    long renewals, checks, failures, acquisitions;
     readonly TaskCompletionSource acting = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public LeaderSettings Settings => cfg;
 
-    // ---- W9.10b: the SQL application lock beside the ref ------------------------------------------------------------------------------------------
     ISqlLease? sql;
-    bool sqlFences;       // the engine acts (V2): the lock is part of acting; false in the shadow run, where it gates the node only
     int handingOver;      // steps-down running (node leaving, final snapshot, release): nothing starts meanwhile
+    volatile bool stopping;   // the process is stopping (BeginStop): it takes no lock and starts no acting any more, whatever role it had
     long sqlAcquisitions, sqlLost, sqlYielded, sqlFailures;
     string lastSqlFailure = "";
     DateTime? sqlLostAt;
     string? sqlPreviousHolder;
 
-    /// <summary>Set once by the wiring, before the host starts, where a database is configured and the lease is on. fencesActing: the engine acts, so MayAct needs the lock.</summary>
-    public void UseSqlLease(ISqlLease lease, bool fencesActing) { sql = lease; sqlFences = fencesActing; }
+    /// <summary>Set once by the wiring, before the host starts, where the lease is on (which needs a database). Without one the process has no lease and acts at once.</summary>
+    public void UseSqlLease(ISqlLease lease) => sql = lease;
     public bool HasSqlLease => sql != null;
-    public bool SqlFences => sql != null && sqlFences;
     /// <summary>This process holds the SQL lock right now. The scripts of the schema ran before the lock was first tried (SqlLease.TryAcquireAsync), so the tables exist whenever this is true.</summary>
     public bool SqlHeld => sql is { Held: true };
-    /// <summary>The epoch of the SQL term this process took last (0: none, or no database).</summary>
+    /// <summary>The epoch of the SQL term this process took last (0: none, or no lease). It stays after the term ends.</summary>
     public long SqlEpoch => sql?.Epoch ?? 0;
-    /// <summary>The epoch the claims of the idempotency ledger carry (W0.1): the SQL term where there is one, else the ref's.</summary>
-    public long ClaimEpoch => sql is { Epoch: > 0 } s ? s.Epoch : Epoch;
-    /// <summary>The Wolverine node may run only here: this process acts on the ref and, where it has a database, holds the SQL lock; never while a step-down is running.</summary>
-    public bool MayRunNode { get { bool hand; lock (gate) hand = handingOver > 0; return !hand && MayAct && (sql == null || sql.Held); } }
+    /// <summary>The epoch the claims of the idempotency ledger and the plant state carry (W0.1): the SQL term; 0 without a lease.</summary>
+    public long ClaimEpoch => SqlEpoch;
+    public long Epoch => SqlEpoch;
+    /// <summary>The Wolverine node may run only here: this process acts and holds the SQL lock (if it has a lease); never while a step-down is running.</summary>
+    public bool MayRunNode { get { bool hand; lock (gate) hand = handingOver > 0; return !hand && MayAct; } }
 
     static string Clean(string s) { var c = new string(s.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '_' or '-').ToArray()); return c.Length > 40 ? c[..40] : c == "" ? "gw" : c; }
 
     public bool On => cfg.On;
     public Role State { get { lock (gate) return role; } }
-    // the sweep, the ticks and the back-merge trigger run only while this is true (always, when the lease is off)
-    // (W9.10b: where the engine acts and there is a database, also only while the SQL lock is held)
-    public bool MayAct { get { lock (gate) { if (role is not (Role.Off or Role.Acting)) return false; } return !sqlFences || sql == null || sql.Held; } }
+    // the sweep, the ticks and the back-merge trigger run only while this is true (always, without a lease). The lock is part of acting: a holder whose connection dropped acts no more, whatever its role says.
+    public bool MayAct { get { lock (gate) { if (role is not (Role.Off or Role.Acting)) return false; } return sql == null || sql.Held; } }
     public bool Replaced { get { lock (gate) return role == Role.Superseded; } }
-    public long Epoch { get { lock (gate) return epoch; } }
-    // The lease this process holds or held last, for the rule scripts that act on the board (Runner.InjectLease, W0.1): its epoch stays what this process took
-    // even after it was superseded, which is what makes the scripts refuse their writes. Null while the lease is off or not yet taken.
-    public (long Epoch, string Holder)? FenceLease { get { lock (gate) return cfg.On && epoch > 0 ? (epoch, Holder) : null; } }
     public Task ActingTask => acting.Task;
-    // called when this process finds itself superseded (stop, final snapshot, streams) and when a standby takes the lease again (restore)
+    // called when this process stands down (stop of the node, final snapshot, streams) and when a standby takes the lock again (restore)
     public Func<JsonObject?, Task>? OnSuperseded { get; set; }
-    public Func<JsonObject?, Task>? OnReacquired { get; set; }
-    // W9.10a: called each time this process becomes the one that acts (at its start and when a standby took the lease again; with the lease off, at the start), after the
-    // plant is restored. The Wolverine node starts here and not earlier: two nodes of one database (Solo: every node is node 1) release each other's rows.
+    public Func<Task>? OnReacquired { get; set; }
+    // W9.10a: called each time this process becomes the one that acts (at its start and when a standby took the lock again; without a lease, at the start), after the plant is restored.
+    // The Wolverine node starts here and not earlier: two nodes of one database (Solo: every node is node 1) release each other's rows.
     public Action? OnActing { get; set; }
-    // W9.10a: called FIRST in the hand-over (superseded, and the stop of the holder), before the final snapshot is written and before the lease is let go: what must stop
-    // acting for the successor to start safely stops here (the Wolverine node: drain, release of its ownership). Bounded by its own timeout; the argument says why.
+    // W9.10a: called FIRST in the hand-over (stood down, and the stop of the holder), before the final snapshot is written and before the lock is let go: what must stop acting for the successor to
+    // start safely stops here (the Wolverine node: drain, release of its ownership). Bounded by its own timeout; the argument says why.
     public Func<string, Task>? BeforeHandOver { get; set; }
     public async Task RunBeforeHandOverAsync(string why)
     {
@@ -123,258 +96,106 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
         try { await f(why); } catch (Exception e) { try { Console.Error.WriteLine($"leader before hand-over: {e.GetType().Name}"); } catch { } }
     }
 
-    JsonObject Args(string action)
-    {
-        var o = new JsonObject { ["action"] = action, ["holder"] = Holder, ["ttl_seconds"] = cfg.LeaseSeconds, ["version"] = version, ["revision"] = revision, ["replica"] = replica };
-        lock (gate) { if (epoch > 0) o["epoch"] = epoch; if (tree != "") o["tree"] = tree; if (sha != "") o["sha"] = sha; if (etag != "") o["etag"] = etag; }
-        return o;
-    }
-    static DateTime? Time(JsonNode? n) => DateTime.TryParse(n?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var d) ? d : null;
     static void Log(JsonObject o) { o["at"] = DateTime.UtcNow.ToString("o"); Console.WriteLine(o.ToJsonString()); }
 
-    // Takes the lease with the next epoch; tries until it has it (a gateway that cannot write the lease cannot act anyway). Returns the
-    // predecessor's record (null: there was none).
-    public async Task<JsonObject?> AcquireAsync(CancellationToken ct, bool requireLock = false)
+    /// <summary>
+    /// The start of a process that acts: takes the SQL lock, trying until it has it (the newest process asks the holder to make room and waits for it to release), and starts the lock's loop. Returns at once
+    /// without a lease. A process that loses the start race to a newer one is marked superseded while it waits (the status and /ready say "replaced", not a start that never ends).
+    /// </summary>
+    public async Task AcquireAsync(CancellationToken ct)
     {
-        var pause = 2.0;
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-            // W9.10b: where the engine acts the ref is never written without the SQL lock (a newer process may have asked for it, or the connection may have dropped)
-            if (requireLock && sql is { Held: false }) throw new SqlLockLostException();
-            var (code, output) = await runner.RunAsync("leader-lease", Args("acquire").ToJsonString(), TimeSpan.FromSeconds(60));
-            JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
-            if (code == 0 && j?["epoch"] is JsonValue ev && ev.TryGetValue<long>(out var e))
-            {
-                var pred = j["predecessor"] as JsonObject;
-                lock (gate)
-                {
-                    epoch = e; sha = j["sha"]?.ToString() ?? ""; tree = j["tree"]?.ToString() ?? tree; etag = "";
-                    acquiredAt = renewedAt = DateTime.UtcNow; until = Time(j["until"]) ?? DateTime.UtcNow.AddSeconds(cfg.LeaseSeconds);
-                    predecessor = pred?.DeepClone() as JsonObject; acquisitions++;
-                }
-                Log(new JsonObject { ["gateway"] = "leader", ["acquired"] = e, ["holder"] = Holder, ["predecessor"] = pred?.DeepClone() });
-                return pred;
-            }
-            lock (gate) failures++;
-            Log(new JsonObject { ["gateway"] = "leader", ["acquire"] = "failed", ["exit"] = code });
-            await Task.Delay(TimeSpan.FromSeconds(pause), ct); pause = Math.Min(30, pause * 2);
-        }
+        await AcquireSqlAsync(ct);
+        StartSqlLoop(ct);
     }
 
+    /// <summary>
+    /// Before a process acts for the first time (after the restore): does it still hold the lock? A process that lost it while it restored (a newer one asked, the connection dropped) stands by instead:
+    /// the lock is let go (the loop did that when it saw the loss) and the standby loop takes it again when it can. Returns whether it may act.
+    /// </summary>
+    public async Task<bool> ConfirmAsync()
+    {
+        if (sql == null || sql.Held) return true;
+        bool marked;
+        lock (gate) { marked = role == Role.Starting; if (marked) MarkSuperseded(new JsonObject { ["via"] = "sql", ["why"] = "lost-before-acting" }); }
+        if (marked)
+        {
+            Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["before"] = "acting", ["via"] = "sql", ["why"] = "lost-before-acting", ["holder"] = Holder });
+            await SupersedeAsync(new JsonObject { ["via"] = "sql", ["why"] = "lost-before-acting" });
+        }
+        return false;
+    }
+
+    void MarkSuperseded(JsonObject by) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = by; }
+
+    /// <summary>
+    /// The process acts from now on: the plant is restored and the lock is held. When the lock went since (or a step-down is running) it does not, and a process that never acted stands by, so that the
+    /// standby loop takes the lock again.
+    /// </summary>
     public void StartActing()
     {
-        bool began;
-        lock (gate) { began = role is Role.Starting or Role.Superseded or Role.Off; if (role is Role.Starting or Role.Superseded) { role = Role.Acting; refWrittenNotActed = false; carriedPredecessor = null; } }
+        bool began = false;
+        lock (gate)
+        {
+            if (stopping) return;
+            if (role is Role.Off) began = true;
+            else if (role is Role.Starting or Role.Superseded)
+            {
+                if (handingOver == 0 && (sql == null || sql.Held)) { role = Role.Acting; began = true; }
+                else if (role == Role.Starting) MarkSuperseded(new JsonObject { ["via"] = "sql", ["why"] = "lost-before-acting" });
+            }
+        }
+        if (!began) return;
         acting.TrySetResult();
-        // W9.10a: only now (lease taken, the predecessor's snapshot seen, the lease confirmed) may a node that acts start; outside the lock, and a callback that throws never breaks the lease
-        // (W9.10b: and the SQL lock held; in the shadow run it may come later, SqlGranted then starts the node)
-        if (began && MayRunNode) FireActing();
+        // W9.10a: only now (lock taken, the predecessor's plant restored) may a node that acts start; outside the lock, and a callback that throws never breaks the lease
+        if (MayRunNode) FireActing();
     }
 
     void FireActing() { try { OnActing?.Invoke(); } catch (Exception e) { Console.Error.WriteLine($"leader acting callback: {e.GetType().Name}"); } }
 
-    // The lease's own loop: renew or check while acting, watch the lease while superseded.
+    /// <summary>The standby's loop: a process that stood down (a newer one took over, or its own lock was lost) takes the lock again when it is free and no newer process asked for it, restores, and acts.</summary>
     public async Task LoopAsync(CancellationToken ct)
     {
+        if (sql == null) return;
+        var failures = 0;
         while (!ct.IsCancellationRequested)
         {
-            try { await Task.Delay(TimeSpan.FromSeconds(cfg.CheckSeconds), ct); } catch (OperationCanceledException) { return; }
-            try
-            {
-                var r = State;
-                if (r == Role.Acting) await Hold();
-                else if (r == Role.Superseded) await Watch(ct);
-            }
-            catch (Exception e) when (!ct.IsCancellationRequested) { lock (gate) failures++; Console.Error.WriteLine($"leader loop: {e.Message}"); }
+            var failed = false;
+            try { await WatchAsync(ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (Exception e) { NoteSqlFailure(e); failed = true; }
+            failures = failed ? Math.Min(failures + 1, 6) : 0;
+            var pause = failed ? Math.Min(60, cfg.SqlCheckSeconds * Math.Pow(2, failures)) : cfg.SqlCheckSeconds;
+            try { await Task.Delay(TimeSpan.FromSeconds(pause), ct); } catch (OperationCanceledException) { return; }
         }
     }
 
-    // Before a process acts for the first time: is it still the holder? A process superseded while it restored stands by instead.
-    public async Task<bool> ConfirmAsync()
+    // A standby takes the lock when it is free; a passive try yields to a newer process that asked for it (SqlLease.TryAcquireAsync). Taken, it restores the plant from the database (the stepped-down holder
+    // wrote its final state before it let the lock go) and acts - but only if it still holds the lock when the restore is done (StartActing).
+    async Task WatchAsync(CancellationToken ct)
     {
-        var (code, output) = await runner.RunAsync("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
-        JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
-        if (code != 0 || j == null || (j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb)) return true;   // unreadable: as Hold does, it keeps the lease
-        var cur = j["current"] as JsonObject;
-        lock (gate) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = cur?.DeepClone() as JsonObject; standbyCurrent = cur?.DeepClone() as JsonObject; etag = ""; sha = j["sha"]?.ToString() ?? ""; refWrittenNotActed = false; carriedPredecessor = null; }   // (its hand-over writes the snapshot the newcomer waits for)
-        Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["by"] = cur?.DeepClone(), ["before"] = "acting" });
-        await SupersedeAsync(cur);
-        return false;
+        bool standby, handing;
+        lock (gate) { standby = role == Role.Superseded; handing = handingOver > 0; }
+        if (!standby || handing || sql!.Held) return;
+        if (stopping) return;
+        var got = await sql.TryAcquireAsync(Holder, false, ct);
+        if (!got.Acquired) return;
+        SqlTaken(got);
+        if (stopping) { await ReleaseSqlAsync(); return; }   // (the stop began meanwhile and has already let go of what it held: this lock would be held by a process that is ending)
+        Log(new JsonObject { ["gateway"] = "leader", ["reacquired"] = got.Epoch, ["holder"] = Holder });
+        if (OnReacquired is { } f) await f();
+        StartActing();
     }
 
-    async Task Hold()
-    {
-        bool due; lock (gate) due = (DateTime.UtcNow - renewedAt).TotalSeconds >= cfg.RenewSeconds;
-        var (code, output) = await runner.RunAsync("leader-lease", Args(due ? "renew" : "check").ToJsonString(), TimeSpan.FromSeconds(60));
-        JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
-        if (code != 0 || j == null) { lock (gate) failures++; return; }   // GitHub did not answer: nobody else can take the lease meanwhile either
-        var leader = j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb;
-        if (leader)
-        {
-            lock (gate)
-            {
-                if (due) { renewals++; renewedAt = DateTime.UtcNow; until = Time(j["until"]) ?? until; etag = ""; } else checks++;
-                if (j["sha"]?.ToString() is { Length: > 0 } s) sha = s;
-                if (j["etag"]?.ToString() is { Length: > 0 } et) etag = et;
-                if (j["tree"]?.ToString() is { Length: > 0 } tr) tree = tr;
-            }
-            return;
-        }
-        var cur = j["current"] as JsonObject;
-        lock (gate)
-        {
-            if (role != Role.Acting) return;
-            role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = cur?.DeepClone() as JsonObject; standbyCurrent = cur?.DeepClone() as JsonObject; etag = ""; sha = j["sha"]?.ToString() ?? "";
-        }
-        Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["by"] = cur?.DeepClone() });
-        await SupersedeAsync(cur);
-    }
-
-    // The hand-over of a holder that lost the ref (or, in ConfirmAsync, found it lost before it acted): the callback (node leaves, final snapshot, streams end), then the SQL lock is let go, so that the
-    // newcomer's node never starts beside a running one and finds the snapshot written (W9.10b).
+    // The hand-over of a holder that lost the lock before it acted: the callback (node leaves, final snapshot, streams end), then the SQL lock is let go, so that the newcomer's node never starts beside a
+    // running one and finds the snapshot written (W9.10b).
     async Task SupersedeAsync(JsonObject? cur)
     {
         lock (gate) handingOver++;
         try { if (OnSuperseded is { } f) await f(cur); }
-        finally { await ReleaseSqlAsync(); lock (gate) handingOver--; }
+        finally { if (!stopping) await ReleaseSqlAsync(); lock (gate) handingOver--; }
     }
 
-    // A standby takes the lease when it was released or ran out; until then it reads the record (conditionally) at every check.
-    async Task Watch(CancellationToken ct)
-    {
-        var (code, output) = await runner.RunAsync("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
-        JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
-        if (code != 0 || j == null) { lock (gate) failures++; return; }
-        JsonObject? cur;
-        lock (gate)
-        {
-            if (j["unchanged"] is null) { standbyCurrent = j["current"]?.DeepClone() as JsonObject; sha = j["sha"]?.ToString() ?? ""; }
-            if (j["etag"]?.ToString() is { Length: > 0 } et) etag = et;
-            cur = standbyCurrent;
-        }
-        var released = cur?["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
-        var lapsed = cur == null || (Time(cur["until"]) is { } u && u < DateTime.UtcNow);
-        bool handing; lock (gate) handing = handingOver > 0;
-        if (handing) return;   // a step-down is still running
-        var take = released || lapsed;
-        if (SqlFences)
-        {
-            // W9.10b: a process with a database takes the ref only with the SQL lock. While the lock is free, a ref held by the last holder of the lock has no one acting for it (the holder let both go
-            // or its connection dropped), and a ref held by this very process has none either (it lost the lock to a newer process that never wrote the ref): the standby does not wait for the ref to
-            // run out. The restore still waits for the predecessor's final snapshot as it always does (a holder that stepped down wrote it before it let the lock go). A ref of any other holder (a
-            // process without a database, a newer one) is the ref's to decide.
-            if (!take)
-            {
-                try
-                {
-                    var peek = await sql!.PeekAsync(ct);
-                    take = peek.LockFree && cur?["holder"]?.ToString() is { Length: > 0 } refHolder && (refHolder == peek.LastHolder || refHolder == Holder);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
-                catch (Exception e) { NoteSqlFailure(e); return; }
-            }
-            if (!take) return;
-            try
-            {
-                var got = await sql!.TryAcquireAsync(Holder, false, ct);
-                if (!got.Acquired) return;
-                SqlTaken(got);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
-            catch (Exception e) { NoteSqlFailure(e); return; }
-        }
-        if (!take) return;
-        lock (gate) { sha = ""; etag = ""; }
-        JsonObject? pred;
-        try { pred = await AcquireAsync(ct, SqlFences); }
-        catch (OperationCanceledException) { return; }
-        catch (SqlLockLostException) { return; }   // (W9.10b) the lock went between the take of the lock and the write of the ref: nothing was written, the next check starts again
-        // the lock can also go during the write: the ref is then written by a process that does not hold the lock, so it neither restores nor acts; the next check takes the lock again and the ref once more,
-        // and the restore then still waits for the real predecessor (the latest record this process did not write), not for this process's own record
-        pred = KeepPredecessor(pred);
-        if (SqlFences && !sql!.Held)
-        {
-            Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder, ["where"] = "standby" });
-            await ReleaseUnusedRefAsync();   // the record just written has no lock behind it and no snapshot will follow it
-            return;
-        }
-        EndTerm();   // the ref is written with the lock held: from here the process restores and hands over like any holder, and a record of its own is followed by a snapshot
-        Log(new JsonObject { ["gateway"] = "leader", ["reacquired"] = Epoch, ["after"] = released ? "released" : lapsed ? "lapsed" : "sql-lock-free" });
-        if (OnReacquired is { } f) await f(pred);
-        StartActing();
-    }
-
-    // The predecessor the restore uses: the latest record of the ref that this process did not write itself. When the lock goes after the ref was written, the process writes the ref again, and that second
-    // write names the process's own first write as its predecessor; a restore that waited for the final snapshot of that would wait leaderHandoverSeconds for one that never comes (issue 94: the plant
-    // of the real predecessor dropped, nobody acting meanwhile). So a record of this process's own, written since the start of this term (refWrittenNotActed), is not a predecessor: the one kept stays,
-    // or none when the first write found no ref at all. A record of another process always is (it wrote the ref in between), and so is this process's own record of an earlier term (a standby that
-    // acted before). StartActing ends the term. The status shows the predecessor the restore uses.
-    JsonObject? carriedPredecessor;
-    bool refWrittenNotActed;
-    JsonObject? KeepPredecessor(JsonObject? written)
-    {
-        lock (gate)
-        {
-            var own = refWrittenNotActed && written?["holder"]?.ToString() == Holder;
-            if (!own) carriedPredecessor = written?.DeepClone() as JsonObject;
-            refWrittenNotActed = true;
-            predecessor = carriedPredecessor?.DeepClone() as JsonObject;
-            return carriedPredecessor?.DeepClone() as JsonObject;
-        }
-    }
-
-    // The ref is written and the lock is held: the term of "written, not yet confirmed with the lock" ends. What follows (the restore, the confirmation, a step-down while it restores) hands over like any
-    // holder, with the final snapshot of its own epoch, which the newcomer waits for; only a record written without the lock behind it is released unused (ReleaseUnusedRefAsync).
-    void EndTerm() { lock (gate) { refWrittenNotActed = false; carriedPredecessor = null; } }
-
-    // A process that wrote the ref and gives up its lock before it acted (a newer process asked, the connection dropped) leaves a record that no snapshot will ever follow (SqlStepDownAsync with no hand-over
-    // writes none): the newcomer would wait leaderHandoverSeconds for it and then drop the real plant. So the record is released naming the snapshot that holds the plant, the one the process itself would have
-    // restored from (a release names it for the successor, ReleaseAsync). Before the lock is let go, so that the newcomer's write follows it.
-    public async Task ReleaseUnusedRefAsync(TimeSpan? timeout = null)
-    {
-        long plantEpoch;
-        lock (gate)
-        {
-            if (!sqlFences || !refWrittenNotActed || epoch == 0) return;
-            var c = carriedPredecessor;
-            static long L(JsonNode? n) => long.TryParse(n?.ToString(), out var l) ? l : 0;
-            // (no predecessor: -1, which the restore reads as "no snapshot holds the plant" without waiting; 0 would accept a snapshot without an epoch, one of before the lease)
-            plantEpoch = c == null ? -1 : c["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb && c["plant_epoch"] is { } pe ? L(pe) : L(c["epoch"]);
-        }
-        try { await ReleaseAsync(plantEpoch, timeout ?? TimeSpan.FromSeconds(20)); }
-        catch (Exception e) { try { Console.Error.WriteLine($"leader unused ref release: {e.GetType().Name}"); } catch { } }
-    }
-
-    // ---- W9.10b ---------------------------------------------------------------------------------------------------------------------------------
-
-    sealed class SqlLockLostException : Exception { }
-
-    /// <summary>
-    /// The start of a process that acts: where the engine acts, the SQL lock first (the newest process asks the holder to make room), then the ref, and if the lock is gone once the ref is written (a newer process
-    /// asked meanwhile, or the connection dropped) back to the lock, passively this time, before anything is restored or started. Never leaves the ref written by a process that does not hold the lock. Without
-    /// a SQL lease, or in the shadow run, it is the ref alone. Returns the predecessor's record of the ref (null: none).
-    /// </summary>
-    public async Task<JsonObject?> AcquireAllAsync(CancellationToken ct)
-    {
-        var first = true;
-        while (true)
-        {
-            if (SqlFences)
-            {
-                await AcquireSqlAsync(ct, request: first); first = false;
-                StartSqlLoop(ct);
-            }
-            try
-            {
-                var pred = KeepPredecessor(await AcquireAsync(ct, SqlFences));
-                if (!SqlFences || sql!.Held) { EndTerm(); return pred; }
-                await ReleaseUnusedRefAsync();   // written without the lock behind it: no snapshot will follow this record, so it is released before the lock is taken again
-            }
-            catch (SqlLockLostException) { }
-            Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder });
-        }
-    }
+    // ---- the SQL application lock ---------------------------------------------------------------------------------------------------------------
 
     int sqlLoopStarted;
     /// <summary>Starts the SQL lock's loop once.</summary>
@@ -391,7 +212,7 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
 
     void SqlTaken(SqlLeaseAcquire got)
     {
-        lock (gate) { sqlAcquisitions++; sqlPreviousHolder = got.PreviousHolder; }
+        lock (gate) { sqlAcquisitions++; sqlPreviousHolder = got.PreviousHolder; acquiredAt = DateTime.UtcNow; }
         Log(new JsonObject { ["gateway"] = "leader", ["sqlAcquired"] = got.Epoch, ["holder"] = Holder, ["previous"] = got.PreviousHolder });
     }
 
@@ -406,8 +227,9 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             var failed = false;
             try
             {
+                if (stopping) throw new OperationCanceledException(ct);
                 var got = await sql.TryAcquireAsync(Holder, request, ct);
-                if (got.Acquired) { SqlTaken(got); SqlGranted(); return; }
+                if (got.Acquired) { SqlTaken(got); if (stopping) { await ReleaseSqlAsync(); throw new OperationCanceledException(ct); } return; }
                 // a miss that is not the newest process's own ask (it concedes to a newer one, or it only waits its turn): this process has lost the start race and waits behind another, which is what a
                 // superseded process is, so it says so (the status and /ready say "replaced" and not a start that never ends)
                 if (got.Conceded || !request) MarkLostStartRace();
@@ -425,48 +247,31 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
         lock (gate)
         {
             was = role; marked = role == Role.Starting;
-            if (marked) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = new JsonObject { ["via"] = "sql", ["why"] = "start-race" }; standbyCurrent = null; etag = ""; }
+            if (marked) MarkSuperseded(new JsonObject { ["via"] = "sql", ["why"] = "start-race" });
         }
         if (marked) Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["before"] = was.ToString().ToLowerInvariant(), ["via"] = "sql", ["why"] = "start-race", ["holder"] = Holder });
     }
 
-    // the lock came after this process already acts on the ref (the shadow run): the node starts now
-    void SqlGranted()
-    {
-        bool fire; lock (gate) fire = role == Role.Acting;
-        if (fire && MayRunNode) FireActing();
-    }
-
-    /// <summary>The SQL lock's own loop (every leaderSqlCheckSeconds): the holder looks at its lock; in the shadow run a process that acts on the ref and does not hold the lock tries to take it.</summary>
+    /// <summary>The SQL lock's own loop (every leaderSqlCheckSeconds): the holder looks at its lock, and a process that acts without it stands down.</summary>
     public async Task SqlLoopAsync(CancellationToken ct)
     {
         if (sql == null) return;
-        var first = true; var failures = 0;
+        var failures = 0;
         while (!ct.IsCancellationRequested)
         {
             var failed = false;
             try
             {
                 if (sql.Held) await SqlCheckAsync(ct);
-                else if (sqlFences)
-                {
-                    // acting on the ref without the lock (it was let go between the standby's take of the lock and of the ref): the engine must not act, so it stands down and takes both again
-                    bool actingWithoutLock, handing; lock (gate) { actingWithoutLock = role == Role.Acting; handing = handingOver > 0; }
-                    if (actingWithoutLock && !handing) await SqlStepDownAsync("lost", null);
-                }
                 else
                 {
-                    Role r; bool handing; lock (gate) { r = role; handing = handingOver > 0; }
-                    if (!handing && r is Role.Starting or Role.Acting)
-                    {
-                        var got = await sql.TryAcquireAsync(Holder, first, ct);
-                        if (got.Acquired) { SqlTaken(got); SqlGranted(); }
-                    }
+                    // acting without the lock (a look gave it up, or it went between the standby's take of the lock and its start of acting): the process stands down and takes the lock again as a standby
+                    bool actingWithoutLock, handing; lock (gate) { actingWithoutLock = role == Role.Acting; handing = handingOver > 0; }
+                    if (actingWithoutLock && !handing) await SqlStepDownAsync("lost", null);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception e) { NoteSqlFailure(e); failed = true; }
-            first = false;
             // a database that does not answer is not asked (and the scripts are not applied) every few seconds: the pause doubles up to a minute
             failures = failed ? Math.Min(failures + 1, 6) : 0;
             var pause = failed ? Math.Min(60, cfg.SqlCheckSeconds * Math.Pow(2, failures)) : cfg.SqlCheckSeconds;
@@ -483,16 +288,16 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
         await SqlStepDownAsync(check.State == SqlLeaseState.Lost ? "lost" : "takeover", check.RequestedBy);
     }
 
-    // The holder's lock is gone (the connection dropped) or a newer process asks for it. Where the engine acts the process stops acting: the same hand-over as a superseded holder (node leaves, final snapshot,
-    // streams end), then the lock is released and the process stands by; it takes the lock (and the ref) again when it can. In the shadow run v1 keeps acting and only the node leaves.
+    // The holder's lock is gone (the connection dropped) or a newer process asks for it. The process stops acting: the same hand-over for either (node leaves, final snapshot, streams end), then the lock is
+    // released and the process stands by; it takes the lock again when it can. A process that was not acting yet (starting, restoring) only lets the node and the lock go.
     async Task SqlStepDownAsync(string why, string? by)
     {
         bool handOver;
         lock (gate)
         {
             handingOver++;
-            handOver = sqlFences && role == Role.Acting;
-            if (handOver) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = new JsonObject { ["holder"] = by, ["via"] = "sql", ["why"] = why }; standbyCurrent = null; etag = ""; }
+            handOver = role == Role.Acting;
+            if (handOver) MarkSuperseded(new JsonObject { ["holder"] = by, ["via"] = "sql", ["why"] = why });
         }
         Log(new JsonObject { ["gateway"] = "leader", ["sqlStepDown"] = why, ["epoch"] = SqlEpoch, ["by"] = by, ["handOver"] = handOver });
         try
@@ -500,15 +305,18 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             if (handOver) { if (OnSuperseded is { } f) await f(new JsonObject { ["holder"] = by, ["via"] = "sql" }); }
             else await RunBeforeHandOverAsync("sql-" + why);
         }
-        finally { if (!handOver) await ReleaseUnusedRefAsync(); await ReleaseSqlAsync(); lock (gate) handingOver--; }
+        finally { if (!stopping) await ReleaseSqlAsync(); lock (gate) handingOver--; }   // (while stopping, the stop sequence owns the release: it saves the plant first)
     }
 
-    /// <summary>The stop of a process that stands by: a record of the ref it wrote without the lock (and could not release then) is released, then the SQL lock. Without it nobody acts until the ref runs out.</summary>
-    public async Task ReleaseStandbyAsync()
+    /// <summary>Waits for a step-down that is running (node leaving, final plant, release), at most the time given: the stop of a process that stood down must not let the lock go under it.</summary>
+    public async Task WaitForHandOverAsync(TimeSpan timeout)
     {
-        await ReleaseUnusedRefAsync(TimeSpan.FromSeconds(8));
-        await ReleaseSqlAsync();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout) { lock (gate) if (handingOver == 0) return; await Task.Delay(50); }
     }
+
+    /// <summary>The stop of a process that stands by: the SQL lock it may still hold, and the takeover request it wrote, are let go. Without it nobody acts until the request goes stale.</summary>
+    public Task ReleaseStandbyAsync() => ReleaseSqlAsync();
 
     /// <summary>Lets the SQL lock go (and ends its connection). A no-op without a SQL lease.</summary>
     public async Task ReleaseSqlAsync()
@@ -518,39 +326,27 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
     }
 
     // At a graceful stop: nothing acts any more. Returns the role the process had (a superseded process stays superseded).
-    public Role BeginStop() { lock (gate) { var was = role; if (role is Role.Acting or Role.Starting) role = Role.Stopping; return was; } }
-    // ... and the holder releases the lease (until now), naming whose snapshot holds the plant (-1: none), so its successor does not wait
-    public async Task<bool> ReleaseAsync(long plantEpoch, TimeSpan timeout)
-    {
-        if (Epoch == 0) return false;
-        var a = Args("release"); a["plant_epoch"] = plantEpoch;
-        var (code, _) = await runner.RunAsync("leader-lease", a.ToJsonString(), timeout);
-        Log(new JsonObject { ["gateway"] = "leader", ["released"] = Epoch, ["plantEpoch"] = plantEpoch, ["exit"] = code });
-        return code == 0;
-    }
+    public Role BeginStop() { lock (gate) { stopping = true; var was = role; if (role is Role.Acting or Role.Starting) role = Role.Stopping; return was; } }
 
-    // for a test that needs a holder that was superseded without a lease repository behind it (WolverineHostServiceTests)
+    // for a test that needs a holder that was superseded without a database behind it (WolverineHostServiceTests)
     internal void MarkSupersededForTest() { lock (gate) { if (role == Role.Acting) { role = Role.Superseded; supersededAt = DateTime.UtcNow; } } }
 
-    public JsonObject? Predecessor { get { lock (gate) return predecessor?.DeepClone() as JsonObject; } }
-
+    /// <summary>The "leader" block of /api/v1/status and /api/v1/dashboard. The release check reads <c>role</c> (acting), <c>sql.held</c> (true) and <c>epoch</c> (the SQL term).</summary>
     public JsonObject Status()
     {
         lock (gate)
         {
             var o = new JsonObject
             {
-                ["enabled"] = cfg.On, ["role"] = role.ToString().ToLowerInvariant(), ["holder"] = Holder, ["epoch"] = epoch, ["revision"] = revision, ["replica"] = replica,
-                ["acquiredAt"] = acquiredAt == default ? null : acquiredAt.ToString("o"), ["renewedAt"] = renewedAt == default ? null : renewedAt.ToString("o"),
-                ["until"] = until == default ? null : until.ToString("o"), ["acquisitions"] = acquisitions, ["renewals"] = renewals, ["checks"] = checks, ["failures"] = failures,
-                ["predecessor"] = predecessor?.DeepClone(), ["supersededAt"] = supersededAt?.ToString("o"), ["supersededBy"] = supersededBy?.DeepClone(),
-                ["leaseSeconds"] = cfg.LeaseSeconds, ["renewSeconds"] = cfg.RenewSeconds, ["checkSeconds"] = cfg.CheckSeconds, ["handoverSeconds"] = cfg.HandoverSeconds
+                ["enabled"] = cfg.On, ["role"] = role.ToString().ToLowerInvariant(), ["holder"] = Holder, ["epoch"] = SqlEpoch, ["revision"] = revision, ["replica"] = replica,
+                ["acquiredAt"] = acquiredAt == default ? null : acquiredAt.ToString("o"), ["acquisitions"] = sqlAcquisitions,
+                ["supersededAt"] = supersededAt?.ToString("o"), ["supersededBy"] = supersededBy?.DeepClone()
             };
-            // W9.10b: only where there is a database; without one the block is what it was
+            // only where there is a lease; without one the block is the role alone
             if (sql != null)
                 o["sql"] = new JsonObject
                 {
-                    ["held"] = sql.Held, ["epoch"] = sql.Epoch, ["fencesActing"] = sqlFences, ["acquisitions"] = sqlAcquisitions, ["lost"] = sqlLost, ["yielded"] = sqlYielded, ["failures"] = sqlFailures,
+                    ["held"] = sql.Held, ["epoch"] = sql.Epoch, ["acquisitions"] = sqlAcquisitions, ["lost"] = sqlLost, ["yielded"] = sqlYielded, ["failures"] = sqlFailures,
                     ["lastFailure"] = lastSqlFailure == "" ? null : lastSqlFailure, ["lostAt"] = sqlLostAt?.ToString("o"), ["previousHolder"] = sqlPreviousHolder, ["checkSeconds"] = cfg.SqlCheckSeconds
                 };
             return o;

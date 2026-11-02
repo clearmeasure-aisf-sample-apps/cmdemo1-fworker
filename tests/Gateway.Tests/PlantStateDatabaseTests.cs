@@ -38,11 +38,8 @@ public sealed class PlantStateDatabaseTests : IAsyncLifetime
         }
         """)!;
 
-    static SnapshotCoordinator Coordinator(Plant plant, IPlantStateStore store, long epoch = 0)
-    {
-        var leader = new GatewayLeader(new Runner("/nonexistent/factory.ps1"), new LeaderSettings { On = false }, "0.0.0");
-        return new SnapshotCoordinator(true, 30, leader, (verb, _, _) => Task.FromResult((0, verb == "plant-snapshot-load" ? """{"found":false}""" : "{}")), plant, new SweepGap()) { Sql = store };
-    }
+    static SnapshotCoordinator Coordinator(Plant plant, IPlantStateStore store) =>
+        new(true, new GatewayLeader(new LeaderSettings { On = false }), store, plant, new SweepGap());
 
     [Fact]
     public async Task AGatewayThatRestarts_GetsItsPlantBackFromTheDatabase_CorrectedFromTheSagasTable()
@@ -54,7 +51,7 @@ public sealed class PlantStateDatabaseTests : IAsyncLifetime
         // the first process: its plant is written at its stop
         var before = NewPlant(); Assert.Equal((2, 1, ""), before.Restore(Seed(), 30));
         var first = Coordinator(before, store);
-        await first.LoadOnceAsync();   // (nothing stored, nothing in the ref)
+        await first.LoadOnceAsync();   // (nothing stored yet)
         Assert.True(await first.SaveAsync(true, TimeSpan.FromSeconds(30)));
         Assert.Equal(2, await database!.Count("SELECT COUNT(*) FROM factory.PlantAssignments"));
 
@@ -69,7 +66,7 @@ public sealed class PlantStateDatabaseTests : IAsyncLifetime
         var second = Coordinator(after, new SqlPlantStateStore(Open));
         var correction = new PlantRestoreCorrection(after, sagas, Home, (item, _) => Task.FromResult<string?>("alice"));   // (the claim of 12 still says alice)
         second.Correct = () => correction.Run();
-        await second.RestoreFromPredecessorAsync(null, "start");
+        await second.RestoreAsync("start");
 
         var snap = after.Snapshot();
         Assert.Equal(["a-1f2b"], snap["assignments"]!.AsArray().Select(a => a!["id"]!.ToString()));   // the completed item's offer is gone, the accepted assignment is back with its id
