@@ -20,7 +20,7 @@ sealed record RecurringJobIntervals(TimeSpan BoardReconciler, TimeSpan PlantStep
         int Num(string key, int fallback, int min, int max) => block?[key] is { } n && int.TryParse(n.ToString(), out var v) ? Math.Clamp(v, min, max) : fallback;
         // (never faster than every 5 seconds: the Tier 1 tests sweep every 2 seconds, and five script passes every 2 seconds on top of the sweep would load a CI machine for nothing)
         var plant = Num("plantStepsSeconds", Math.Max(5, sweepSeconds), 5, 3600);
-        return new(TimeSpan.FromSeconds(Num("boardReconcilerSeconds", 120, 30, 600)), TimeSpan.FromSeconds(plant), TimeSpan.FromSeconds(Math.Min(plant, Num("qcSyncSeconds", 60, 1, 3600))), TimeSpan.FromHours(Num("retentionHours", 24, 1, 168)), TimeSpan.FromSeconds(Num("baseWatchSeconds", 300, 5, 3600)));
+        return new(TimeSpan.FromSeconds(Num("boardReconcilerSeconds", 120, Environment.GetEnvironmentVariable("FACTORY_TEST_FAST_RECONCILER") == "1" ? 2 : 30, 600)), TimeSpan.FromSeconds(plant), TimeSpan.FromSeconds(Math.Min(plant, Num("qcSyncSeconds", 60, 1, 3600))), TimeSpan.FromHours(Num("retentionHours", 24, 1, 168)), TimeSpan.FromSeconds(Num("baseWatchSeconds", 300, 5, 3600)));
     }
 }
 
