@@ -308,9 +308,9 @@ public sealed class JournalTextParityTests
         ("board-added", "board-added", [("column", "Technical Design")]),
         ("pulled", "pulled", [("from", "Todo"), ("column", "Technical Design"), ("wip", 1), ("wipLimit", 2)]),
         ("unparked closed", "unparked", [("code", "runtime-failed"), ("by", "the sweep"), ("reason", "the item is closed"), ("closed", true)]),
-        ("promoted", "promoted", [("release", "3.41.3"), ("environment", "uat"), ("task", "ServerTasks-{n}")]),
-        ("promotion-signoff", "promotion-signoff", [("release", "3.41.3"), ("environment", "prod"), ("task", "ServerTasks-{n}"), ("result", "Proceed")]),
-        ("promotion-waiting", "promotion-waiting", [("release", "3.43.4"), ("environment", "uat"), ("reason", "its deployment to tdd is Failed (Deployments-{dep:4})")]),
+        ("promoted", "promoted", [("release", "3.1.1"), ("environment", "uat"), ("task", "ServerTasks-{n}")]),
+        ("promotion-signoff", "promotion-signoff", [("release", "3.1.1"), ("environment", "prod"), ("task", "ServerTasks-{n}"), ("result", "Proceed")]),
+        ("promotion-waiting", "promotion-waiting", [("release", "3.5.1"), ("environment", "uat"), ("reason", "its deployment to tdd is Failed (Deployments-{dep:1})")]),
     }.Select(c => new object[] { c.Name, c.Event, c.Fields });
 
     [Theory]
