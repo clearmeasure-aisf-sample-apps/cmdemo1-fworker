@@ -297,6 +297,22 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task AnItemWithAGap_IsReadFresh_NotFromTheFiveMinuteCache_SoAPublishedVideoLiftsTheWaitAtOnce()
+    {
+        // the reads keep an answer for GatesKeep (5 minutes); a waiting item's gap (here the demo video) is lifted by an edit no event announces, so the next look must not be served the cached "no video"
+        var gaps = new[] { "#7 has the 'video' label and no demo video published (release demo-7, asset demo-7.mp4)" };
+        var f = await OneRelease(x => { x.Reads.GateReadsPerMinute = 40; x.Reads.GatesKeep = TimeSpan.FromHours(1); }, gaps);
+        Assert.Equal("waiting", f.LastDecision!.Action);
+        await f.Mature();   // the release is old enough; only the video holds it, and the looks read the gates
+        Assert.Empty(f.Of<PromoteRelease>());
+        f.Reads.Gates["acme/orders#7"] = new ItemMergedGates(true, "", true, true, true, []);   // the video is published, well inside the cache time of the last read
+        await f.After(TimeSpan.FromMinutes(3));
+        // the video gap is gone at the first look after the edit (the cache would have kept it for five minutes); what is left is the app's own evidence, which is read only once nothing else holds the release
+        Assert.DoesNotContain(f.LastDecision!.Reasons, r => r.Contains("demo video"));
+        Assert.Contains(f.LastDecision.Reasons, r => r.Contains("not been Healthy long enough"));
+    }
+
+    [Fact]
     public async Task AWaitOnAnItemsGap_LooksAgainAtThePolicysPoll_NotOnlyAtTheSafetyWake()
     {
         var f = new TrainFixture(); await f.Baseline();

@@ -366,7 +366,9 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 {
                     // The gates are read again at every look (the reads keep an answer for GatesKeep, five minutes): a label put on or taken off after the merge, or a demo video published, changes them and no event the train hears of says so.
                     // v1 reads them in every pass. A read that finds the item gone leaves the gates of the merge.
-                    if (await reads.ReadGates(ItemId.Parse(c.Item), ct, freshFrom) is { } fresh) c.Gates = fresh;
+                    // An item whose last gates carry a gap (no demo video yet, a Hold, a missing label) is read fresh at every look, not from the five-minute cache: its gap is lifted by an edit nobody tells the train of, and the cached answer would hide the edit for up to GatesKeep.
+                    var readFrom = c.Gates.Gaps.Count > 0 ? freshFrom ?? freshSince : freshFrom;
+                    if (await reads.ReadGates(ItemId.Parse(c.Item), ct, readFrom) is { } fresh) c.Gates = fresh;
                     items.Add(c.Item); itemGaps.AddRange(c.Gates.Gaps); if (p.DependenciesDelivered) itemGaps.AddRange(await DependencyGaps(c, j.Items, ct));
                 }
             else

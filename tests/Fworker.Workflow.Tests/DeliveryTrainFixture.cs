@@ -36,6 +36,7 @@ sealed class FakeTrainReads : ITrainReads
     public int FreshGateReads;
     /// <summary>The instant each item's gates were last read, and how many reads the cap of a minute allows (0: no cap): a read over the cap throws, as the shadow's does.</summary>
     public readonly Dictionary<string, DateTimeOffset> GateReadAt = [];
+    readonly Dictionary<string, ItemMergedGates?> GateKept = [];
     public int GateReadsPerMinute;
     readonly Queue<DateTimeOffset> gateCalls = new();
     public int GateReads;
@@ -43,13 +44,13 @@ sealed class FakeTrainReads : ITrainReads
     {
         var key = item.ToString(); var t = Clock();
         // a cached answer, as the real reads keep one: used unless it is older than freshSince (or, with no freshSince, older than GatesKeep)
-        if (GateReadsPerMinute > 0 && GateReadAt.TryGetValue(key, out var at) && (freshSince is { } f ? at >= f : t - at < GatesKeep)) return ReadGatesCore(item);
+        if (GateReadsPerMinute > 0 && GateReadAt.TryGetValue(key, out var at) && (freshSince is { } f ? at >= f : t - at < GatesKeep)) return Task.FromResult(GateKept.TryGetValue(key, out var kept) ? kept : null);   // (the answer kept, not the live one)
         if (freshSince is not null) FreshGateReads++;
         if (GateReadsPerMinute > 0)
         {
             while (gateCalls.Count > 0 && t - gateCalls.Peek() > TimeSpan.FromMinutes(1)) gateCalls.Dequeue();
             if (gateCalls.Count >= GateReadsPerMinute) throw new HttpRequestException("the reads of this minute are spent");
-            gateCalls.Enqueue(t); GateReadAt[key] = t;
+            gateCalls.Enqueue(t); GateReadAt[key] = t; GateKept[key] = Gates.TryGetValue(key, out var live) ? live : null;
         }
         GateReads++;
         return ReadGatesCore(item);
