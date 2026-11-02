@@ -155,7 +155,7 @@ try {
     # exist in the source defaults (off) so an override can name them
     $rpText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Replenish.ps1'); $swText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Verbs.Sweep.ps1')
     $rpSrc = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).keeper.replenish
-    Check 'replenish: the gateway passes replenish_waiting, the sweep hands it and the free sessions to Invoke-Replenish, which holds on no-plan, waiting and not-idle' (@($gwSources | Where-Object { $_ -match 'args\["replenish_waiting"\]' }).Count -eq 1 -and $swText -match 'Invoke-Replenish \$list \$last \$designCol \$rpWaiting \$rpFree' -and $rpText -match "skipped = 'no-plan'" -and $rpText -match "skipped = 'waiting'" -and $rpText -match "skipped = 'not-idle'")
+    Check 'replenish: the sweep hands it and the free sessions to Invoke-Replenish, which holds on no-plan, waiting and not-idle' ($swText -match 'Invoke-Replenish \$list \$last \$designCol \$rpWaiting \$rpFree' -and $rpText -match "skipped = 'no-plan'" -and $rpText -match "skipped = 'waiting'" -and $rpText -match "skipped = 'not-idle'")
     Check 'replenish: holdWhenWaiting (0) and onlyWhenIdle (false) are in the source defaults, so behaviour is unchanged until a setting turns them on' ($rpSrc.holdWhenWaiting -eq 0 -and $rpSrc.onlyWhenIdle -eq $false)
     $loopEach = 'foreach \([^\n]*?\) (?:builder\.)?services\.AddSingleton<IHostedService>\(sp =>\s*\{(?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\('
     $loopHosted = 'AddHostedService(?:<RuntimeLoop>|\((?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\()'

@@ -64,7 +64,7 @@ public sealed class LeadershipGatewayTests
     static JsonNode? Restore(JsonNode? s) => s?["plantSnapshot"]?["restore"];
     static long Saves(JsonNode? s) => (long?)s?["plantSnapshot"]?["saves"] ?? 0;
 
-    static void WithDatabase(GatewayEnvironment e, TestDatabase db) { e.Set("FACTORY_DB_CONNECTION", db.ConnectionString); WolverineHostTestSupport.V2(e); }
+    static void WithDatabase(GatewayEnvironment e, TestDatabase db) { e.Set("FACTORY_DB_CONNECTION", db.ConnectionString); e.Set("GITHUB_API_URL", EmptyGitHub.Shared.Url); WolverineHostTestSupport.V2(e); }   // (the v2 route of the revocations read asks the API: this one answers every GET with an empty list)
 
     [Fact]
     public async Task Start_TakesTheLockRestoresFromTheDatabaseAndActs_ThenWritesThePlantWithItsEpoch()
@@ -216,5 +216,31 @@ public sealed class LeadershipGatewayTests
         Assert.Null(s?["leader"]?["sql"]);
         Assert.Equal(false, (bool?)s?["plantSnapshot"]?["enabled"]);
         Assert.Equal(200, (await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status);
+    }
+}
+
+/// <summary>An API that answers every GET with an empty JSON list (the revocations read: matching-refs of the work-orders repository). One per test process.</summary>
+sealed class EmptyGitHub
+{
+    public static readonly EmptyGitHub Shared = new();
+    readonly System.Net.HttpListener listener = new();
+    public string Url { get; }
+
+    EmptyGitHub()
+    {
+        int port; using (var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0)) { probe.Start(); port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port; }
+        Url = $"http://127.0.0.1:{port}";
+        listener.Prefixes.Add(Url + "/"); listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                System.Net.HttpListenerContext c;
+                try { c = await listener.GetContextAsync(); } catch { return; }
+                var body = System.Text.Encoding.UTF8.GetBytes("[]");
+                c.Response.StatusCode = 200; c.Response.ContentType = "application/json"; c.Response.ContentLength64 = body.Length;
+                await c.Response.OutputStream.WriteAsync(body); c.Response.Close();
+            }
+        });
     }
 }

@@ -1442,6 +1442,6 @@ $OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
     'sweep throttle: one full sweep per sweepMinSeconds; a trigger of an item between them gets an incremental pass of that item only'   # (budget.ps1) restarts the gateway
     'base update: a verdict recorded between the trigger and the delayed update stops the gateway''s update'   # (baseupdate.ps1) Bu-Worker starts the sessions it needs
     'base update (conflict mode): master moves; a clean branch that is behind is left alone, and the owner of a conflicting one is told once, reason conflict'   # (baseupdate.ps1) restarts the gateway, its own sessions bc1 and bc2, new items
-    'leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch'   # (leader.ps1)
+    'leader: two gateways overlap: the newer takes the lease, the older stops acting, writes its final snapshot and hands its streams over; the newer restores it before its first sweep'   # (leader.ps1) restarts the gateway first
     'journal fold: repeated matched, waiting and reassigned lines edit one comment per kind; another line ends the fold; folds do not count against the cap'   # (journal-fold.ps1) an item no sweep touches
 ) | ForEach-Object { [void]$OwnerBarriers.Add($_) }
