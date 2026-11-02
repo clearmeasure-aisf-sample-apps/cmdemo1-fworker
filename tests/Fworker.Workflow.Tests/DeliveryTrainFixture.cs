@@ -33,7 +33,9 @@ sealed class FakeTrainReads : ITrainReads
     public Task<CommitItemLookup> LookupCommit(RepoId repository, RangeCommit commit, CancellationToken ct)
         => Task.FromResult(Lookups.TryGetValue(commit.Sha, out var l) ? l : new CommitItemLookup(0, ""));
 
-    public Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct) => Task.FromResult(Gates.TryGetValue(item.ToString(), out var g) ? g : null);
+    public int FreshGateReads;
+    public Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, bool fresh = false) { if (fresh) FreshGateReads++; return ReadGatesCore(item); }
+    Task<ItemMergedGates?> ReadGatesCore(ItemId item) => Task.FromResult(Gates.TryGetValue(item.ToString(), out var g) ? g : null);
 
     public Task<EnvProbe> Probe(string deployable, string environment, CancellationToken ct)
     {

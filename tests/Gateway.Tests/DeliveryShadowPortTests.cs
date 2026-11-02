@@ -218,7 +218,7 @@ public sealed class DeliveryShadowPortTests
     }
 
     [Fact]
-    public async Task TheGatesOfAnItem_AreRead_Once_PerMinute()
+    public async Task TheGatesOfAnItem_AreRead_Once_PerMinute_AndAFreshReadSpendsARead()
     {
         var now = DateTimeOffset.UtcNow;
         var (reads, _, _, facts, _) = Reads(() => now);
@@ -226,9 +226,11 @@ public sealed class DeliveryShadowPortTests
         Assert.True(g!.AutoMerge); Assert.Empty(g.Gaps);
         await reads.ReadGates(new ItemId(Home, 7), default);
         Assert.Equal(1, facts.Items);
+        await reads.ReadGates(new ItemId(Home, 7), default, fresh: true);   // (the decision at a Sign-off is made on what the item carries now)
+        Assert.Equal(2, facts.Items);
         now += TimeSpan.FromMinutes(2);
         await reads.ReadGates(new ItemId(Home, 7), default);
-        Assert.Equal(2, facts.Items);
+        Assert.Equal(3, facts.Items);
     }
 
     [Fact]

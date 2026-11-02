@@ -161,10 +161,10 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         return null;
     }
 
-    public async Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct)
+    public async Task<ItemMergedGates?> ReadGates(ItemId item, CancellationToken ct, bool fresh = false)
     {
         var key = item.ToString();
-        lock (gate) if (gateReads.TryGetValue(key, out var kept) && now() - kept.At < GatesKeep) return kept.Gates;
+        lock (gate) if (!fresh && gateReads.TryGetValue(key, out var kept) && now() - kept.At < GatesKeep) return kept.Gates;
         var read = await Facts(() => facts.ReadItem(item, ct));
         var g = read is null ? null : ItemMergedDeriver.GatesOf(read, item.Number, gates);
         lock (gate) { Trim(gateReads); gateReads[key] = (now(), g); }

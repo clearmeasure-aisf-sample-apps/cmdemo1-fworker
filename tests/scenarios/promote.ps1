@@ -13,6 +13,8 @@ if ($script:GoldenEngine -eq 'v2') {
         if ($script:SuiteName -ne 'promote') { return }
         $env:FACTORY_DB_CONNECTION = $env:FACTORY_TEST_SQL.Trim().TrimEnd(';') + ';Initial Catalog=fworker_v2ci_promote_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
         Restart-Gateway
+        # the filler pull requests that number the scenario's own above every item (Pm-Numbers): made before the record of the scenario begins, so that the first pull request the scenario seeds is {#pr1} in its writes, as on v1
+        foreach ($i in 1..30) { [void](Fake 'merged-pr' @{ ref = "filler/$i"; title = "filler $i"; sha = (Pm-Sha); files = @('docs/filler.md') }) }
     }
 }
 
@@ -35,7 +37,6 @@ function Pm-Numbers {
     if ((Get-Variable -Scope Script -Name PmNumbersFor -ValueOnly -ErrorAction SilentlyContinue) -eq $script:Current) { return }
     $script:PmNumbersFor = $script:Current
     $script:WaitScale = 3   # the delivery train looks again at the scheduled-message poll of the Wolverine host (5 s at the least in a test gateway), where v1 passed every 3 s: every wait of the scenarios is three times longer
-    foreach ($i in 1..30) { [void](Fake 'merged-pr' @{ ref = "filler/$i"; title = "filler $i"; sha = (Pm-Sha); files = @('docs/filler.md') }) }
 }
 function Pm-Item([string]$Ver, [string[]]$Labels = $PromoteLabels, [string]$Tdd = 'Success', [switch]$NoPass, [switch]$NoRelease, [string]$Sha = '', [switch]$NoBase) {
     Pm-Numbers

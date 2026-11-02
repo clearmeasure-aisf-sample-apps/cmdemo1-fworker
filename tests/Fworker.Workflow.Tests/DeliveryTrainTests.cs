@@ -436,6 +436,46 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task ASignOff_WaitsOnAnUnsettledMerge_ThenIsAnsweredOnTheGatesOfNow()
+    {
+        // a commit of the release is another item's merge that is not settled yet: the Sign-off waits (a soft gap, judged on the cached gates), and only the answer Proceed reads the gates fresh
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'x', 'a');
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "");
+        await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a'); await f.Mature();
+        Assert.Single(f.Of<PromoteRelease>());
+        await f.Deploy("1.0.2", "Uat", "Started");
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "#5's merge (xxxxxxx) is not settled yet (awaiting release-candidate)");
+        f.Reads.FreshGateReads = 0;
+        await f.SignOff("1.0.2", "Uat");
+        Assert.Equal("signoff-waiting", f.LastDecision!.Action);
+        Assert.Contains("is not settled yet", f.LastDecision.Reasons[0]);
+        Assert.Empty(f.Of<AnswerSignOff>());
+        Assert.Equal(0, f.Reads.FreshGateReads);
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "");
+        await f.After(TimeSpan.FromMinutes(2));
+        Assert.True(Assert.Single(f.Of<AnswerSignOff>()).Proceed);
+        Assert.True(f.Reads.FreshGateReads > 0);
+    }
+
+    [Fact]
+    public async Task ASignOff_WithACommitThatIsNoFactoryItems_IsAborted()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'x', 'a');
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "");
+        await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a'); await f.Mature();
+        await f.Deploy("1.0.2", "Uat", "Started");
+        f.Reads.Lookups.Remove(Sha('x'));   // the commit is nobody's merge any more
+        await f.SignOff("1.0.2", "Uat");
+        var a = Assert.Single(f.Of<AnswerSignOff>());
+        Assert.False(a.Proceed);
+        Assert.Contains("is not the merge commit of a factory work item", a.Notes);
+    }
+
+    [Fact]
     public async Task AWaitingSignOff_SchedulesThePollAndTheLimit()
     {
         var (f, r) = await AtAWaitingSignOff();

@@ -329,7 +329,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     sealed record Judged(string Version, ContentJudgment Content, IReadOnlyList<string> Items, IReadOnlyList<string> ItemGaps);
 
     /// <summary>Get-ReleaseContent and the item gates of one release: what it carries beyond what runs in this environment, and what its items lack.</summary>
-    async Task<Judged> Judge(TrainRelease release, CancellationToken ct)
+    async Task<Judged> Judge(TrainRelease release, CancellationToken ct, bool freshGates = false)
     {
         var running = s.RunningIn(env);
         CompareRange? cmp = null;
@@ -353,14 +353,14 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 {
                     // The gates are read again at every look (the reads keep an answer for a minute): a label put on or taken off after the merge, or a demo video published, changes them and no event the train hears of says so.
                     // v1 reads them in every pass. A read that finds the item gone leaves the gates of the merge.
-                    if (await reads.ReadGates(ItemId.Parse(c.Item), ct) is { } fresh) c.Gates = fresh;
+                    if (await reads.ReadGates(ItemId.Parse(c.Item), ct, freshGates) is { } fresh) c.Gates = fresh;
                     items.Add(c.Item); itemGaps.AddRange(c.Gates.Gaps); if (p.DependenciesDelivered) itemGaps.AddRange(await DependencyGaps(c, j.Items, ct));
                 }
             else
             {
                 // an item found by its commit that is no candidate (a docs-only item went straight to Done): v1 reads its gates too
                 var id = new ItemId(p.Repository, n); items.Add(id.ToString());
-                if (await reads.ReadGates(id, ct) is { } g) itemGaps.AddRange(g.Gaps);
+                if (await reads.ReadGates(id, ct, freshGates) is { } g) itemGaps.AddRange(g.Gaps);
             }
         }
         return new Judged(release.Version, j, items.Distinct().ToList(), itemGaps);
@@ -453,6 +453,14 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             if (prev is null) common.Add($"it has no deployment to {p.NameOf(Previous!)}");
             else if (!prev.Succeeded) common.Add($"its deployment to {p.NameOf(Previous!)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})");
             var soft = common.Where(g => !hard.Contains(g)).ToList();
+            if (hard.Count == 0 && soft.Count == 0)
+            {
+                // About to answer Proceed: the answer is made on the gates of now (v1's pass reads them every time). A Hold put within the last minute is not in the cached gates. This is one read per item of the release, and only here: a Sign-off that waits or aborts judges on the cached gates, so a release too large for the read cap of a minute still reaches the abort after signoffWaitHours.
+                j = await Judge(release, ct, freshGates: true);
+                hard = j.ItemGaps.Concat(j.Content.Hard).ToList();
+                if (j.Content.Skip) hard.Add($"a release at least as new already runs in {TargetName}");
+                soft = j.Content.Gaps.Where(g => !hard.Contains(g)).ToList();
+            }
             if (hard.Count == 0 && soft.Count == 0)
             {
                 var now1 = await HealthNow(ct);
@@ -556,11 +564,14 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 continue;
             }
             var reasons = common.Concat(j.ItemGaps).Distinct().ToList();
-            if (j.ItemGaps.Count > 0) wakes.Add(now.AddSeconds(p.PollSeconds));   // an item's gap (a label, a demo video) is lifted by the item, not by an event the train hears of: it looks again at v1's pace
-            if (stop) { if (reasons.Count > 0) Note(r.Version, j.Items, reasons); continue; }
+            // An item's gap (a label, a demo video) and the settling of another item's merge are lifted by an edit, not by an event the train hears of: the train looks again at v1's pace. A hard content gap (a commit that is no factory item's) is lifted by an operator's deployment, which is an event.
+            if (j.ItemGaps.Count > 0 || j.Content.Gaps.Except(j.Content.Hard).Any()) wakes.Add(now.AddSeconds(p.PollSeconds));   // an item's gap (a label, a demo video) is lifted by the item, not by an event the train hears of: it looks again at v1's pace
+            // (a release whose content cannot be read, the commit running here unknown or a range GitHub cannot compare, names no items: v1 tells the items of its queue entry, the train those merged as the release's own commit)
+            var told = j.Items.Count > 0 ? j.Items : ItemsOf(r);
+            if (stop) { if (reasons.Count > 0) Note(r.Version, told, reasons); continue; }
             judged.Add(new ReleaseCandidate(r.Version, r.Assembled, reasons.Count == 0));
             if (reasons.Count == 0) { winner = j; stop = true; continue; }
-            Note(r.Version, j.Items, reasons);
+            Note(r.Version, told, reasons);
             // a release that only waits for the clock or the app is not blocked: the train does not fall back to an older release past it
             if (evidenceOnly) stop = true;
         }
