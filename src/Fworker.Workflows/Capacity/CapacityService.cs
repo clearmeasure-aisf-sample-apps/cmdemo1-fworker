@@ -16,6 +16,9 @@ public sealed class CapacityService(ICapacityStore store, CapacityScheduler sche
     public ICapacityStore Store => store;
     public CapacityScheduler Scheduler => scheduler;
 
+    /// <summary>V1.2: the free capacity of a runtime for the intake, from the ledger as saved (<see cref="CapacityScheduler.FreeSlots"/>). A ledger that cannot be read throws; the caller counts none.</summary>
+    public async Task<int> FreeSlots(string runtime, CancellationToken ct = default) => scheduler.FreeSlots((await store.Load(CapacityKeys.Factory, ct))?.State, runtime, clock());
+
     public async Task<CapacityResult> Handle(CapacityInput input, CancellationToken ct = default)
     {
         for (var attempt = 0; attempt < Attempts; attempt++)

@@ -48,13 +48,8 @@ public sealed class PlantStateGatewayTests
         }
         """)!;
 
-    static (SnapshotCoordinator Coordinator, List<string> Verbs) Coordinator(Plant plant, IPlantStateStore? store, bool leaderOn = false)
-    {
-        var verbs = new List<string>();
-        var leader = new GatewayLeader(new Runner("/nonexistent/factory.ps1"), new LeaderSettings { On = leaderOn }, "0.0.0");
-        var c = new SnapshotCoordinator(true, 30, leader, (verb, _, _) => { lock (verbs) verbs.Add(verb); return Task.FromResult((0, verb == "plant-snapshot-load" ? """{"found":false}""" : "{}")); }, plant, new SweepGap()) { Sql = store };
-        return (c, verbs);
-    }
+    static SnapshotCoordinator Coordinator(Plant plant, IPlantStateStore? store, bool leaderOn = false, SweepGap? gap = null) =>
+        new(true, new GatewayLeader(new LeaderSettings { On = leaderOn }), store, plant, gap ?? new SweepGap()) { RetryPause = TimeSpan.FromMilliseconds(10) };
 
     static string[] Ids(Plant p) => p.Snapshot()["assignments"]!.AsArray().Select(a => a!["id"]!.ToString()).Order().ToArray();
 
@@ -67,16 +62,15 @@ public sealed class PlantStateGatewayTests
         var before = NewPlant();
         var (na, no, skipped) = before.Restore(Seed(), 30);
         Assert.Equal((2, 2, ""), (na, no, skipped));
-        var (a, aVerbs) = Coordinator(before, store);
-        await a.LoadOnceAsync();   // (the first start: the store holds nothing and the ref nothing)
+        var a = Coordinator(before, store);
+        await a.LoadOnceAsync();   // (the first start: the store holds nothing)
         Assert.True(await a.SaveAsync(true, TimeSpan.FromSeconds(5)));
         Assert.Equal(1, store.Saves);
-        Assert.DoesNotContain("plant-snapshot-save", aVerbs);   // the plant is in the database, not in the ref
 
         // the process ends; a new one starts with the same database
         var after = NewPlant();
-        var (b, bVerbs) = Coordinator(after, store);
-        await b.RestoreFromPredecessorAsync(null, "start");
+        var b = Coordinator(after, store);
+        await b.RestoreAsync("start");
         Assert.True(b.Restored.IsCompleted);
         Assert.Equal(Ids(before), Ids(after));
         var restored = after.Snapshot();
@@ -87,27 +81,97 @@ public sealed class PlantStateGatewayTests
         Assert.True(accepted["accepted"]!.GetValue<bool>()); Assert.Equal("alice", accepted["worker"]!.ToString()); Assert.Equal("slot-7", accepted["slot"]!.ToString()); Assert.Equal("cursor-cloud", accepted["runtime"]!.ToString()); Assert.Equal("1.3", accepted["arm"]!.ToString());
         Assert.False(restored["assignments"]!.AsArray().Single(x => x!["id"]!.ToString() == "a-0c01")!["accepted"]!.GetValue<bool>());
         Assert.Equal("sql", b.Status()["restore"]!["how"]!.ToString());
-        Assert.DoesNotContain("plant-snapshot-load", bVerbs);   // nothing is read from the ref when the database has the plant
         Assert.Equal("advise", restored["managerMode"]!.ToString());   // the operator's run-time mode comes back too
     }
 
     [Fact]
-    public async Task AnEmptyStoreReadsTheRefOnce_AndAStoreThatCannotBeReadStartsAnEmptyPlant()
+    public async Task AnEmptyStoreRestoresNothing_AndAStoreThatCannotBeReadStartsAnEmptyPlant_ThatWritesNothingOverTheStoredOne()
     {
         var empty = new MemoryStore();
-        var (c, verbs) = Coordinator(NewPlant(), empty);
-        await c.RestoreFromPredecessorAsync(null, "start");
-        Assert.Contains("plant-snapshot-load", verbs);   // the first start of this version: the ref may hold the previous version's plant
+        var c = Coordinator(NewPlant(), empty);
+        await c.RestoreAsync("start");
         Assert.True(c.Restored.IsCompleted);
+        Assert.Equal("none", c.Status()["restore"]!["skipped"]!.ToString());
 
-        var down = new MemoryStore { FailLoad = true };
+        var down = new MemoryStore { FailLoad = true, Row = new PlantStateRead(Seed(), 4, "old", DateTimeOffset.UtcNow) };
         var plant = NewPlant();
-        var (d, dVerbs) = Coordinator(plant, down);
-        await d.RestoreFromPredecessorAsync(null, "start");
+        var d = Coordinator(plant, down);
+        await d.RestoreAsync("start");
         Assert.True(d.Restored.IsCompleted);   // (the sweep is not held back for ever by a database that is down)
         Assert.Equal("load-failed", d.Status()["restore"]!["skipped"]!.ToString());
         Assert.Empty(plant.Snapshot()["assignments"]!.AsArray());
-        Assert.DoesNotContain("plant-snapshot-load", dVerbs);
+        // the empty plant of a failed read never overwrites the stored one, neither in a periodic write nor in the final one
+        down.FailLoad = false;
+        Assert.False(await d.SaveAsync(false, TimeSpan.FromSeconds(5))); Assert.False(await d.SaveAsync(true, TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, down.Saves); Assert.Equal(4, down.Row!.Epoch);
+    }
+
+    [Fact]
+    public async Task APlantWhoseFirstReadFailed_IsWrittenAgainOnlyAfterAFullSweep_AndOnlyOnceTheStoredOneReadsAndIsMergedIn()
+    {
+        var store = new MemoryStore { FailLoad = true, Row = new PlantStateRead(Seed(), 0, "old", DateTimeOffset.UtcNow) };
+        DateTime? sweep = null;
+        var plant = NewPlant();
+        var c = Coordinator(plant, store);
+        c.LastFullSweep = () => sweep;
+        await c.RestoreAsync("start");
+        Assert.False(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // blocked, and no sweep yet
+        sweep = DateTime.UtcNow.AddMinutes(1);
+        Assert.False(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // a sweep has run, but the stored plant still does not read: blocked
+        Assert.Equal(0, store.Saves);
+        store.FailLoad = false;
+        Assert.True(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));       // it reads now: writes are allowed again
+        Assert.Equal(1, store.Saves);
+    }
+
+    [Fact]
+    public async Task TheMergeAfterAFailedFirstRead_BringsBackNoItemTheRebuiltPlantDoesNotKnow_AndNeverFromAFinalWriteOrANonActingProcess()
+    {
+        // the stored plant has owners of #12 (alice) and #30 (bob); the board has since finished #30 and the rebuilt plant knows only #12
+        var store = new MemoryStore { FailLoad = true, Row = new PlantStateRead(Seed(), 0, "old", DateTimeOffset.UtcNow) };
+        DateTime? sweep = null;
+        var plant = NewPlant();
+        plant.Restore(new JsonObject { ["v"] = 1, ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = new JsonArray(), ["owners"] = new JsonObject { ["12"] = "alice" } }, 30);
+        var c = Coordinator(plant, store);
+        c.LastFullSweep = () => sweep;
+        await c.RestoreAsync("start");
+        sweep = DateTime.UtcNow.AddMinutes(1); store.FailLoad = false;
+        Assert.False(await c.SaveAsync(true, TimeSpan.FromSeconds(5)));      // a final write never merges: it stays blocked
+        Assert.Equal(0, store.Saves);
+        Assert.True(await c.SaveAsync(false, TimeSpan.FromSeconds(5)));      // the periodic write of an acting process merges
+        var snap = plant.Snapshot();
+        Assert.Equal("alice", snap["owners"]!["12"]!.ToString());
+        Assert.Null(snap["owners"]!["30"]);                                  // #30 was not brought back
+        Assert.DoesNotContain(snap["assignments"]!.AsArray(), a => a!["item"]!.ToString() is "9" or "30");   // (no unaccepted offer comes back either)
+        Assert.Empty(snap["drained"]!.AsArray());                           // nor the stored drains
+    }
+
+    [Fact]
+    public async Task TheGapOfTheRestore_IsTheTimeTheStoredPlantWasWritten_AndTheStatusSaysWhereItCameFrom()
+    {
+        var store = new MemoryStore(); var gap = new SweepGap();
+        var written = DateTime.UtcNow.AddMinutes(-7);
+        var seed = Seed(); seed["at"] = written.ToString("o"); seed["epoch"] = 6; seed["final"] = true;
+        store.Row = new PlantStateRead(seed, 6, "old-holder", DateTimeOffset.UtcNow.AddMinutes(-7));
+        var c = Coordinator(NewPlant(), store, gap: gap);
+        await c.RestoreAsync("start");
+        var r = c.Status()["restore"]!;
+        Assert.Equal("sql", r["how"]!.ToString()); Assert.Equal(6L, (long)r["snapshotEpoch"]!); Assert.True((bool)r["final"]!); Assert.Equal(2, (int)r["assignments"]!);
+        Assert.NotNull(gap.Peek()); Assert.True(Math.Abs((gap.Peek()!.Value - written).TotalSeconds) < 2);   // the first full sweep renews the claims that ran out since
+        Assert.Equal(6L, c.HeldEpoch);
+    }
+
+    [Fact]
+    public async Task AFinalSnapshotOfAnOlderTerm_NeverOverwritesTheOneOfANewerTerm()
+    {
+        var store = new MemoryStore { Row = new PlantStateRead(Seed(), 9, "newer", DateTimeOffset.UtcNow) };   // the newcomer already wrote its state (term 9)
+        var lease = new FakeLockServer().NewLease();
+        Assert.True((await lease.TryAcquireAsync("old-holder", false, default)).Acquired);   // the old holder's term is 1
+        var leader = new GatewayLeader(new LeaderSettings { On = true }); leader.UseSqlLease(lease);
+        var old = new SnapshotCoordinator(true, leader, store, NewPlant(), new SweepGap());
+        await old.RestoreAsync("start");
+        Assert.False(await old.SaveAsync(true, TimeSpan.FromSeconds(5)));   // the store refuses a writer of an older epoch
+        Assert.Equal(9L, store.Row!.Epoch); Assert.Equal("newer", store.Row.Holder);
     }
 
     [Fact]
@@ -115,7 +179,7 @@ public sealed class PlantStateGatewayTests
     {
         var store = new MemoryStore();
         var before = NewPlant(); before.Restore(Seed(), 30);
-        var (a, _) = Coordinator(before, store);
+        var a = Coordinator(before, store);
         await a.LoadOnceAsync(); await a.SaveAsync(true, TimeSpan.FromSeconds(5));
 
         // item 9's saga completed while the plant was down; item 12's is open and its claim now says bob; item 30 has no saga (v1's)
@@ -125,10 +189,10 @@ public sealed class PlantStateGatewayTests
         var open = State(12); await sagas.Save(open.Item, open, 0, default);
         var asked = new List<int>();
         var after = NewPlant();
-        var (b, _) = Coordinator(after, store);
+        var b = Coordinator(after, store);
         var correction = new PlantRestoreCorrection(after, sagas, Home, (item, _) => { asked.Add(item); return Task.FromResult<string?>("bob"); });
         b.Correct = () => correction.Run();
-        await b.RestoreFromPredecessorAsync(null, "start");
+        await b.RestoreAsync("start");
 
         Assert.Equal([12], asked);   // (only an open saga's owner is checked against its claim; 30 is the sweep's)
         var snap = after.Snapshot();
@@ -281,17 +345,9 @@ public sealed class PlantStateGatewayTests
     {
         var plant = NewPlant(); plant.Restore(Seed(), 30);
         var ownership = await Owned(State(12, StepKind.Develop, s => s.LeaseDue = DateTimeOffset.UtcNow.AddMinutes(30)), State(13, StepKind.Verify, s => { s.Parked = true; s.ParkReason = "master-broken: x"; }));
-        var runner = new Runner("/nonexistent/factory.ps1");
-        var routes = new V2VerbRoutes();   // (W9.9a: the Runner answers a verb that has a route from the table)
-        routes.Add(BoardRoutes.Verbs, "sync-board", (_, _) => Task.FromResult(new VerbAnswer(0, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray(),
-            ["owned"] = new JsonObject(), ["owners"] = new JsonObject(), ["pins"] = new JsonObject(), ["parks"] = new JsonArray(), ["release_queue"] = new JsonArray(),
-            // (what v1 said of the saga items: the filter takes it out, the feed puts the saga's own in)
-            ["held"] = new JsonArray() }.ToJsonString())));
-        runner.Routes = routes;
         var hub = new EventHub();
-        var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
         var feed = new SagaPlantFeed(ownership, plant.OwnerNameOf, _ => null, Rules);
-        var sweeper = new Sweeper(runner, hub, plant, qc, 3600, true, null, Task.CompletedTask) { MayAct = () => true, PlantJobs = true, V2 = ownership, Feed = feed };
+        var sweeper = new Sweeper(hub, plant, 3600, true, Task.CompletedTask) { MayAct = () => true, V2 = ownership, Feed = feed };
         await sweeper.StartAsync(default);
         try
         {
@@ -332,6 +388,18 @@ public sealed class PlantStateGatewayTests
         Assert.DoesNotContain("\"item\":15", digest);
         // one entry per park: the owners' trigger of the same park and the views' are one key (parked|item|code)
         Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(digest, "\"kind\":\"parked\"").Count);
+    }
+
+    [Fact]
+    public async Task AParkedItemsFeedEntryCarriesSinceWhenItWasParked_AfterTheViewsWereRead()
+    {
+        var source = new Source { Set = () => new WorkItemViewSet([Item("acme/orders", 13, parked: true, parkReason: "merge-blocked: checks red", history: [Line(DateTimeOffset.UtcNow.AddMinutes(-50), WorkItemActions.Parked, "Merge")])], false) };
+        var ownership = await Owned(State(13, StepKind.Merge, s => { s.Parked = true; s.ParkReason = "merge-blocked: checks red"; }));
+        var feed = new SagaPlantFeed(ownership, _ => null, _ => null, Rules, new V2ItemViews(source));
+        Assert.Null(Assert.Single(feed.Build()["parks"]!.AsArray())!["since"]);   // (before the first read of the views the time is not known, as it was not)
+        await feed.RefreshViewsAsync();
+        var since = DateTime.Parse(Assert.Single(feed.Build()["parks"]!.AsArray())!["since"]!.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal);
+        Assert.InRange((DateTime.UtcNow - since).TotalMinutes, 49, 52);
     }
 
     [Fact]

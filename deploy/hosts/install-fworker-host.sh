@@ -9,6 +9,7 @@
 # Inputs (env, or prompted when unset):
 #   OCTOPUS_SERVER_URL   Octopus server URL                 OCTOPUS_SPACE        space name or id (Spaces-355)
 #   OCTOPUS_ENVIRONMENT  environment (tdd)                  OCTOPUS_API_KEY      API key allowed to register targets (never stored, never printed)
+#   FWORKER_HOST_POLICY  machine policy (default: Default Machine Policy; docs/deploy/octopus-host-health-policy.md creates fworker-host with a 10 minute health check)
 #   FWORKER_HOST_NAME    machine name in Octopus (default: the host name); the Reconcile hosts runbook asks the gateway by this name
 #   FWORKER_TARGET_TAG   target tag (fworker-host)          TENTACLE_INSTANCE    tentacle instance name (fworker)
 #   TENTACLE_USER        service user, added to the docker group (octopus)
@@ -91,7 +92,7 @@ if [ ! -f "$config" ]; then
     echo "Registering $hostName in $OCTOPUS_ENVIRONMENT with target tag $tag${capabilityRoles[*]:+ and $(printf '%s' "${capabilityRoles[*]}" | sed 's/--role //g')} (polling)"
     # the key goes to the Tentacle on its command line only for the duration of this call; it is not written to any file here
     "$tentacle" register-with --instance "$instance" --server "$OCTOPUS_SERVER_URL" --apiKey "$OCTOPUS_API_KEY" --space "$OCTOPUS_SPACE" \
-        --name "$hostName" --comms-style "TentacleActive" --server-comms-port "$port" --env "$OCTOPUS_ENVIRONMENT" --role "$tag" "${capabilityRoles[@]}" --policy "Default Machine Policy"
+        --name "$hostName" --comms-style "TentacleActive" --server-comms-port "$port" --env "$OCTOPUS_ENVIRONMENT" --role "$tag" "${capabilityRoles[@]}" --policy "${FWORKER_HOST_POLICY:-Default Machine Policy}"
     unset OCTOPUS_API_KEY
 else
     echo "Tentacle instance $instance is already configured ($config): registration skipped"

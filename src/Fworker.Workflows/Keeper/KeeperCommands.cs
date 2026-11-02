@@ -72,11 +72,13 @@ public sealed class KeeperCommands(VerbContext cx)
     {
         if (Rules.EnvLabel.Length > 0 && labels.Any(l => l.StartsWith("env:", StringComparison.OrdinalIgnoreCase) && !string.Equals(l, Rules.EnvLabel, StringComparison.OrdinalIgnoreCase)))
             throw new VerbRejection(10, "env-mismatch", $"an item created here carries '{Rules.EnvLabel}' only");
+        if (CapRefusal(call, 1) is { } over) throw over;
         var all = new[] { Rules.Label, Rules.EnvLabel }.Concat(labels).Where(l => !string.IsNullOrEmpty(l)).Distinct(StringComparer.Ordinal).ToList();
         int n;
         await using (await cx.Locks.Intake())
         {
             n = await cx.GitHub.CreateIssue(title, body, all);
+            if (cx.KeeperCap is { } cap && KeeperDailyCap.Counts(call)) cap.Record([n]);
             var info = await cx.GitHub.GetItemInfo(n);
             if (string.IsNullOrEmpty(info.CardId)) { await cx.GitHub.AddToBoard(info.NodeId); info = await cx.GitHub.GetItemInfo(n); }
             if (!string.Equals(info.Column ?? "", Rules.KeeperColumn, StringComparison.OrdinalIgnoreCase)) await cx.GitHub.MoveCard(info, Rules.KeeperColumn);
@@ -84,6 +86,9 @@ public sealed class KeeperCommands(VerbContext cx)
         await KeeperJournal(n, null, "create-item", call, detail);
         return n;
     }
+
+    /// <summary>V1.4, <c>keeper.maxNewItemsPerDay</c>: the refusal of a keeper call that would create <paramref name="need"/> new items when fewer may be created today, or null.</summary>
+    VerbRejection? CapRefusal(KeeperCall call, int need) => cx.KeeperCap is { } cap && KeeperDailyCap.Counts(call) ? cap.Refusal(need) : null;
 
     static string Refs(IEnumerable<int> numbers) => string.Join(", ", numbers.Select(x => $"#{x}"));
 
@@ -183,6 +188,7 @@ public sealed class KeeperCommands(VerbContext cx)
             if (!Regex.IsMatch(b, @"^\s*([-*+]|\d+[.)])\s+\S", Ps.Match | RegexOptions.Multiline)) throw VerbRejection.Usage("each child's body lists its acceptance criteria (one list line at least)");
             plan.Add((t, b));
         }
+        if (CapRefusal(call, plan.Count) is { } over) throw over;   // (all the children or none: the limit is checked before the first is made)
         // the parent's labels that carry over: the merge policy, the test profile, the video evidence and the priority (never a pin or the owner's hold)
         var carry = info.Labels.Where(l => string.Equals(l, Rules.AutoMergeLabel, StringComparison.OrdinalIgnoreCase) || string.Equals(l, Rules.TestLabel, StringComparison.OrdinalIgnoreCase)
             || string.Equals(l, Rules.VideoLabel, StringComparison.OrdinalIgnoreCase) || l.StartsWith("priority:", StringComparison.OrdinalIgnoreCase)).ToList();

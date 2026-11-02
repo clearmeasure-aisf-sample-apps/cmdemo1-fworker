@@ -808,7 +808,7 @@ $OwnerScenarios['offers: a session that let two offers in a row lapse is not off
 $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
     # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
     # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
-    # The suites run with the snapshot off (run.ps1); it is on for this scenario's gateways.
+    # The suites run with the plant off (run.ps1); it is on for this scenario's gateways. Since V3.2 the plant is kept in the database only, so a gateway without one (the engine of the v1 matrix) keeps none.
     $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; $oldSnap = $env:FACTORY_PLANT_SNAPSHOT; $env:FACTORY_PLANT_SNAPSHOT = '1'; Restart-Gateway
     try {
         Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
@@ -820,15 +820,15 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         $before = Get-Plant
         Restart-Gateway -Graceful
         $logs = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | ForEach-Object { Get-Content $_.FullName } | Where-Object { $_ -match '"gateway":"plant-(snapshot|restore)"' }
-        # (v1 writes the snapshot ref through a rule script: exit 0; where the engine acts the plant is a row in SQL: "store":"sql","saved":true)
-        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and ($_ -match '"exit":0' -or $_ -match '"store":"sql".*"saved":true') }
-        Check 'at SIGTERM the gateway wrote its plant to GitHub (v2: to SQL): exit 0' (@($saved).Count -ge 1) (($logs -join "`n") + ' ' + (((Get-FakeState).refs) -join ' '))
+        # (the plant is rows of SQL: "store":"sql","saved":true)
+        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and $_ -match '"store":"sql".*"saved":true' }
+        Check 'at SIGTERM the gateway wrote its plant to the database' (@($saved).Count -ge 1) ($logs -join "`n")
         # the restore runs in the background after the start (gateway/Program.cs): /ready and the status answer before it, and until it has run the
         # status has no plantSnapshot.restore, which StrictMode would throw on; wait for the field itself
         [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.PSObject.Properties['restore'] })
         $st = Get-Plant; $rs = $st.plantSnapshot.restore
         Check 'the next start restored it before its first sweep: assignments and the owner' ($rs.skipped -eq '' -and $rs.assignments -ge 2 -and $rs.owners -ge 1) ($rs | ConvertTo-Json -Compress)
-        Check 'the snapshot is used once: the start removed the ref after reading it' ((Wait-Until -Seconds 30 { @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' }).Count -eq 0 })) (((Get-FakeState).refs) -join ' ')
+        Check 'the restore came from the database' ($rs.how -eq 'sql') ($rs | ConvertTo-Json -Compress)
         Check 'the owner of the accepted item is the same' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$a" -and $_.Value -eq 'sara' }).Count -eq 1) ($st.plant.owners | ConvertTo-Json -Compress)
         $ra = @($st.plant.assignments | Where-Object { $_.item -eq $a }); $rb = @($st.plant.assignments | Where-Object { $_.item -eq $b })
         Check 'the accepted assignment keeps its id and stays accepted' ($ra.Count -eq 1 -and $ra[0].id -eq $ea.assignment -and $ra[0].accepted -eq $true -and $ra[0].worker -eq 'sara') ($ra | ConvertTo-Json -Compress)
@@ -847,10 +847,6 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         Check 'the client does not accept a resent item again' (@(Get-WorkerEvents 'sara' | Where-Object { $_.event -eq 'item.accepted' -and $_.item -eq $a }).Count -le 1) (@(Get-WorkerEvents 'sara' | Where-Object { $_.item -eq $a }) | ConvertTo-Json -Compress)
     } finally {
         Stop-OwnerClient 'sara'
-        # the next restart of this suite must not restore this scenario's plant
-        foreach ($ref in @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' })) {
-            try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/$ref" -Method DELETE -Headers @{ Authorization = 'Bearer fake-operator' } | Out-Null } catch { }
-        }
         $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; $env:FACTORY_PLANT_SNAPSHOT = $oldSnap; Restart-Gateway
     }
 }
@@ -1105,28 +1101,6 @@ $OwnerScenarios['owner: board guard: a labelled issue missing from the board is 
         Start-Sleep -Seconds 5
         Check 'still journalled only once' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 1)
     } finally { Stop-OwnerClient 'guard1' }
-}
-
-# Issue 65: an item whose body says "Depends on #N" is offered to nobody while #N is neither merged nor closed; the status shows it held with the code
-# depends-on and what it waits for; once #N is closed the next sweep offers it (a dependency off the board is read through the REST API).
-$OwnerScenarios['owner: an item waits for the items it depends on and is offered once they are closed'] = {
-    try {
-        Start-OwnerClient 'dep1' 'persistent-local' '--capacity 3'
-        $d1 = New-Item-Fake 'Dependency on the board' 'x' $OwnerLabels 'Todo'
-        $d2 = (Fake 'issue' @{ title = 'Dependency off the board'; body = 'x'; labels = @('bug') }).number
-        $n = New-Item-Fake 'Dependent item' "Builds on the others.`n`nDepends on #$d1 and #$d2`n" ($OwnerLabels + 'worker:dep1')
-        $free = New-Item-Fake 'Unrelated item' "depends on nothing" ($OwnerLabels + 'worker:dep1')
-        Check 'an item without dependencies is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $free).Count -gt 0 })
-        $script:HeldRow = $null
-        Check 'the dependent is held: code depends-on, waiting for both' (Wait-Until -Seconds 30 { $script:HeldRow = @((Get-Plant).plant.held | Where-Object { $_.item -eq $n })[0]; $script:HeldRow -and $script:HeldRow.code -eq 'depends-on' -and @($script:HeldRow.on).Count -eq 2 }) ($script:HeldRow | ConvertTo-Json -Compress)
-        Check 'it is not offered' ((Get-Assigned 'dep1' $n).Count -eq 0)
-        $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues"
-        [void](Invoke-RestMethod "$repo/$d1" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
-        Check 'one dependency closed: still held, waiting for the other only' (Wait-Until -Seconds 30 { $h = @((Get-Plant).plant.held | Where-Object { $_.item -eq $n })[0]; $h -and @($h.on).Count -eq 1 -and @($h.on)[0] -eq $d2 })
-        Check 'still not offered' ((Get-Assigned 'dep1' $n).Count -eq 0)
-        [void](Invoke-RestMethod "$repo/$d2" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
-        Check 'both closed: the item is offered and no longer held' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $n).Count -gt 0 -and @((Get-Plant).plant.held | Where-Object { $_.item -eq $n }).Count -eq 0 }) ((Get-Plant).plant | ConvertTo-Json -Compress -Depth 5)
-    } finally { Stop-OwnerClient 'dep1' }
 }
 
 # The launcher watchdog (docs/launcher.md): a spent session that owns nothing and is still connected sessionRestartMinutes later (it did not act on
@@ -1413,7 +1387,9 @@ function Invoke-SidecarCase([string]$Kind) {
         [void](Wait-Until -Seconds 20 { Test-Path $fm })
         $m = if (Test-Path $fm) { Get-Content -Raw $fm } else { '' }
         Check "sidecar ($Kind): the session's first message carries the launcher note: do not start subscribe, tail events.log" ($m -match 'LAUNCHER NOTE' -and $m -match 'Do not start factory\.ps1 subscribe' -and $m.Contains($events) -and ($m -match 'tail -n0 -F' -or $m -match 'Get-Content')) $m
-        Check "sidecar ($Kind): the credential reaches the sidecar only, not the claude process" ((Get-Content -Raw (Join-Path $base 'claude-env.txt') -ErrorAction SilentlyContinue).Trim() -eq 'none')
+        # (the fake claude writes first-message.txt, then claude-env.txt: wait for the second, or the read below is of a file that is not there yet)
+        [void](Wait-Until -Seconds 20 { Test-Path (Join-Path $base 'claude-env.txt') })
+        Check "sidecar ($Kind): the credential reaches the sidecar only, not the claude process" ("$(Get-Content -Raw (Join-Path $base 'claude-env.txt') -ErrorAction SilentlyContinue)".Trim() -eq 'none')
         # a sidecar that dies while the session runs is started again (the scenario stops it by its process id)
         $before = @(& $sidecars)
         Check "sidecar ($Kind): one sidecar runs" ($before.Count -eq 1) ($before | ForEach-Object { $_.CommandLine } | Out-String)

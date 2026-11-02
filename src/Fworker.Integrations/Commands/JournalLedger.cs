@@ -29,6 +29,12 @@ public static class JournalEvents
         "pin-fallback", "ci-released", "ci-release-refused",
     };
 
+    /// <summary>
+    /// V2.1: the lines of the automatic promotion (Verbs.Promote.ps1: promoted, promotion-waiting, promotion-signoff). The delivery train writes them through <see cref="JournalLedger.AppendPlant"/>; the journal verb and its command refuse them
+    /// (they are neither <see cref="Supported"/> nor <see cref="Writable"/>), as before.
+    /// </summary>
+    public static readonly IReadOnlySet<string> Promotion = new HashSet<string>(["promoted", "promotion-waiting", "promotion-signoff"], StringComparer.OrdinalIgnoreCase);
+
     /// <summary>What the ledger writes: the verb's events and the lines of the plant's steps (Invoke-BoardGuard, Invoke-Replenish: W9.10g).</summary>
     public static readonly IReadOnlySet<string> Writable = new HashSet<string>(Supported.Concat(["board-added", "replenish"]), StringComparer.OrdinalIgnoreCase);
 }
@@ -70,9 +76,16 @@ public sealed class JournalLedger
     /// Verb_journal: one line of an item. <paramref name="key"/> empty takes the ticks of now (the script's default; a waiting line always does).
     /// Throws for a failure that is worth a retry (the caller classifies it); the answers of the script, such as "rate-limited", are in the outcome.
     /// </summary>
-    public async Task<JournalOutcome> Append(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    public Task<JournalOutcome> Append(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default) => AppendFrom(item, ev, fields, key, plant: false, ct);
+
+    /// <summary>
+    /// <see cref="Append"/> for a line of the plant's own steps that the journal verb does not take from a caller: the promotion lines of the delivery train (<see cref="JournalEvents.Promotion"/>), V2.1.
+    /// </summary>
+    public Task<JournalOutcome> AppendPlant(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default) => AppendFrom(item, ev, fields, key, plant: true, ct);
+
+    async Task<JournalOutcome> AppendFrom(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, bool plant, CancellationToken ct)
     {
-        (ev, key) = Prepare(ev, key);
+        (ev, key) = Prepare(ev, key, plant);
         // the lines of one item are written one after the other (the gate of this ledger); the shared item lock is taken only to save the state (see SaveState)
         using var turn = await Enter(item, ct);
         try { return await AppendLocked(item, ev, fields, key, held: false, ct); }
@@ -88,10 +101,11 @@ public sealed class JournalLedger
         return AppendLocked(item, ev, fields, key, held: true, ct);
     }
 
-    (string Event, string Key) Prepare(string ev, string key)
+    (string Event, string Key) Prepare(string ev, string key, bool plant = false)
     {
-        if (!JournalEvents.Writable.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
-        ev = JournalEvents.Writable.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        var allowed = plant ? JournalEvents.Writable.Concat(JournalEvents.Promotion).ToList() : JournalEvents.Writable.ToList();
+        if (!allowed.Contains(ev, StringComparer.OrdinalIgnoreCase)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
+        ev = allowed.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         // a line without a key takes the ticks (JournalKeys.OrTicks, the rule of Add-Journal too); a waiting line always does
         key = JournalKeys.OrTicks(ev == "waiting" ? "" : key, utcNow());
         return (ev, key);

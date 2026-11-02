@@ -399,9 +399,6 @@ sealed class DigestInput
     public List<(int Item, string Worker, string Column, int Round, int Max, DateTime At)> Reviews = new();
     public List<(int Item, string Worker, int Count, List<(string Code, int Count)> ByCode)> VerbErrors = new();
     public List<(int Item, int RoundTrip, DateTime At)> MergeRefused = new();
-    // a PASS the gateway has not merged yet, after timing.passUnmergedDigestMinutes: the reason code of the wait and since when (the verdict)
-    public List<(int Item, string Code, int Pr, DateTime Since)> PassUnmerged = new();
-    public double PassUnmergedMinutes = 5;
     // sessions blocked after items were taken back from them (issue 100): offered nothing until they call a verb of their own
     public List<(string Name, int Item, DateTime Since)> BlockedSessions = new();
     public (int Reconnected, int Missing, int UpMinutes)? Restart;
@@ -421,7 +418,7 @@ static class DigestBuilder
 {
     public const int SchemaVersion = 1;
     public static readonly string[] Kinds = { "stalled", "disconnected-owner", "late-question", "waiting", "refusals", "parked",
-        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet", "release-queue-aged", "pass-unmerged", "session-blocked" };
+        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet", "release-queue-aged", "session-blocked" };
     static int Min(TimeSpan t) => (int)Math.Max(0, Math.Floor(t.TotalMinutes));
     static int Step(double value, double unit) => value >= unit * 4 ? 3 : value >= unit * 2 ? 2 : value >= unit ? 1 : 0;
 
@@ -512,12 +509,6 @@ static class DigestBuilder
             var b = Math.Clamp(m.RoundTrip, 1, 3);
             list.Add(new DigestEntry { Key = $"merge-refused|{m.Item}", Kind = "merge-refused", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "merge-refused", ["item"] = m.Item, ["bucket"] = b, ["roundTrip"] = m.RoundTrip, ["ageMinutes"] = Min(now - m.At) } });
-        }
-        foreach (var p in d.PassUnmerged)
-        {
-            var b = Math.Max(1, Step((now - p.Since).TotalMinutes, Math.Max(0.1, d.PassUnmergedMinutes)));
-            list.Add(new DigestEntry { Key = $"pass-unmerged|{p.Item}", Kind = "pass-unmerged", Bucket = b,
-                Fields = new JsonObject { ["kind"] = "pass-unmerged", ["item"] = p.Item, ["pr"] = p.Pr, ["code"] = p.Code, ["bucket"] = b, ["waitingMinutes"] = Min(now - p.Since) } });
         }
         foreach (var bs in d.BlockedSessions)
         {   // session-blocked (issue 100): worse once after mgrPersistMinutes, the one reminder of a session nobody looked at

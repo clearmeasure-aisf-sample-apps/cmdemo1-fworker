@@ -85,7 +85,7 @@ $SuiteDefs = @(
     # auto and merge-queue test the session's own merge verb, so the gateway's merge after a PASS is off there (owner.ps1 tests that one)
     @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
     @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
-    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600; continueMinutes = 0 } }
+    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; recurringJobs = @{ baseWatchSeconds = 5 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600; continueMinutes = 0 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate-idle'; Policy = 'auto'; Set = $QcGateIdleScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcIdleMinutes = 0.1 } }

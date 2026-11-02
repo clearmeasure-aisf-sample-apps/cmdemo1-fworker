@@ -4,7 +4,6 @@ sealed class TimingOptions
 {
     public double AckSeconds { get; init; }
     public double PlantSnapshotMaxAgeMinutes { get; init; }
-    public double PassUnmergedDigestMinutes { get; init; }
     public int OfferMissLimit { get; init; }
     public double OfferCoolDownMinutes { get; init; }
     public double SessionEndGraceSeconds { get; init; }
@@ -19,7 +18,6 @@ sealed class TimingOptions
     {
         AckSeconds = cfg.AckSeconds,
         PlantSnapshotMaxAgeMinutes = cfg.TimingNumber("plantSnapshotMaxAgeMinutes", 30),
-        PassUnmergedDigestMinutes = cfg.TimingValue("passUnmergedDigestMinutes", 5),
         OfferMissLimit = (int)cfg.TimingValue("offerMissLimit", 2),
         OfferCoolDownMinutes = cfg.TimingValue("offerCoolDownMinutes", 5),
         SessionEndGraceSeconds = cfg.TimingValue("sessionEndGraceSeconds", 90),

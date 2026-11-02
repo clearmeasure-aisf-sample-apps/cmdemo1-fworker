@@ -51,6 +51,12 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
     public static readonly TimeSpan TransientRetry = TimeSpan.FromSeconds(15);
     /// <summary>A train that waits (a release not promoted, a deployment followed) looks again at least this often, whatever else wakes it.</summary>
     public static readonly TimeSpan SafetyWake = TimeSpan.FromMinutes(10);
+    /// <summary>
+    /// V2.1: how long the gate reads of a refused chain of looks stay good for the answer at a Sign-off. The answer is made on gates read at or after the start of the chain (a Hold put before that is seen); a look that the
+    /// read cap of a minute cut short keeps its start for the next one, so that the reads of the looks build up instead of starting again (the reads keep their answers longer than this, GatesKeep).
+    /// </summary>
+    public static readonly TimeSpan FreshChainMax = TimeSpan.FromMinutes(4);
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> freshChains = new();
     const int Attempts = 5;
 
     /// <summary>
@@ -104,12 +110,15 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             if (!gated)
             {
                 var republish = state.RepublishPending;
-                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish, migrations);
+                var freshSince = freshChains.TryGetValue(input.Key, out var chain) && now - chain < FreshChainMax && chain <= now ? chain : now;
+                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish, migrations, freshSince);
                 try { await run.Evaluate(ct, republish); }
                 catch (Exception e) when (IsTransient(e, ct))
                 {
+                    freshChains[input.Key] = freshSince;
                     return new TrainResult([], now + TransientRetry, Retry: true);   // nothing of this look is kept; the input is saved (the pending wake stays; the retry is a timer of its own, see TrainResult.Retry)
                 }
+                if (run.GatesStarved) freshChains[input.Key] = freshSince; else freshChains.TryRemove(input.Key, out _);
                 wake = run.NextWake(stale);
                 if (wake is { } next && (state.WakeDue is not { } cur || cur <= now || next < cur)) state.WakeDue = next;
             }
@@ -151,7 +160,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                     if (!s.Deployments.TryGetValue(d.Version, out var byEnv)) s.Deployments[d.Version] = byEnv = [];
                     // W8.3: the deployment of the release a rollback goes back to, while the rollback waits for it, is the rollback's
                     var ours = key == p.Environment && s.ActiveRollback is { Phase: RollbackPhase.Deploying } ar && ar.To == d.Version;
-                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At, Rollback = ours };
+                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At, Rollback = ours, Ours = key == p.Environment && !ours && have is null && s.Requested.ContainsKey(d.Version) };
                     // a newer deployment of the release to the environment (a redeploy after a failure) starts the settling over
                     if (key == p.Environment) s.Settled.Remove(d.Version);
                 }
@@ -164,6 +173,20 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 if (p.KeyOf(so.Environment) != p.Environment) break;
                 if (s.SignOffs.All(x => x.InterruptionId != so.InterruptionId))
                     s.SignOffs.Add(new TrainSignOff { InterruptionId = so.InterruptionId, DeploymentId = so.DeploymentId, TaskId = so.TaskId, Version = so.Version, Since = now });
+                break;
+            case TrainCommandRefused rf:
+                var retryAt = rf.At.AddSeconds(Math.Max(1, p.PollSeconds));
+                if (!rf.Settled) break;
+                if (rf.Command == "PromoteRelease" && s.Requested.ContainsKey(rf.Version) && s.DeploymentOf(rf.Version, p.Environment) is null
+                    && rf.CommandKey == $"PromoteRelease|{p.Deployable}|{rf.Version}|{p.Environment}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(rf.Version))}")
+                {
+                    s.Requested.Remove(rf.Version); s.FirstRequested.Remove(rf.Version);
+                    s.RetryNotBefore[rf.Version] = retryAt;
+                }
+                else if (rf.Command == "AnswerSignOff" && s.SignOffs.FirstOrDefault(x => x.TaskId == rf.TaskId && x.Answered) is { } refused)
+                {
+                    refused.Answered = false; refused.RetryAfter = retryAt;
+                }
                 break;
             case TrainHold h:
                 s.Held = h.Held; s.HeldReason = h.Held ? h.Reason : "";
@@ -189,9 +212,13 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
 }
 
 /// <summary>One evaluation of one train on its state: the settling of finished deployments, the Sign-offs, the promotion. Short-lived; <see cref="Out"/> is what it decided to publish.</summary>
-sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false, IMigrationProbe? migrations = null)
+sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false, IMigrationProbe? migrations = null, DateTimeOffset? freshSince = null)
 {
     public List<object> Out { get; } = [];
+    /// <summary>A read of the gates of an item was refused in this look (the read cap of a minute, a fault of GitHub): the next look goes on from the answers this one got.</summary>
+    public bool GatesStarved { get; private set; }
+    /// <summary>"Fresh" for the Sign-off's answer: read at or after this instant. The start of this look at the least, so the reads of the look's first judgment count; the start of the chain of refused looks at the most.</summary>
+    readonly DateTimeOffset freshSince = freshSince is { } f && f <= now ? f : now;
     readonly List<DateTimeOffset> wakes = [];
     readonly string env = p.Environment;
     string TargetName => p.NameOf(env);
@@ -274,7 +301,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 s.DeliveredItems.Add($"{c.Item}|{c.Commit}");
                 items.Add(c.Item);
             }
-            s.Settled.Add(version);
+            s.Settled.Add(version); s.RetryNotBefore.Remove(version);
             if (carried.Count > 0) RememberDelivery(version, carried);
             if (s.Current is null || !s.Releases.TryGetValue(s.Current, out var cur) || (s.DeploymentOf(s.Current, env)?.FinishedAt ?? DateTimeOffset.MinValue) <= (dep.FinishedAt ?? dep.StartedAt)) s.Current = version;
             // older releases that never reached the environment ride in this one: "delivered in release X, superseding Y"
@@ -315,7 +342,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     sealed record Judged(string Version, ContentJudgment Content, IReadOnlyList<string> Items, IReadOnlyList<string> ItemGaps);
 
     /// <summary>Get-ReleaseContent and the item gates of one release: what it carries beyond what runs in this environment, and what its items lack.</summary>
-    async Task<Judged> Judge(TrainRelease release, CancellationToken ct)
+    async Task<Judged> Judge(TrainRelease release, CancellationToken ct, DateTimeOffset? freshFrom = null)
     {
         var running = s.RunningIn(env);
         CompareRange? cmp = null;
@@ -335,12 +362,20 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         {
             var cands = CandidatesOf(n).ToList();
             if (cands.Count > 0)
-                foreach (var c in cands) { items.Add(c.Item); itemGaps.AddRange(c.Gates.Gaps); if (p.DependenciesDelivered) itemGaps.AddRange(await DependencyGaps(c, j.Items, ct)); }
+                foreach (var c in cands)
+                {
+                    // The gates are read again at every look (the reads keep an answer for GatesKeep, five minutes): a label put on or taken off after the merge, or a demo video published, changes them and no event the train hears of says so.
+                    // v1 reads them in every pass. A read that finds the item gone leaves the gates of the merge.
+                    // An item whose last gates carry a gap (no demo video yet, a Hold, a missing label) is read fresh at every look, not from the five-minute cache: its gap is lifted by an edit nobody tells the train of, and the cached answer would hide the edit for up to GatesKeep.
+                    var readFrom = c.Gates.Gaps.Count > 0 ? freshFrom ?? freshSince : freshFrom;
+                    if (await reads.ReadGates(ItemId.Parse(c.Item), ct, readFrom) is { } fresh) c.Gates = fresh;
+                    items.Add(c.Item); itemGaps.AddRange(c.Gates.Gaps); if (p.DependenciesDelivered) itemGaps.AddRange(await DependencyGaps(c, j.Items, ct));
+                }
             else
             {
                 // an item found by its commit that is no candidate (a docs-only item went straight to Done): v1 reads its gates too
                 var id = new ItemId(p.Repository, n); items.Add(id.ToString());
-                if (await reads.ReadGates(id, ct) is { } g) itemGaps.AddRange(g.Gaps);
+                if (await reads.ReadGates(id, ct, freshFrom) is { } g) itemGaps.AddRange(g.Gaps);
             }
         }
         return new Judged(release.Version, j, items.Distinct().ToList(), itemGaps);
@@ -371,10 +406,26 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         var pk = Previous!;
         var ek = $"{release.Version}|{pk}";
         s.Evidence.TryGetValue(ek, out var ev);
-        if (ev?.LastReadAt is { } last && now - last < TimeSpan.FromSeconds(p.MinReadGapSeconds)) return TimeBound(ev.LastGap);
+        // (after a look that got no answer the next read is due after retrySeconds, not the read gap: v1's tries are that far apart)
+        var gapSeconds = ev?.Unreachable > 0 ? Math.Max(1, p.HealthRetrySeconds) : p.MinReadGapSeconds;
+        if (ev?.LastReadAt is { } last && now - last < TimeSpan.FromSeconds(gapSeconds))
+        {
+            if (ev.Unreachable == 0) return TimeBound(ev.LastGap);
+            wakes.Add(last.AddSeconds(gapSeconds));
+            return ev.LastGap;
+        }
         var url = p.UrlOf(pk);
         var finished = prev.FinishedAt ?? now;
         var probe = url is null ? new EnvProbe(null, null, "", now) : await reads.Probe(p.Deployable, pk, ct);
+        // V2.1: v1 tries the health read octopus.health.retries times (3), retrySeconds (20) apart before it is unreachable, and sleeps between the tries. The handler of the train must not sleep (one queue for every train), so a look is ONE try:
+        // the looks that got no answer in a row are counted, and only the last of them is a stored bad read. Until then the release waits and the train looks again after retrySeconds.
+        if (url is not null && string.Equals(probe.Status, "unreachable", StringComparison.Ordinal) && (ev?.Unreachable ?? 0) + 1 < Math.Max(1, p.HealthRetries))
+        {
+            ev ??= s.Evidence[ek] = new TrainEvidence();
+            ev.Unreachable++; ev.LastReadAt = now; ev.LastGap = $"the {pk} app did not answer; it is asked again";
+            wakes.Add(now.AddSeconds(Math.Max(1, p.HealthRetrySeconds)));
+            return ev.LastGap;
+        }
         var stored = (ev?.Reads ?? []).Select(r => new HealthRead(r.At, r.Status)).ToList();
         var fresh = new HealthRead(probe.At, probe.Status);
         var verdict = EvidenceComposite.Evaluate(pk, url, release.Version, probe.RunningVersion, p.HealthPath, stored, finished, fresh, p.Window);
@@ -385,7 +436,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             var kept = EvidenceComposite.Keep(EvidenceComposite.Collect(stored, finished, fresh));
             s.Evidence[ek] = new TrainEvidence { Reads = kept.Select(r => new TrainRead { At = r.At, Status = r.Status }).ToList(), LastReadAt = now, LastGap = verdict.Gap };
         }
-        else if (ev is not null) { ev.LastReadAt = now; ev.LastGap = verdict.Gap; }
+        else if (ev is not null) { ev.LastReadAt = now; ev.LastGap = verdict.Gap; ev.Unreachable = string.Equals(probe.Status, "unreachable", StringComparison.Ordinal) ? ev.Unreachable : 0; }
         return TimeBound(verdict.Gap);
     }
 
@@ -408,6 +459,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     {
         foreach (var so in s.SignOffs.ToList())
         {
+            if (!so.Answered && so.RetryAfter is { } retry && retry > now) { wakes.Add(retry); continue; }   // the answer was refused: asked again after the poll, as v1's next pass does
             if (so.Answered)
             {
                 // the answer's effect is not seen yet: send it again after a while (the key makes a second send harmless)
@@ -415,12 +467,17 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 wakes.Add((so.AnsweredAt ?? now).Add(DeliveryTrainService.CommandRetry));
                 continue;
             }
-            if (!s.Requested.ContainsKey(so.Version) || !s.Releases.TryGetValue(so.Version, out var release))
+            // The deployment of the Sign-off must be one the executor created for this train's request (TrainDeployment.Ours), not an operator's own deployment of the same release. A deployment saved before that was kept
+            // (Ours null) is judged by the request alone, as it was.
+            var created = s.DeploymentOf(so.Version, env) is { } dep && dep.DeploymentId == so.DeploymentId && (dep.Ours ?? (s.Requested.ContainsKey(so.Version) || s.RetryNotBefore.ContainsKey(so.Version)));
+            if (!created || !s.Releases.TryGetValue(so.Version, out var release))
             {
                 Decide("following", so.Version, [], [$"the Sign-off of task {so.TaskId} belongs to a deployment the gateway did not create"]);
                 continue;
             }
-            var j = await Judge(release, ct);
+            // A read of the gates that GitHub refuses (the cap of a minute, a fault) is a wait like any other, which signoffWaitHours ends: it must not escape as a failed look, which keeps nothing and never reaches the limit.
+            var j = await TryJudge(release, ct, null);
+            if (j is null) { if (UnreadGatesWait(so) is { } why) AnswerNow(so, false, [], [why]); continue; }
             // under an incident's hold only the release that carries the hotfix is answered; the others wait where they are (the hold ends with the incident)
             if (!PassesHold(j.Items)) { Decide("held", so.Version, j.Items, [HoldText()]); continue; }
             // The Sign-off asks again only what can get worse while it waits, and aborts only for a hard failure (Invoke-AutoPromoteInner): an item gate, a commit of the release that is no
@@ -434,8 +491,19 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             var soft = common.Where(g => !hard.Contains(g)).ToList();
             if (hard.Count == 0 && soft.Count == 0)
             {
-                var now1 = await HealthNow(ct);
-                if (now1.Length > 0) hard.Add(now1);
+                // About to answer Proceed: the answer is made on gates read at or after the start of this look (or of the chain of looks the read cap cut short; v1's pass reads them every time), so a Hold put since then is seen.
+                // The reads of the judgment just made count (they are that new); the others are read again, and a read that is refused makes the Sign-off wait (signoffWaitHours still applies), the answers read so far being kept for the next look.
+                var again = await TryJudge(release, ct, freshSince > so.Since ? freshSince : so.Since);
+                if (again is null) { if (UnreadGatesWait(so) is { } why) AnswerNow(so, false, j.Items, [why]); continue; }
+                j = again;
+                hard = j.ItemGaps.Concat(j.Content.Hard).ToList();
+                if (j.Content.Skip) hard.Add($"a release at least as new already runs in {TargetName}");
+                soft = j.Content.Gaps.Where(g => !hard.Contains(g)).ToList();
+            }
+            if (hard.Count == 0 && soft.Count == 0)
+            {
+                var (now1, silent) = await HealthNow(so, ct);
+                if (now1.Length > 0) { if (silent) soft.Add(now1); else hard.Add(now1); }
             }
             if (hard.Count == 0 && soft.Count > 0)
             {
@@ -449,26 +517,54 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                     continue;
                 }
             }
-            var proceed = hard.Count == 0;
-            var notes = proceed ? "Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md)." : $"Aborted by the factory worker gateway: {string.Join("; ", hard)}";
-            so.Answered = true; so.AnsweredAt = now; so.LastProceed = proceed; so.LastNotes = notes;
-            Out.Add(Send(AnswerOf(so, proceed, notes), so.Version));
-            wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
-            Decide(proceed ? "signoff-proceed" : "signoff-abort", so.Version, j.Items, proceed ? [] : hard);
+            AnswerNow(so, hard.Count == 0, j.Items, hard);
         }
         return s.SignOffs.Count > 0;   // a deployment waits at its Sign-off: there is nothing to promote beside it
+    }
+
+    void AnswerNow(TrainSignOff so, bool proceed, IReadOnlyList<string> items, IReadOnlyList<string> hard)
+    {
+        var notes = proceed ? "Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md)." : $"Aborted by the factory worker gateway: {string.Join("; ", hard)}";
+        so.Answered = true; so.AnsweredAt = now; so.LastProceed = proceed; so.LastNotes = notes;
+        Out.Add(Send(AnswerOf(so, proceed, notes), so.Version));
+        wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
+        Decide(proceed ? "signoff-proceed" : "signoff-abort", so.Version, items, proceed ? [] : hard);
+    }
+
+    /// <summary>Judge, but a read that is refused (<see cref="DeliveryTrainService.IsTransient"/>) is null and marks the look as starved; the Sign-off then waits (<see cref="UnreadGatesWait"/>).</summary>
+    async Task<Judged?> TryJudge(TrainRelease release, CancellationToken ct, DateTimeOffset? freshFrom)
+    {
+        try { return await Judge(release, ct, freshFrom); }
+        catch (Exception e) when (DeliveryTrainService.IsTransient(e, ct)) { GatesStarved = true; return null; }
+    }
+
+    /// <summary>The Sign-off cannot be judged now because a read was refused: it waits and the train looks again shortly. After signoffWaitHours it is aborted, as any waiting Sign-off is; the reason is returned then, null while it waits.</summary>
+    string? UnreadGatesWait(TrainSignOff so)
+    {
+        var waitedH = (now - so.Since).TotalHours;
+        if (waitedH >= p.SignoffWaitHours) return $"waited {Math.Round(waitedH, 1).ToString("R", CultureInfo.InvariantCulture)} h at the Sign-off (limit {p.SignoffWaitHours.ToString("R", CultureInfo.InvariantCulture)} h): the gates of its items could not be read";
+        wakes.Add(so.Since.AddHours(p.SignoffWaitHours)); wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
+        Decide("signoff-waiting", so.Version, [], [$"the Sign-off of task {so.TaskId} waits: the gates of its items could not be read now; they are read again shortly"]);
+        return null;
     }
 
     AnswerSignOff AnswerOf(TrainSignOff so, bool proceed, string notes)
         => new($"AnswerSignOff|{p.Deployable}|{so.InterruptionId}", p.Deployable, so.InterruptionId, so.TaskId, proceed, notes);
 
-    /// <summary>Test-EnvHealthNow: one read of the previous environment's app, '' when Healthy, else the reason.</summary>
-    async Task<string> HealthNow(CancellationToken ct)
+    /// <summary>Test-EnvHealthNow: one read of the previous environment's app, an empty gap when Healthy, else the reason. Silent: the app gave no answer yet (not the last try), which is a wait and no failure.</summary>
+    async Task<(string Gap, bool Silent)> HealthNow(TrainSignOff so, CancellationToken ct)
     {
         var pk = Previous!;
-        if (p.UrlOf(pk) is null) return EvidenceComposite.NoUrlGap(pk);
+        if (p.UrlOf(pk) is null) return (EvidenceComposite.NoUrlGap(pk), false);
         var probe = await reads.Probe(p.Deployable, pk, ct);
-        return string.Equals(probe.Status, "Healthy", StringComparison.OrdinalIgnoreCase) ? "" : $"the {pk} app answered {probe.Status} on {p.HealthPath}";
+        // one try per look (see Evidence): the looks that got no answer in a row are counted, and only the last of them aborts
+        if (string.Equals(probe.Status, "unreachable", StringComparison.Ordinal) && so.HealthMisses + 1 < Math.Max(1, p.HealthRetries))
+        {
+            so.HealthMisses++; wakes.Add(now.AddSeconds(Math.Max(1, p.HealthRetrySeconds)));
+            return ($"the {pk} app did not answer; it is asked again", true);
+        }
+        so.HealthMisses = 0;
+        return (string.Equals(probe.Status, "Healthy", StringComparison.OrdinalIgnoreCase) ? "" : $"the {pk} app answered {probe.Status} on {p.HealthPath}", false);
     }
 
     // ---- promotion -----------------------------------------------------------------------------------------------------------------------------------------
@@ -507,12 +603,13 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             var failedHere = s.DeploymentOf(r.Version, env);
             if (failedHere is not null)
             {
-                Note(r.Version, [], [$"its deployment to {TargetName} ended {failedHere.Phase} ({failedHere.DeploymentId}); the operator deploys it again, or the item goes back to Development"]);
+                Note(r.Version, ItemsOf(r), [$"its deployment to {TargetName} ended {failedHere.Phase} ({failedHere.DeploymentId}); the operator deploys it again, or the item goes back to Development"]);
                 continue;
             }
             if (prev is not { Succeeded: true })
             {
-                Note(r.Version, [], [prev is null ? $"it has no deployment to {p.NameOf(pk)}" : $"its deployment to {p.NameOf(pk)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})"]);
+                // (a deployment that has not begun or is running is a moment, which the events of Octopus end within seconds: v1 reads Octopus whole and never sees it, so it is no line of any item; one that ended is)
+                Note(r.Version, prev is { Completed: true } ? ItemsOf(r) : [], [prev is null ? $"it has no deployment to {p.NameOf(pk)}" : $"its deployment to {p.NameOf(pk)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})"]);
                 continue;
             }
             if (stop && ++behind > MaxDescribedBehind) continue;
@@ -530,14 +627,18 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             {
                 // A read of GitHub or the app (or of the delivered-to table) failed for this one release (a long range is read commit by commit, within the shadow's budget per minute). It must not take the decisions of the
                 // other releases with it: they are published as they are, this release keeps the decision it had, nothing is promoted past it, and the train looks again soon.
-                if (!stop) blocked = true; unread.Add(r.Version); stop = true; wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
+                GatesStarved = true; if (!stop) blocked = true; unread.Add(r.Version); stop = true; wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
                 continue;
             }
             var reasons = common.Concat(j.ItemGaps).Distinct().ToList();
-            if (stop) { if (reasons.Count > 0) Note(r.Version, j.Items, reasons); continue; }
+            // An item's gap (a label, a demo video) and the settling of another item's merge are lifted by an edit, not by an event the train hears of: the train looks again at v1's pace. A hard content gap (a commit that is no factory item's) is lifted by an operator's deployment, which is an event.
+            if (j.ItemGaps.Count > 0 || j.Content.Gaps.Except(j.Content.Hard).Any()) wakes.Add(now.AddSeconds(p.PollSeconds));
+            // (a release whose content cannot be read, the commit running here unknown or a range GitHub cannot compare, names no items: v1 tells the items of its queue entry, the train those merged as the release's own commit)
+            var told = j.Items.Count > 0 ? j.Items : ItemsOf(r);
+            if (stop) { if (reasons.Count > 0) Note(r.Version, told, reasons); continue; }
             judged.Add(new ReleaseCandidate(r.Version, r.Assembled, reasons.Count == 0));
             if (reasons.Count == 0) { winner = j; stop = true; continue; }
-            Note(r.Version, j.Items, reasons);
+            Note(r.Version, told, reasons);
             // a release that only waits for the clock or the app is not blocked: the train does not fall back to an older release past it
             if (evidenceOnly) stop = true;
         }
@@ -549,6 +650,11 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         if (blocked) { mentioned.UnionWith(open2.Select(x => x.Version)); Retract(mentioned); return; }
         if (pick is null || winner is null) { Retract(mentioned); return; }
         mentioned.Add(pick.Version); Retract(mentioned);
+        if (s.RetryNotBefore.TryGetValue(pick.Version, out var notBefore))
+        {
+            if (notBefore > now) { wakes.Add(notBefore); return; }   // the executor was refused (a 403): v1 asks again in its next pass, the train after the poll
+            s.RetryNotBefore.Remove(pick.Version);
+        }
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
         s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)
@@ -559,6 +665,13 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
 
         void Note(string version, IReadOnlyList<string> items, IReadOnlyList<string> reasons) => notes.Add((version, items, reasons.ToList()));
     }
+
+    /// <summary>
+    /// The items a release carries by its own commit (the candidates merged as that commit), for the waits that are decided before the release is judged and do not pass by themselves: v1 says why a release waits on every item of its
+    /// queue entry (the item journals "waits for the automatic promotion to uat: its deployment to tdd is Failed"), and a wait with no item is a line no item shows. The items between the commit running in the environment and this release need a read of GitHub
+    /// and are named when the release is judged.
+    /// </summary>
+    List<string> ItemsOf(TrainRelease r) => string.IsNullOrEmpty(r.Commit) ? [] : s.Candidates.Values.Where(c => string.Equals(c.Commit, r.Commit, StringComparison.OrdinalIgnoreCase)).Select(c => c.Item).Distinct().ToList();
 
     /// <summary>Whether a release with these items may be promoted under the hold: always when nothing holds the train, else only when it carries an item of the incident's hotfix.</summary>
     bool PassesHold(IReadOnlyList<string> items) => !s.Held || items.Any(i => s.HoldAllow.Contains(i.ToLowerInvariant()));

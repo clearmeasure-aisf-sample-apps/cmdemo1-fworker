@@ -210,6 +210,21 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task AReleaseThatWaitsForThePreviousEnvironment_NamesTheItemsOfItsCommit_SoTheirJournalsCanSayWhy()
+    {
+        // V2.1: v1 journals "waits for the automatic promotion" on every item of the release even while its deployment to tdd is Failed or missing; a wait with no item is a line no item shows
+        var f = new TrainFixture(); await f.Baseline();
+        await f.Merge(7, 'a'); await f.Merge(8, 'b');
+        await f.Release("1.0.2", 'a');
+        Assert.Equal(["it has no deployment to Tdd"], f.LastDecision!.Reasons);
+        Assert.Empty(f.LastDecision.Items);   // (a moment: Octopus's events end it in seconds, and v1, which reads Octopus whole, never says it)
+        await f.Deploy("1.0.2", "Tdd", "Started");
+        Assert.Empty(f.LastDecision!.Items);
+        await f.Deploy("1.0.2", "Tdd", "Failed");
+        Assert.Equal([new ItemId(Repo, 7).ToString()], f.LastDecision!.Items);   // (the item 8 merged as another commit: it is the item of another release)
+    }
+
+    [Fact]
     public async Task AReleaseNotYetSucceededInThePreviousEnvironment_WaitsWithV1sText()
     {
         var f = new TrainFixture(); await f.Baseline();
@@ -264,6 +279,92 @@ public class DeliveryTrainTests
         await f.ReleaseInPrevious("1.0.2", 'a');
         Assert.Equal(["#5 has no 'Auto Merge' label"], f.LastDecision!.Reasons);
         Assert.Equal(["acme/orders#5", "acme/orders#7"], f.LastDecision.Items.Order());
+    }
+
+    [Fact]
+    public async Task AGateThatChangesAfterTheMerge_IsReadAgain_AndLiftsTheWait()
+    {
+        // a Hold label, an Auto Merge label or a published demo video change the gates of a merged item and no event the train hears of says so: v1 reads them in every pass, the train at every look
+        var gaps = new[] { "#7 has the 'video' label and no demo video published (release demo-7, asset demo-7.mp4)" };
+        var f = await OneRelease(gaps: gaps);
+        var first = f.LastDecision!;
+        Assert.Equal("waiting", first.Action);
+        Assert.Equal(gaps, first.Reasons);
+        f.Reads.Gates["acme/orders#7"] = new ItemMergedGates(true, "", true, true, true, []);   // the video is published
+        await f.Mature();
+        Assert.Single(f.Of<PromoteRelease>());
+        Assert.Equal("promote", f.LastDecision!.Action);
+    }
+
+    [Fact]
+    public async Task AnItemWithAGap_IsReadFresh_NotFromTheFiveMinuteCache_SoAPublishedVideoLiftsTheWaitAtOnce()
+    {
+        // the reads keep an answer for GatesKeep (5 minutes); a waiting item's gap (here the demo video) is lifted by an edit no event announces, so the next look must not be served the cached "no video"
+        var gaps = new[] { "#7 has the 'video' label and no demo video published (release demo-7, asset demo-7.mp4)" };
+        var f = await OneRelease(x => { x.Reads.GateReadsPerMinute = 40; x.Reads.GatesKeep = TimeSpan.FromHours(1); }, gaps);
+        Assert.Equal("waiting", f.LastDecision!.Action);
+        await f.Mature();   // the release is old enough; only the video holds it, and the looks read the gates
+        Assert.Empty(f.Of<PromoteRelease>());
+        f.Reads.Gates["acme/orders#7"] = new ItemMergedGates(true, "", true, true, true, []);   // the video is published, well inside the cache time of the last read
+        await f.After(TimeSpan.FromMinutes(3));
+        // the video gap is gone at the first look after the edit (the cache would have kept it for five minutes); what is left is the app's own evidence, which is read only once nothing else holds the release
+        Assert.DoesNotContain(f.LastDecision!.Reasons, r => r.Contains("demo video"));
+        Assert.Contains(f.LastDecision.Reasons, r => r.Contains("not been Healthy long enough"));
+    }
+
+    [Fact]
+    public async Task AWaitOnAnItemsGap_LooksAgainAtThePolicysPoll_NotOnlyAtTheSafetyWake()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a');
+        await f.Merge(7, 'a', ["#7 has no 'Auto Merge' label"]);
+        f.Reads.Running["tdd"] = "1.0.2";
+        await f.Release("1.0.2", 'a'); await f.Deploy("1.0.2", "Tdd", "Started");
+        var r = await f.Deploy("1.0.2", "Tdd", "Succeeded");
+        Assert.NotNull(r.WakeAt);
+        Assert.True(r.WakeAt!.Value - f.Now <= TimeSpan.FromSeconds(120), $"the next look is {r.WakeAt!.Value - f.Now} away");
+    }
+
+    [Fact]
+    public async Task ARefusedPromotion_IsTakenBack_AndAskedAgainAfterThePoll_WithANewKey()
+    {
+        var f = await OneRelease();
+        await f.Mature();
+        var cmd = Assert.Single(f.Of<PromoteRelease>());
+        f.All.Clear();
+        var refused = await f.Send(new TrainCommandRefused(f.Key, "PromoteRelease", "1.0.2", "", cmd.IdempotencyKey, true, f.Now));
+        Assert.Empty(f.Of<PromoteRelease>());   // not before the poll
+        Assert.Empty(f.State.Requested);
+        Assert.NotNull(refused.WakeAt);
+        await f.Fire(refused);
+        var again = Assert.Single(f.Of<PromoteRelease>());
+        Assert.Equal("1.0.2", again.Version);
+        Assert.NotEqual(cmd.IdempotencyKey, again.IdempotencyKey);
+    }
+
+    [Fact]
+    public async Task ARefusal_OfAnEarlierRequestOrOfACommandThatRanOutOfTries_TakesNothingBack()
+    {
+        var f = await OneRelease();
+        await f.Mature();
+        var cmd = Assert.Single(f.Of<PromoteRelease>());
+        await f.Send(new TrainCommandRefused(f.Key, "PromoteRelease", "1.0.2", "", cmd.IdempotencyKey, false, f.Now));   // ran out of tries: the deployment may exist
+        await f.Send(new TrainCommandRefused(f.Key, "PromoteRelease", "1.0.2", "", "PromoteRelease|orders|1.0.2|uat|0", true, f.Now));   // a late refusal of another request
+        Assert.True(f.State.Requested.ContainsKey("1.0.2"));
+        Assert.Empty(f.State.RetryNotBefore);
+    }
+
+    [Fact]
+    public async Task ARefusedSignOffAnswer_IsAskedAgainAfterThePoll_NotAfterFiveMinutes()
+    {
+        var f = await AtTheSignOff();
+        var first = Assert.Single(f.Of<AnswerSignOff>());
+        f.All.Clear();
+        var refused = await f.Send(new TrainCommandRefused(f.Key, "AnswerSignOff", "", first.TaskId, first.IdempotencyKey, true, f.Now));
+        Assert.Empty(f.Of<AnswerSignOff>());
+        Assert.False(f.State.SignOffs.Single().Answered);
+        await f.Fire(refused);
+        Assert.Equal(first.Proceed, Assert.Single(f.Of<AnswerSignOff>()).Proceed);
     }
 
     // ---- the Sign-off --------------------------------------------------------------------------------------------------------------------------------------
@@ -348,6 +449,46 @@ public class DeliveryTrainTests
         Assert.False(a.Proceed);
         Assert.Equal("Aborted by the factory worker gateway: waited 2.1 h at the Sign-off (limit 2 h): its deployment to Tdd is still Started (D-redeploy)", a.Notes);
         Assert.Equal("signoff-abort", f.LastDecision!.Action);
+    }
+
+    [Fact]
+    public async Task ASignOff_WaitsOnAnUnsettledMerge_ThenIsAnsweredOnTheGatesOfNow()
+    {
+        // a commit of the release is another item's merge that is not settled yet: the Sign-off waits (a soft gap, judged on the cached gates), and only the answer Proceed reads the gates fresh
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'x', 'a');
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "");
+        await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a'); await f.Mature();
+        Assert.Single(f.Of<PromoteRelease>());
+        await f.Deploy("1.0.2", "Uat", "Started");
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "#5's merge (xxxxxxx) is not settled yet (awaiting release-candidate)");
+        f.Reads.FreshGateReads = 0;
+        await f.SignOff("1.0.2", "Uat");
+        Assert.Equal("signoff-waiting", f.LastDecision!.Action);
+        Assert.Contains("is not settled yet", f.LastDecision.Reasons[0]);
+        Assert.Empty(f.Of<AnswerSignOff>());
+        Assert.Equal(0, f.Reads.FreshGateReads);
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "");
+        await f.After(TimeSpan.FromMinutes(2));
+        Assert.True(Assert.Single(f.Of<AnswerSignOff>()).Proceed);
+        Assert.True(f.Reads.FreshGateReads > 0);
+    }
+
+    [Fact]
+    public async Task ASignOff_WithACommitThatIsNoFactoryItems_IsAborted()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'x', 'a');
+        f.Reads.Lookups[Sha('x')] = new CommitItemLookup(5, "");
+        await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a'); await f.Mature();
+        await f.Deploy("1.0.2", "Uat", "Started");
+        f.Reads.Lookups.Remove(Sha('x'));   // the commit is nobody's merge any more
+        await f.SignOff("1.0.2", "Uat");
+        var a = Assert.Single(f.Of<AnswerSignOff>());
+        Assert.False(a.Proceed);
+        Assert.Contains("is not the merge commit of a factory work item", a.Notes);
     }
 
     [Fact]

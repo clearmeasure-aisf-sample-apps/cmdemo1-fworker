@@ -51,7 +51,9 @@ sealed partial class Plant
     DateTime? kpHeard;
     long kpNext = 1;
     readonly List<(long Id, string Json)> kpBuffer = new();
-    readonly List<(DateTime At, int N)> kpCreated = new();
+    Fworker.Workflows.Keeper.KeeperDailyCap? kpCap;
+    /// <summary>V1.4: the day's new items of the keeper, one record for the pipeline's check and the keeper commands of v2 (the limit is <c>keeper.maxNewItemsPerDay</c>, read when asked).</summary>
+    public Fworker.Workflows.Keeper.KeeperDailyCap KeeperCap { get { lock (gate) return kpCap ??= new(() => Keeper.MaxNewItemsPerDay); } }
     readonly Dictionary<string, DateTime> kpJobSent = new();
 
     public string ActiveKeeper() { lock (gate) return kpSlot?.Name ?? ""; }
@@ -128,8 +130,8 @@ sealed partial class Plant
     public void KeeperRaiseOpen() { int? w; lock (gate) w = kpDesignWaiting; if (w is { } wv) KeeperBacklog(wv); }
 
     // The day's new items (create-item, split-item, a follow-up of amend-criteria): how many may still be created, and the record of those that were.
-    public int KeeperItemsLeft() { lock (gate) { var now = DateTime.UtcNow; kpCreated.RemoveAll(x => (now - x.At).TotalHours >= 24); return Math.Max(0, Keeper.MaxNewItemsPerDay - kpCreated.Sum(x => x.N)); } }
-    public void KeeperCreated(int n) { if (n > 0) lock (gate) kpCreated.Add((DateTime.UtcNow, n)); }
+    public int KeeperItemsLeft() => KeeperCap.Left;
+    public void KeeperCreated(IEnumerable<int> issues) => KeeperCap.Record(issues);
 
     // The next free worker for a pin of create-item --pin next-free: connected, the owner role, not draining or cooling down, a free slot, not spent.
     public string NextFreeWorker()
@@ -168,13 +170,12 @@ sealed partial class Plant
         lock (gate)
         {
             var now = DateTime.UtcNow; var s = kpSlot;
-            kpCreated.RemoveAll(x => (now - x.At).TotalHours >= 24);
             return new JsonObject
             {
                 ["enabled"] = Keeper.Enabled, ["allowedNames"] = new JsonArray(Keeper.Names.Select(n => (JsonNode)n).ToArray()),
                 ["session"] = s == null ? null : new JsonObject { ["name"] = s.Name, ["connected"] = s.Out != null, ["present"] = MessageStore.Within(kpHeard, now, Msg.OnlineSeconds), ["model"] = s.Model, ["effort"] = s.Effort,
                     ["modelCheck"] = s.ModelCheck, ["since"] = s.Since.ToString("o"), ["lastHeard"] = kpHeard?.ToString("o") },
-                ["newItemsToday"] = kpCreated.Sum(x => x.N), ["maxNewItemsPerDay"] = Keeper.MaxNewItemsPerDay, ["minTechnicalDesign"] = Keeper.MinTechnicalDesign,
+                ["newItemsToday"] = KeeperCap.Used, ["maxNewItemsPerDay"] = Keeper.MaxNewItemsPerDay, ["minTechnicalDesign"] = Keeper.MinTechnicalDesign,
                 ["jobsBuffered"] = kpBuffer.Count
             };
         }

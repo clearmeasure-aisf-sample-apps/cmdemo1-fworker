@@ -211,7 +211,7 @@ public sealed class FeaturePlanWiringTests
         foreach (var slot in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune })
             Assert.True(jobs.Has(slot), slot);
         Assert.NotNull(host.Services.GetService<PlantStepJobs>());
-        Assert.Contains(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), h => h is Sweeper { PlantJobs: true });
+        Assert.Contains(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), h => h is Sweeper { Feed: not null });
     }
 
     [Fact]

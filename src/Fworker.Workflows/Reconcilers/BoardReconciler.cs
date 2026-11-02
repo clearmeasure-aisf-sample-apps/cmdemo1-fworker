@@ -28,6 +28,17 @@ public sealed class BoardReconciler(IBoardReader reader, Func<CatalogSnapshot> c
     /// <summary>The cards of the last pass that read the board (W9.10k: the plant reads the labels of the items the engine owns from them). Empty before the first pass; a dry pass leaves it as it was.</summary>
     public IReadOnlyList<BoardCard> LastCards { get; private set; } = [];
 
+    readonly Dictionary<string, DateTimeOffset> reopened = [];
+
+    /// <summary>
+    /// V1.1: when a pass saw the card of this item (key "owner/repo#N") open after an earlier pass had seen it closed (null: it did not): the proof of a reopening that the admission asks for before it reopens the saga of a completed item. The memory is the
+    /// reconciler's own (and BoardSeen's across a restart: a card last seen closed and now open is the same transition); it is forgotten when the card is seen closed again, so a second completion does not inherit it.
+    /// </summary>
+    public DateTimeOffset? ReopenedAt(string key) { lock (reopened) return reopened.TryGetValue(key, out var at) ? at : null; }
+
+    /// <summary>The proof is used up: the admission reopened the saga on it, and it must not reopen the next generation too.</summary>
+    public void ReopenUsed(string key) { lock (reopened) reopened.Remove(key); }
+
     /// <summary>What the reconciler costs GitHub, per pass (W9.10g).</summary>
     public BoardReconcileMeter Meter { get; } = new();
 
@@ -77,6 +88,7 @@ public sealed class BoardReconciler(IBoardReader reader, Func<CatalogSnapshot> c
             var key = new ItemId(card.Repository, card.Number).ToString();
             current.Add(key);
             var known = seen.TryGetValue(key, out var prev);
+            if (!dry && known) { lock (reopened) { if (!prev.Open && card.Open) reopened[key] = now(); else if (prev.Open && !card.Open) reopened.Remove(key); } }
             if (known && prev == (card.Column, card.Open)) continue;
             if (!known && !card.Open) { if (!dry) { seen[key] = (card.Column, card.Open); changed[key] = new(card.Column, card.Open); } continue; }   // a closed card seen for the first time is history, not news
             if (dry) { published++; continue; }

@@ -5,7 +5,7 @@ using Fworker.Workflows.Reconcilers;
 using Fworker.Workflows.Transcripts;
 
 // W9.8: the wiring of the board group (gateway/Verbs/Routes/Board.cs, BoardVerbs.cs). Only where the engine acts (Engine.V2Acts): the transcripts move to the database, the webhook translation and the journal
-// verb are answered without the rule scripts, and the parts the verbs read are registered once. Nothing here exists in v1, in the shadow run or under the kill switch.
+// verb are answered without the rule scripts, and the parts the verbs read are registered once. Nothing here exists in v1 or in the shadow run.
 static class BoardWiring
 {
     public static void Register(IServiceCollection services, GatewayComposition c, FactorySchemaStatus schema)

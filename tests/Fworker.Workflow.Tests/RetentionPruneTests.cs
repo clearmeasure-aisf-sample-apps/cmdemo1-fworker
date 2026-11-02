@@ -35,6 +35,27 @@ public class RetentionPruneTests : IAsyncLifetime
 
     Task<long> Count(string table, string where = "1=1") => database!.Count($"SELECT COUNT(*) FROM factory.{table} WHERE {where}");
 
+    async Task DeadLetter(string type, string exception, DateTimeOffset failedAt)
+        => await database!.Execute($"INSERT INTO wolverine.wolverine_dead_letters (id, body, message_type, received_at, exception_type, failed_at) VALUES (NEWID(), 0x00, N'{type}', N'local://x', N'{exception}', '{failedAt:O}')");
+
+    [SqlFact]
+    public async Task TheTrainWakeDeadLettersOfTheFixedFault_AreArchivedOnce_AndNothingElse()
+    {
+        if (NoServer) return;
+        var before = RetentionPrune.TrainWakeFixedAt.AddHours(-20); var after = RetentionPrune.TrainWakeFixedAt.AddHours(5);
+        for (var i = 0; i < 3; i++) await DeadLetter("delivery.train.wake", "Fworker.Integrations.GitHub.MergeFactsException", before);   // the 121 of tdd: archived
+        await DeadLetter("delivery.train.wake", "Fworker.Integrations.GitHub.MergeFactsException", after);                                 // a new fault of the same kind: stays visible
+        await DeadLetter("delivery.train.wake", "System.InvalidOperationException", before);                                              // another fault of the wake: stays
+        await DeadLetter("delivery.train.deployment", "Fworker.Integrations.GitHub.MergeFactsException", before);                         // another message: stays
+        var first = await Prune().Run();
+        Assert.Equal(3, first.DeadLettersArchived);
+        Assert.Equal(3, await database!.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters WHERE archived_at IS NOT NULL"));
+        Assert.Equal(3, await database.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters WHERE archived_at IS NULL"));
+        Assert.Equal(6, await database.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));   // nothing is deleted
+        var second = await Prune().Run();
+        Assert.Equal(0, second.DeadLettersArchived);   // idempotent
+    }
+
     [SqlFact]
     public async Task OldHistoryOfAnItemWithNoOpenInstanceGoes_TheHistoryOfAnOpenItemAndRecentRowsStay()
     {
