@@ -1409,7 +1409,9 @@ function Invoke-SidecarCase([string]$Kind) {
         [void](Wait-Until -Seconds 20 { Test-Path $fm })
         $m = if (Test-Path $fm) { Get-Content -Raw $fm } else { '' }
         Check "sidecar ($Kind): the session's first message carries the launcher note: do not start subscribe, tail events.log" ($m -match 'LAUNCHER NOTE' -and $m -match 'Do not start factory\.ps1 subscribe' -and $m.Contains($events) -and ($m -match 'tail -n0 -F' -or $m -match 'Get-Content')) $m
-        Check "sidecar ($Kind): the credential reaches the sidecar only, not the claude process" ((Get-Content -Raw (Join-Path $base 'claude-env.txt') -ErrorAction SilentlyContinue).Trim() -eq 'none')
+        # (the fake claude writes first-message.txt, then claude-env.txt: wait for the second, or the read below is of a file that is not there yet)
+        [void](Wait-Until -Seconds 20 { Test-Path (Join-Path $base 'claude-env.txt') })
+        Check "sidecar ($Kind): the credential reaches the sidecar only, not the claude process" ("$(Get-Content -Raw (Join-Path $base 'claude-env.txt') -ErrorAction SilentlyContinue)".Trim() -eq 'none')
         # a sidecar that dies while the session runs is started again (the scenario stops it by its process id)
         $before = @(& $sidecars)
         Check "sidecar ($Kind): one sidecar runs" ($before.Count -eq 1) ($before | ForEach-Object { $_.CommandLine } | Out-String)
