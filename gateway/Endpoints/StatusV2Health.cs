@@ -40,7 +40,7 @@ interface IV2HealthSource
     Task<V2Facts> Read(CancellationToken ct);
 }
 
-sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, EngineOptions engine, Func<RecurringJobRegistry?> jobs, Func<WorkItemRearm?> rearm, Func<DateTimeOffset>? now = null, Func<JsonObject?>? reconciler = null, Func<JsonObject?>? adoption = null, Func<JsonObject?>? intake = null)
+sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, EngineOptions engine, Func<RecurringJobRegistry?> jobs, Func<WorkItemRearm?> rearm, Func<DateTimeOffset>? now = null, Func<JsonObject?>? reconciler = null, Func<JsonObject?>? adoption = null, Func<JsonObject?>? intake = null, TimeSpan? hostReportMax = null)
 {
     public static readonly TimeSpan Fresh = TimeSpan.FromSeconds(10), AttemptLimit = TimeSpan.FromSeconds(8);
     /// <summary>Envelopes remembered per kind: past this many ids a backlog is "at least" this old, not counted one by one.</summary>
@@ -135,7 +135,7 @@ sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, Engine
         o["outgoing"] = Envelopes(f.Outgoing, seenOutgoing, at);
         o["jobs"] = Jobs();
         o["sagas"] = Sagas(f.Sagas, at);
-        if (f.Capacity is { } cap) o["capacity"] = Capacity(cap, at);
+        if (f.Capacity is { } cap) o["capacity"] = Capacity(cap, at, hostReportMax ?? TimeSpan.FromMinutes(CapacitySettings.DefaultHostReportMaxMinutes));
         o["mergeTrains"] = new JsonArray(f.MergeTrains.Select(t => (JsonNode?)JsonNode.Parse(t)).ToArray());
         o["deliveryTrains"] = new JsonArray(f.DeliveryTrains.Select(t => (JsonNode?)JsonNode.Parse(t)).ToArray());
         o["idempotencyLedger"] = new JsonObject { ["entries"] = f.IdempotencyLedger.Entries, ["failures"] = f.IdempotencyLedger.Failures, ["oldestAgeSeconds"] = Age(f.IdempotencyLedger.Oldest, at) };
@@ -171,14 +171,38 @@ sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, Engine
         return o;
     }
 
-    static JsonObject Capacity(CapacityLedgerFacts c, DateTimeOffset at)
+    /// <summary>No host has reported for this long: the signal of the alert "no host has reported for 30 minutes" (docs/deploy/incident-alert-rules.md 5).</summary>
+    public static readonly TimeSpan NoHostAlertAfter = TimeSpan.FromMinutes(30);
+
+    /// <summary>How long the freshest host report is old, or null when the ledger knows no host (a factory with no hosted runtime has nothing to miss).</summary>
+    public static TimeSpan? HostSilence(CapacityState s, DateTimeOffset at) => s.Hosts.Count == 0 ? null : at - s.Hosts.Values.Max(h => h.ReportedAt);
+
+    static JsonObject Capacity(CapacityLedgerFacts c, DateTimeOffset at, TimeSpan hostReportMax)
     {
         var s = c.State;
+        // a host report older than hostReportMax gives no burst, older than three times that no slot (CapacitySettings.HostGone): the scheduler then holds with host-headroom "no host reported"
+        string HostState(TimeSpan age) => age > hostReportMax * 3 ? "gone" : age > hostReportMax ? "stale" : "fresh";
+        var hosts = s.Hosts.Values.OrderBy(h => h.Name, StringComparer.Ordinal).Select(h =>
+        {
+            var age = (long)Math.Max(0, (at - h.ReportedAt).TotalSeconds);
+            return (JsonNode?)new JsonObject { ["name"] = h.Name, ["runtime"] = h.Runtime, ["reportedAt"] = h.ReportedAt.ToString("o"), ["reportAgeSeconds"] = age, ["state"] = HostState(TimeSpan.FromSeconds(age)), ["slots"] = s.SlotsOn(h.Name) };
+        }).ToArray();
+        // why the queue waits: the waiting code of each request (its first word, "host-headroom", "runtime-budget", "file-overlap"...), counted; "" is a request not yet judged
+        var waiting = s.Queue.Values.GroupBy(q => q.Announced.Split(' ', 2)[0]).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => (JsonNode?)new JsonObject { ["code"] = g.Key.Length == 0 ? "unjudged" : g.Key, ["count"] = g.Count(), ["oldestWaitingSeconds"] = (long)Math.Max(0, (at - g.Min(q => q.RequestedAt)).TotalSeconds) }).ToArray();
+        var silence = HostSilence(s, at);
         return new JsonObject
         {
             ["slots"] = s.Slots.Count, ["queued"] = s.Queue.Count, ["inFlight"] = s.InFlight.Count, ["holds"] = s.Holds.Count, ["hosts"] = s.Hosts.Count,
             ["oldestWaitingSeconds"] = s.Queue.Count == 0 ? null : (long)Math.Max(0, (at - s.Queue.Values.Min(q => q.RequestedAt)).TotalSeconds),
             ["wakeDue"] = s.WakeDue?.ToString("o"), ["updatedAt"] = c.UpdatedAt.ToString("o"),
+            ["waiting"] = new JsonArray(waiting),
+            ["hostReports"] = new JsonObject
+            {
+                ["hostReportMaxMinutes"] = (int)hostReportMax.TotalMinutes, ["hosts"] = new JsonArray(hosts),
+                ["freshestAgeSeconds"] = silence is { } sl ? (long)Math.Max(0, sl.TotalSeconds) : null,
+                ["noHostReported"] = silence is { } n && n > NoHostAlertAfter, ["alertAfterMinutes"] = (int)NoHostAlertAfter.TotalMinutes,
+            },
         };
     }
 
@@ -294,5 +318,38 @@ sealed class SqlV2HealthSource(Func<SqlConnection> open, Func<DateTimeOffset>? n
         var ids = new List<Guid>();
         if (count > 0) await foreach (var r in Rows(c, idsSql, ct)) ids.Add(r.GetGuid(0));
         return new EnvelopeFacts(count, max, ids);
+    }
+}
+
+/// <summary>
+/// Every 5 minutes, on the process that may act: when the ledger knows hosts and none has reported for <see cref="V2Health.NoHostAlertAfter"/>, writes one JSON line
+/// <c>{"hostReports":"none",...}</c> that the Azure Monitor log rule <c>tdd-fworker-no-host-report</c> counts. It reads the same cached block as /api/v1/status, and a failed read writes nothing.
+/// </summary>
+sealed class HostSilenceWatch(V2Health health, Func<bool> mayAct, TimeSpan? every = null, Action<string>? write = null) : BackgroundService
+{
+    readonly TimeSpan every = every ?? TimeSpan.FromMinutes(5);
+    readonly Action<string> write = write ?? Console.WriteLine;
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(every);
+        try
+        {
+            do { try { await Pass(ct); } catch (Exception e) when (e is not OperationCanceledException) { /* the next pass tries again */ } }
+            while (await timer.WaitForNextTickAsync(ct));
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>One pass; true when it wrote the line.</summary>
+    public async Task<bool> Pass(CancellationToken ct)
+    {
+        if (!mayAct()) return false;
+        var block = await health.Block(ct);
+        if (block["stale"]?.GetValue<bool>() == true) return false;   // a failed read serves the last good block with frozen ages: say nothing from it
+        var reports = block["capacity"]?["hostReports"];
+        if (reports is null || reports["noHostReported"]?.GetValue<bool>() != true) return false;
+        write(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["hostReports"] = "none", ["freshestAgeSeconds"] = reports["freshestAgeSeconds"]?.GetValue<long>(), ["alertAfterMinutes"] = reports["alertAfterMinutes"]?.GetValue<int>() }.ToJsonString());
+        return true;
     }
 }

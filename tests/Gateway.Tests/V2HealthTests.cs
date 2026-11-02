@@ -252,6 +252,77 @@ public sealed class V2HealthTests
         Assert.Equal((12, 2, 259200L), ((int)l["entries"]!, (int)l["failures"]!, (long)l["oldestAgeSeconds"]!));
     }
 
+    static (V2Health Health, Source Source) MakeWith(TimeSpan? hostReportMax = null)
+    {
+        var source = new Source();
+        return (new V2Health(source, Good(), new EngineOptions(), () => null, () => null, () => T0, hostReportMax: hostReportMax), source);
+    }
+
+    [Fact]
+    public async Task TheCapacityBlock_NamesTheWaitingReasonsAndTheAgeOfEachHostReport()
+    {
+        var capacity = new CapacityState();
+        capacity.Hosts["omarchy"] = new LedgerHost { Name = "omarchy", Runtime = "octopus", ReportedAt = T0.AddMinutes(-45) };
+        capacity.Hosts["cloud-1"] = new LedgerHost { Name = "cloud-1", Runtime = "octopus", ReportedAt = T0.AddMinutes(-12) };
+        capacity.Queue["acme/orders#1"] = new WaitingRequest { Item = "acme/orders#1", RequestedAt = T0.AddMinutes(-30), Announced = "host-headroom no host reported" };
+        capacity.Queue["acme/orders#2"] = new WaitingRequest { Item = "acme/orders#2", RequestedAt = T0.AddMinutes(-10), Announced = "host-headroom" };
+        capacity.Queue["acme/orders#3"] = new WaitingRequest { Item = "acme/orders#3", RequestedAt = T0.AddMinutes(-5), Announced = "runtime-budget" };
+        capacity.Queue["acme/orders#4"] = new WaitingRequest { Item = "acme/orders#4", RequestedAt = T0.AddMinutes(-1) };
+        var (health, source) = MakeWith();
+        source.Facts = () => Empty() with { Capacity = new CapacityLedgerFacts(capacity, T0) };
+        var cap = (JsonObject)(await health.Block(default))["capacity"]!;
+        var waiting = cap["waiting"]!.AsArray();
+        Assert.Equal([("host-headroom", 2, 1800L), ("unjudged", 1, 60L), ("runtime-budget", 1, 300L)], waiting.Select(w => ((string)w!["code"]!, (int)w["count"]!, (long)w["oldestWaitingSeconds"]!)));
+        var r = (JsonObject)cap["hostReports"]!;
+        Assert.Equal(10, (int)r["hostReportMaxMinutes"]!);
+        var hosts = r["hosts"]!.AsArray();
+        Assert.Equal([("cloud-1", 720L, "stale"), ("omarchy", 2700L, "gone")], hosts.Select(h => ((string)h!["name"]!, (long)h["reportAgeSeconds"]!, (string)h["state"]!)));
+        Assert.Equal(720L, (long)r["freshestAgeSeconds"]!);
+        Assert.False((bool)r["noHostReported"]!);   // cloud-1 reported 12 minutes ago: not 30
+    }
+
+    [Fact]
+    public async Task NoHostReportedForThirtyMinutes_IsFlagged_AndAnEmptyHostListIsNot()
+    {
+        var capacity = new CapacityState();
+        capacity.Hosts["omarchy"] = new LedgerHost { Name = "omarchy", Runtime = "octopus", ReportedAt = T0.AddMinutes(-31) };
+        var (health, source) = MakeWith(TimeSpan.FromMinutes(5));
+        source.Facts = () => Empty() with { Capacity = new CapacityLedgerFacts(capacity, T0) };
+        var r = (JsonObject)(await health.Block(default))["capacity"]!["hostReports"]!;
+        Assert.Equal((true, 1860L, 30, 5), ((bool)r["noHostReported"]!, (long)r["freshestAgeSeconds"]!, (int)r["alertAfterMinutes"]!, (int)r["hostReportMaxMinutes"]!));
+        capacity.Hosts["omarchy"].ReportedAt = T0.AddMinutes(-30);   // exactly 30: not yet
+        Assert.False((bool)((JsonObject)(await MakeFresh(capacity).Block(default))["capacity"]!["hostReports"]!)["noHostReported"]!);
+        var none = (JsonObject)(await MakeFresh(new CapacityState()).Block(default))["capacity"]!["hostReports"]!;
+        Assert.False((bool)none["noHostReported"]!);
+        Assert.Null(none["freshestAgeSeconds"]);
+    }
+
+    static V2Health MakeFresh(CapacityState s)
+    {
+        var (h, src) = MakeWith();
+        src.Facts = () => Empty() with { Capacity = new CapacityLedgerFacts(s, T0) };
+        return h;
+    }
+
+    [Fact]
+    public async Task TheWatch_WritesOneLine_OnlyWhenNoHostReported_AndOnlyOnTheProcessThatMayAct()
+    {
+        var capacity = new CapacityState();
+        capacity.Hosts["omarchy"] = new LedgerHost { Name = "omarchy", Runtime = "octopus", ReportedAt = T0.AddMinutes(-40) };
+        var lines = new List<string>();
+        var may = true;
+        var watch = new HostSilenceWatch(MakeFresh(capacity), () => may, write: lines.Add);
+        Assert.True(await watch.Pass(default));
+        var line = (JsonObject)System.Text.Json.Nodes.JsonNode.Parse(Assert.Single(lines))!;
+        Assert.Equal(("none", 2400L, 30), ((string)line["hostReports"]!, (long)line["freshestAgeSeconds"]!, (int)line["alertAfterMinutes"]!));
+        may = false;
+        Assert.False(await watch.Pass(default));
+        may = true;
+        capacity.Hosts["omarchy"].ReportedAt = T0.AddMinutes(-1);
+        Assert.False(await new HostSilenceWatch(MakeFresh(capacity), () => true, write: lines.Add).Pass(default));
+        Assert.Single(lines);
+    }
+
     [Fact]
     public async Task ASharedRead_IsServedFor10Seconds_AFailedReadServesTheLastGoodOneMarkedStale_AndAFirstFailureIsUnavailable()
     {
