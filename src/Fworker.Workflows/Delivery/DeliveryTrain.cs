@@ -160,13 +160,17 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                     if (!s.Deployments.TryGetValue(d.Version, out var byEnv)) s.Deployments[d.Version] = byEnv = [];
                     // W8.3: the deployment of the release a rollback goes back to, while the rollback waits for it, is the rollback's
                     var ours = key == p.Environment && s.ActiveRollback is { Phase: RollbackPhase.Deploying } ar && ar.To == d.Version;
-                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At, Rollback = ours, Ours = key == p.Environment && !ours && have is null && s.Requested.ContainsKey(d.Version) };
+                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At, Rollback = ours, Ours = key == p.Environment && !ours && (have is null || (have.Completed && !have.Succeeded && have.GatewayAborted == true)) && s.Requested.ContainsKey(d.Version) };   // (the one retry after a gateway-made abort is asked for again, so its deployment is ours too)
                     // a newer deployment of the release to the environment (a redeploy after a failure) starts the settling over
                     if (key == p.Environment) s.Settled.Remove(d.Version);
                 }
                 if (d.Phase != "Started" && !have.Completed) { have.Phase = d.Phase; have.FinishedAt = d.At; }
                 if (have.TaskId.Length == 0) have.TaskId = d.TaskId;
+                // read from Octopus (the interruption's resolved note), so a deployment the gateway aborted before this state knew the flag (another process) is told too
+                if (d.GatewayAborted == true && key == p.Environment && have.Completed) have.GatewayAborted = true;
                 if (key == p.Environment && have.Completed) s.SignOffs.RemoveAll(x => x.Version == d.Version);   // the Sign-off ended with the deployment
+                // the train's request ended without success: it is settled (the release stays blocked by the failed deployment itself, the skip of failedHere); RequestNumbers stays, so a fresh request gets a new key
+                if (key == p.Environment && have.Completed && have.Phase != "Succeeded") { s.Requested.Remove(d.Version); s.FirstRequested.Remove(d.Version); }
                 break;
             case TrainSignOffAsked so:
                 UpsertRelease(s, so.ReleaseId, so.Version, so.Commit, so.At);
@@ -177,7 +181,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             case TrainCommandRefused rf:
                 var retryAt = rf.At.AddSeconds(Math.Max(1, p.PollSeconds));
                 if (!rf.Settled) break;
-                if (rf.Command == "PromoteRelease" && s.Requested.ContainsKey(rf.Version) && s.DeploymentOf(rf.Version, p.Environment) is null
+                if (rf.Command == "PromoteRelease" && s.Requested.ContainsKey(rf.Version) && s.NoDeploymentSinceRequest(rf.Version, p.Environment)
                     && rf.CommandKey == $"PromoteRelease|{p.Deployable}|{rf.Version}|{p.Environment}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(rf.Version))}")
                 {
                     s.Requested.Remove(rf.Version); s.FirstRequested.Remove(rf.Version);
@@ -528,6 +532,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     {
         var notes = proceed ? "Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md)." : $"Aborted by the factory worker gateway: {string.Join("; ", hard)}";
         so.Answered = true; so.AnsweredAt = now; so.LastProceed = proceed; so.LastNotes = notes;
+        if (!proceed && s.DeploymentOf(so.Version, env) is { } aborted && aborted.DeploymentId == so.DeploymentId) aborted.GatewayAborted = true;
         Out.Add(Send(AnswerOf(so, proceed, notes), so.Version));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide(proceed ? "signoff-proceed" : "signoff-abort", so.Version, items, proceed ? [] : hard);
@@ -579,7 +584,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         var pk = Previous!;
         var open = s.Deployments.Where(kv => kv.Value.TryGetValue(env, out var d) && !d.Completed).Select(kv => (Version: kv.Key, Dep: kv.Value[env])).FirstOrDefault();
         if (open.Version is not null) { Decide("following", open.Version, [], [$"the deployment of {open.Version} to {TargetName} is still running (task {open.Dep.TaskId})"]); return; }
-        foreach (var (version, at) in s.Requested.Where(kv => s.DeploymentOf(kv.Key, env) is null).ToList())
+        foreach (var (version, at) in s.Requested.Where(kv => s.NoDeploymentSinceRequest(kv.Key, env)).ToList())
         {
             if (s.FirstRequested.TryGetValue(version, out var first) && now - first >= DeliveryTrainService.RequestExpiry)
             {
@@ -606,6 +611,9 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         {
             var prev = s.DeploymentOf(r.Version, pk);
             var failedHere = s.DeploymentOf(r.Version, env);
+            // The one bounded retry: a deployment the train asked for and then aborted itself at the Sign-off (waited too long, gates unreadable) is judged like any release once, and asked for again if it qualifies.
+            // A step that failed, a person's abort and a second failure hold the release as before.
+            if (failedHere is { Ours: true, GatewayAborted: true, Completed: true, Succeeded: false, Rollback: false } && !s.Retried.Contains($"{r.Version}|{env}")) failedHere = null;
             if (failedHere is not null)
             {
                 Note(r.Version, ItemsOf(r), [$"its deployment to {TargetName} ended {failedHere.Phase} ({failedHere.DeploymentId}); the operator deploys it again, or the item goes back to Development"]);
@@ -661,6 +669,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             s.RetryNotBefore.Remove(pick.Version);
         }
         var release = s.Releases[pick.Version];
+        if (s.DeploymentOf(pick.Version, env) is { Completed: true, Succeeded: false } && !s.Retried.Contains($"{pick.Version}|{env}")) s.Retried.Add($"{pick.Version}|{env}");   // (only the retry above reaches here with a failed deployment)
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
         s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)
         if (!p.Shadow) s.RequestItems[pick.Version] = [.. winner.Items];   // (W9.10i: the retries of the request name the same items; a shadow train promotes nothing and records nothing)

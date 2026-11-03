@@ -399,6 +399,30 @@ public sealed class OctopusWatcherTests
         Assert.Equal(("Interruptions-3", "ServerTasks-9", "octopus:signoff:Interruptions-3"), (so.InterruptionId, so.TaskId, so.Key));
     }
 
+    [Theory]
+    [InlineData("""{"Items":[{"Id":"Interruptions-3","IsPending":false,"Form":{"Values":{"Result":"Abort","Notes":"Aborted by the factory worker gateway: waited 32.2 h at the Sign-off (limit 2 h): the gates of its items could not be read"}}}]}""", true)]
+    [InlineData("""{"Items":[{"Id":"Interruptions-3","IsPending":false,"Notes":"Aborted by the factory worker gateway: a hold"}]}""", true)]
+    [InlineData("""{"Items":[{"Id":"Interruptions-3","IsPending":false,"Form":{"Values":{"Result":"Abort","Notes":"I stopped it, wrong build"}}}]}""", false)]
+    [InlineData("""{"Items":[]}""", false)]
+    public async Task AFailedDeployment_CarriesGatewayAborted_OnlyWhenTheGatewayAbortedItsSignOff(string interruptions, bool flagged)
+    {
+        var o = Server("Failed"); o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Failed"}"""); o.Set($"{Sp}/interruptions?regarding=ServerTasks-9&take=20", interruptions);
+        var (w, got) = Make(o);
+        await w.Poll();
+        var failed = Assert.Single(got.OfType<OctopusDeploymentChanged>(), e => e.Phase == OctopusDeploymentPhase.Failed);
+        Assert.Equal(flagged ? true : null, failed.GatewayAborted);
+        Assert.Null(Assert.Single(got.OfType<OctopusDeploymentChanged>(), e => e.Phase == OctopusDeploymentPhase.Started).GatewayAborted);
+    }
+
+    [Fact]
+    public async Task ASucceededDeployment_ReadsNoResolvedInterruptions()
+    {
+        var o = Server("Success"); o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Success"}""");
+        var (w, _) = Make(o);
+        await w.Poll();
+        Assert.DoesNotContain(o.Paths, p => p.Contains("interruptions"));
+    }
+
     [Fact]
     public async Task AQueuedDeploymentWithoutPendingInterruptions_ReadsNoInterruptions()
     {

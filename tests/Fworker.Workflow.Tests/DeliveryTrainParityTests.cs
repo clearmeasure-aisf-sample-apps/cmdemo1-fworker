@@ -199,7 +199,7 @@ public class DeliveryTrainParityTests
         await f.ReleaseInPrevious("1.0.2", 'a'); await f.Mature();
         Assert.Single(f.Of<PromoteRelease>());
         await f.Deploy("1.0.2", "Uat", "Started");
-        await f.Deploy("1.0.2", "Uat", "Failed");   // the train's own deployment ended; the version stays in Requested
+        await f.Deploy("1.0.2", "Uat", "Failed");   // the train's own deployment ended; its request is cleared (Ours of a later deployment is false: it is not the first seen)
         await f.Deploy("1.0.2", "Uat", "Started", "D-redeploy");   // the operator deploys it again
         Assert.False(f.State.DeploymentOf("1.0.2", "uat")!.Ours);
         await f.Send(new TrainSignOffAsked(f.Key, "I-redeploy", "D-redeploy", "T-redeploy", "Releases-1.0.2", "1.0.2", "Uat", null, f.Now));

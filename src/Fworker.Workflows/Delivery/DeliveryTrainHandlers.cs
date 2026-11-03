@@ -78,7 +78,7 @@ public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTim
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReleaseSeen(TrainKey.Of(p.Deployable, p.Environment), e.ReleaseId, e.Version, e.Commit, clock())).ToList();
 
     public IReadOnlyList<TrainInput> Route(OctopusDeploymentChanged e)
-        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainDeploymentSeen(TrainKey.Of(p.Deployable, p.Environment), e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Phase.ToString(), e.Commit, TimeOf(e.At))).ToList();
+        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainDeploymentSeen(TrainKey.Of(p.Deployable, p.Environment), e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Phase.ToString(), e.Commit, TimeOf(e.At), e.GatewayAborted)).ToList();
 
     public IReadOnlyList<TrainInput> Route(OctopusReplayBegan e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReplay(TrainKey.Of(p.Deployable, p.Environment), true)).ToList();

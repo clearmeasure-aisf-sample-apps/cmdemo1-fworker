@@ -22,9 +22,10 @@ public sealed record ReleaseCommitResolved(string ReleaseId, string Version, str
 
 /// <summary>
 /// A deployment started, succeeded or failed (failed: Failed, TimedOut or Canceled). Each phase of a deployment is published once. <paramref name="At"/> is when the phase happened in Octopus: the task's start time
-/// for Started (its queue time when it has not started), its completion time for Succeeded and Failed (its start time when it has no completion time).
+/// for Started (its queue time when it has not started), its completion time for Succeeded and Failed (its start time when it has no completion time). <paramref name="GatewayAborted"/> (Failed only, null when not read or not so):
+/// the deployment's Sign-off was resolved with an Abort whose note is the factory worker gateway's own ("Aborted by the factory worker gateway: ..."), read from the task's interruptions; a message serialized before it existed has it null.
 /// </summary>
-public sealed record OctopusDeploymentChanged(string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, OctopusDeploymentPhase Phase, string? Commit, DateTimeOffset? At = null) : IngressEvent
+public sealed record OctopusDeploymentChanged(string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, OctopusDeploymentPhase Phase, string? Commit, DateTimeOffset? At = null, bool? GatewayAborted = null) : IngressEvent
 {
     public string Key => $"octopus:deployment:{DeploymentId}:{Phase}";
 }

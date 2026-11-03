@@ -24,7 +24,7 @@ public sealed record TrainReleaseSeen(string Key, string ReleaseId, string Versi
 
 /// <summary>A deployment started, succeeded or failed in <paramref name="Environment"/> (the Octopus name).</summary>
 [MessageIdentity("delivery.train.deployment")]
-public sealed record TrainDeploymentSeen(string Key, string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, string Phase, string? Commit, DateTimeOffset At) : TrainInput(Key);
+public sealed record TrainDeploymentSeen(string Key, string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, string Phase, string? Commit, DateTimeOffset At, bool? GatewayAborted = null) : TrainInput(Key);
 
 /// <summary>A deployment waits at the Sign-off step.</summary>
 [MessageIdentity("delivery.train.signoff")]

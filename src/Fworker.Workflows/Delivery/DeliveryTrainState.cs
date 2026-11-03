@@ -55,6 +55,8 @@ public sealed class TrainDeployment
     public bool Rollback { get; set; }
     /// <summary>V2.1: the deployment appeared while this train had asked for its release, so it is the executor's own (a Sign-off is answered only on such a deployment). Null: saved before this was kept.</summary>
     public bool? Ours { get; set; }
+    /// <summary>The train itself aborted the Sign-off of this deployment ("Aborted by the factory worker gateway: ..."): the failure that follows is the gateway's, not a step's or a person's. Absent in a state saved before it.</summary>
+    public bool? GatewayAborted { get; set; }
 }
 
 /// <summary>A Sign-off (manual intervention) a deployment of this environment waits at.</summary>
@@ -124,6 +126,8 @@ public sealed class TrainState
     /// <summary>The number of the request for each release (W9.10o): the first request of a version is 1, and a request made again after the earlier one was dropped (Octopus never showed it) is the next. It is in the key of
     /// the PromoteRelease command, so the ledger answers the retries of one request and never a later request for the same version.</summary>
     public Dictionary<string, int> RequestNumbers { get; set; } = [];
+    /// <summary>"version|environment" for which the one bounded retry after a gateway-made abort was already made: it is made once, so a restart or a replay cannot make it again. Absent in a state saved before it.</summary>
+    public List<string> Retried { get; set; } = [];
     /// <summary>The work items each requested release carries (W9.10i), by version, "owner/repo#N": the PromoteRelease command names them so the executor can record the deployment on their state comments. Absent in a state saved before it.</summary>
     public Dictionary<string, List<string>> RequestItems { get; set; } = [];
     /// <summary>V2.1: a deployment the executor was refused (by version): not asked for again before this time (v1 asks again in its next pass).</summary>
@@ -174,6 +178,10 @@ public sealed class TrainState
         var (d, e) = TrainKey.Split(key);
         return new TrainState { Key = key, Deployable = d, Environment = e };
     }
+
+    /// <summary>The environment shows no deployment of the release that answers the train's request: none at all, or only the failed one that the request of the bounded retry follows (made after it ended).</summary>
+    public bool NoDeploymentSinceRequest(string version, string envKey)
+        => DeploymentOf(version, envKey) is not { } d || (d.Completed && !d.Succeeded && Requested.ContainsKey(version));   // (a failed own deployment clears its request when it ends, so a request that stands beside it is the retry's; no clocks compared)
 
     public TrainDeployment? DeploymentOf(string version, string envKey)
         => Deployments.TryGetValue(version, out var m) && m.TryGetValue(envKey, out var d) ? d : null;
