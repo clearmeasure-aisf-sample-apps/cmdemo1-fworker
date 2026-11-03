@@ -164,7 +164,7 @@ sealed class DeliveryVerbHost
         var line = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["v2route"] = verb, ["exit"] = exit };
         if (exit != 0) { try { var o = JsonNode.Parse(output); line["code"] = o?["code"]?.ToString(); line["reason"] = o?["reason"]?.ToString() is { Length: > 200 } r ? r[..200] : o?["reason"]?.ToString(); } catch (JsonException) { } }   // (a refusal says why)
         Console.WriteLine(line.ToJsonString());
-        if (exit == 0 && verb is "publish-demo" or "private-build" && tap is not null) await tap.Observe(verb, stdin, output);
+        if (exit == 0 && verb is "publish-demo" or "private-build" or "copilot-settle" && tap is not null) await tap.Observe(verb, stdin, output);
         return new VerbAnswer(exit, output);
     }
 

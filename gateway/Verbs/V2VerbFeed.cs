@@ -124,8 +124,32 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
     /// <summary>W9.4: a verb answered by a v2 route (not by the script under this router) is a sign of life of the session as well: it renews the step's lease as the calls of the script do.</summary>
     public async Task Observe(string verb, string stdin, string output)
     {
+        if (verb == "copilot-settle") { await Settled(stdin, output); return; }
         if (DocsVerbs.Activity.Contains(verb)) await Feed(verb, stdin, output);
     }
+
+    /// <summary>
+    /// copilot-settle answered "awaiting" (a coding agent's task ended with its change on a branch that is the item's pull request, or the item already has one): the script's side is the state comment, the saga's side is
+    /// <see cref="DevelopmentSettled"/>: Development is done and the checks of the pull request decide what follows. An answer of any other action says nothing the saga needs.
+    /// </summary>
+    async Task Settled(string stdin, string output)
+    {
+        if (JsonNode.Parse(output) is not JsonObject answer || Text(answer, "action") != "awaiting") return;
+        var number = Int(answer, "id");
+        if (number <= 0) number = JsonNode.Parse(stdin) is JsonObject body ? Int(body, "item") : 0;
+        if (number <= 0 || !await ownership.OwnsOrFindAsync(number)) return;
+        var id = new ItemId(home, number);
+        if ((await store.Load(id.ToString(), CancellationToken.None))?.State is not { } state || !state.IsOpen || state.Step != StepKind.Develop || !DocsVerbs.Fed(state, settings)) return;
+        var pr = Int(answer, "pr");
+        if (pr <= 0) return;
+        var head = Text(answer, "sha");
+        if (head.Length == 0 && heads is not null) head = await heads.HeadOf(home, pr, CancellationToken.None);
+        IReadOnlyList<string> files = heads is not null && WorkPlans.IsCode(state.Plan) ? await heads.FilesOf(home, pr, CancellationToken.None) ?? [] : [];
+        await Send(new DevelopmentSettled(id, state.Generation, $"settled|{state.ArmId}|{pr}|{head}", pr, head, files));
+    }
+
+    static string Text(JsonObject o, string name) { try { return o[name]?.ToString() ?? ""; } catch { return ""; } }
+    static int Int(JsonObject o, string name) { try { return o[name] is JsonValue v && (v.TryGetValue<int>(out var i) || (v.TryGetValue<string>(out var s) && int.TryParse(s, out i))) ? i : 0; } catch { return 0; } }
 
     // (V2Ownership.OwnsOrFindAsync: an item the set lacks is looked for in the table by its key, one read at a time for an item; a saga can start after the set was read, and a fast session would send its design to nobody)
 

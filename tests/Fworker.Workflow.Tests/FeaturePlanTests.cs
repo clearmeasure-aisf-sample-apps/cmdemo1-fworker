@@ -128,6 +128,44 @@ public class FeaturePlanTests
         Assert.StartsWith("footprint|acme/orders#7|1|", change.Key);
     }
 
+    // ---- the gateway settles Development for a coding agent's task (copilot-settle awaiting) -----------------------------------------------------
+
+    [Fact]
+    public async Task SettlingDevelopmentByTheGateway_OverTheAgentsFailureReport_ParksNothing_AndTheItemGoesOnToVerifyWithItsPullRequest()
+    {
+        var fx = await At(StepKind.Develop);
+        await fx.Send(new ParkWorkItem(Item, 1, "park|worker-failure", "worker-failure"));   // the agent reported a failure after its push and the item was parked
+        Assert.True(fx.State.Parked);
+        var r = await fx.Send(new DevelopmentSettled(Item, 1, "settled|1", 11, Head, ["src/a.cs"]));
+        Assert.Equal(WorkItemOutcome.Applied, r.Decision.Outcome);
+        Assert.False(fx.State.Parked);
+        Assert.Equal(StepKind.Verify, fx.State.Step);
+        Assert.Equal((11, Head), (fx.State.PullRequest, fx.State.Head));
+        // the watcher's observation of the pull request's checks is taken (the step waits for them)
+        Assert.Equal(WorkItemOutcome.Applied, (await Checks(fx, ChecksVerdict.Green)).Decision.Outcome);
+        Assert.Equal("green", fx.State.ChecksState);
+    }
+
+    [Fact]
+    public async Task SettlingDevelopmentByTheGateway_NeedsNoReviewOfASession_AndIsDoneOnce()
+    {
+        var fx = await At(StepKind.Develop);
+        Assert.StartsWith("reviewer-verdict-missing", (await fx.Done()).Decision.Reason);   // a session's completion without a review is refused ...
+        Assert.Equal(WorkItemOutcome.Applied, (await fx.Send(new DevelopmentSettled(Item, 1, "settled|1", 11, Head, []))).Decision.Outcome);   // ... the gateway's settle is not
+        Assert.Equal(WorkItemOutcome.Duplicate, (await fx.Send(new DevelopmentSettled(Item, 1, "settled|1", 11, Head, []))).Decision.Outcome);
+        Assert.Equal(WorkItemOutcome.Stale, (await fx.Send(new DevelopmentSettled(Item, 1, "settled|2", 11, Head, []))).Decision.Outcome);   // the item is in Functional Testing now
+    }
+
+    [Fact]
+    public async Task SettlingDevelopmentByTheGateway_LeavesAParkThatIsNotTheAgentsFailureAlone()
+    {
+        var fx = await At(StepKind.Develop);
+        await fx.Send(new ParkWorkItem(Item, 1, "park|credit", "credit-guard"));
+        Assert.Equal(WorkItemOutcome.Refused, (await fx.Send(new DevelopmentSettled(Item, 1, "settled|1", 11, Head, []))).Decision.Outcome);
+        Assert.True(fx.State.Parked);
+        Assert.Equal(StepKind.Develop, fx.State.Step);
+    }
+
     // ---- verify: CI alongside, red CI as a fix-forward round -----------------------------------------------------------------------------
 
     [Fact]
