@@ -310,7 +310,32 @@ function CheckExit($Name, $r, [int]$Exit, [string]$Code = '') {
 }
 
 # a suite whose definition names DefaultEnvLabel (copilot: its gateway is env-scoped): an item given no env: label gets that one
-function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string]$Column = 'Technical Design') { if ($script:DefaultEnvLabel -and -not @($Labels | Where-Object { "$_" -like 'env:*' }).Count) { $Labels = @($Labels) + $script:DefaultEnvLabel }; (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number }
+function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string]$Column = 'Technical Design') {
+    if ($script:DefaultEnvLabel -and -not @($Labels | Where-Object { "$_" -like 'env:*' }).Count) { $Labels = @($Labels) + $script:DefaultEnvLabel }
+    $n = (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number
+    # V3.2: a factory card in a step column gets its saga from the admission after the next pass of the board reconciler; a scripted worker that acts before that meets an item with no saga and then one that has (a start in the middle of the flow)
+    if ($script:V2Connection -and $script:SuiteName -ne 'saga' -and $Column -in 'Technical Design', 'Development', 'Functional Testing' -and @($Labels) -contains 'factory worker') { Wait-Admitted $n }
+    return $n
+}
+# Waits (at most 20 s, never a failure) until the item has a row in the saga table of the suite's database.
+function Wait-Admitted([int]$Number) {
+    try {
+        if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) { Open-SqlLibs }
+        $end = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $end) {
+            $c = [Microsoft.Data.SqlClient.SqlConnection]::new($script:V2Connection)
+            try { $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = "SELECT COUNT(*) FROM factory.WorkItems WHERE ItemKey LIKE N'%#$Number'"; $has = [int]$cmd.ExecuteScalar() } finally { $c.Dispose() }
+            if ($has -gt 0) { return }
+            Start-Sleep -Milliseconds 500
+        }
+    } catch { }
+}
+function Open-SqlLibs {
+    $bin = Join-Path $script:Root 'gateway/bin/Release/net10.0'; $rt = if ($IsWindows) { 'win' } else { 'unix' }
+    # (the managed assembly of the platform; its dependencies are the gateway's own, resolved from the same folder)
+    [AppDomain]::CurrentDomain.add_AssemblyResolve({ param($sender, $e) $f = Join-Path $bin "$(($e.Name -split ',')[0]).dll"; if (Test-Path $f) { [Reflection.Assembly]::LoadFrom($f) } })
+    Add-Type -Path (Join-Path $bin "runtimes/$rt/lib/net9.0/Microsoft.Data.SqlClient.dll")
+}
 
 # The scripted worker: runs one column the way the skill does, with canned judgement.
 function Do-TechnicalDesign([int]$n, [string]$Holder = 'w1', [bool]$DocsOnly = $true) {
@@ -588,10 +613,7 @@ function Wait-SweepGap([double]$Fresh = 0) {
 # Empties the tables that hold per-item state of the engine (the sagas, their history, the merge and delivery records, the idempotency records, the board memory) in the suite's database. Test isolation only: a scenario starts on a board
 # of its own (the fake's reset), and the gateway reads the tables again at its next pass.
 function Reset-SagaState {
-    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) { $bin = Join-Path $script:Root 'gateway/bin/Release/net10.0'; $rt = if ($IsWindows) { 'win' } else { 'unix' }
-        # (the managed assembly of the platform; its dependencies are the gateway's own, resolved from the same folder)
-        [AppDomain]::CurrentDomain.add_AssemblyResolve({ param($sender, $e) $f = Join-Path $bin "$(($e.Name -split ',')[0]).dll"; if (Test-Path $f) { [Reflection.Assembly]::LoadFrom($f) } })
-        Add-Type -Path (Join-Path $bin "runtimes/$rt/lib/net9.0/Microsoft.Data.SqlClient.dll") }
+    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) { Open-SqlLibs }
     $tables = 'WorkItems', 'OpenInstances', 'ItemHistory', 'ProjectionVersions', 'MergeTrains', 'MergedItems', 'DeliveredTo', 'Correlations', 'IngressDedup', 'BoardSeen', 'QcEnvironments', 'IdempotencyClaims', 'IdempotencyLedger', 'CopilotReservations'
     $sql = ($tables | ForEach-Object { "IF OBJECT_ID(N'factory.$_') IS NOT NULL DELETE FROM factory.$_;" }) -join "`n"
     $c = [Microsoft.Data.SqlClient.SqlConnection]::new($script:V2Connection)
