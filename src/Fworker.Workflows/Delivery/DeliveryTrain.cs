@@ -167,6 +167,8 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 if (d.Phase != "Started" && !have.Completed) { have.Phase = d.Phase; have.FinishedAt = d.At; }
                 if (have.TaskId.Length == 0) have.TaskId = d.TaskId;
                 if (key == p.Environment && have.Completed) s.SignOffs.RemoveAll(x => x.Version == d.Version);   // the Sign-off ended with the deployment
+                // the train's request ended without success: it is settled (the release stays blocked by the failed deployment itself, the skip of failedHere); RequestNumbers stays, so a fresh request gets a new key
+                if (key == p.Environment && have.Completed && have.Phase != "Succeeded") { s.Requested.Remove(d.Version); s.FirstRequested.Remove(d.Version); }
                 break;
             case TrainSignOffAsked so:
                 UpsertRelease(s, so.ReleaseId, so.Version, so.Commit, so.At);

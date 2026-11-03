@@ -210,6 +210,32 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task AFailedOwnDeployment_ClearsTheRequest_KeepsTheReleaseBlocked_AndANewerReleaseIsStillPromoted()
+    {
+        var f = await OneRelease();
+        await f.After(TimeSpan.FromMinutes(5)); await f.After(TimeSpan.FromMinutes(5));
+        Assert.Single(f.Of<PromoteRelease>());
+        Assert.Contains("1.0.2", f.State.Requested.Keys);
+        await f.Deploy("1.0.2", "Uat", "Started", "D-9");
+        await f.Deploy("1.0.2", "Uat", "Failed", "D-9");
+        Assert.Empty(f.State.Requested);
+        Assert.Empty(f.State.FirstRequested);
+        Assert.Equal(1, f.State.RequestNumbers["1.0.2"]);   // a later fresh request of the version gets a new key
+        Assert.Equal("waiting", f.LastDecision!.Action);
+        Assert.Equal(["its deployment to Uat ended Failed (D-9); the operator deploys it again, or the item goes back to Development"], f.LastDecision.Reasons);
+        // a newer release is promoted all the same
+        f.All.Clear();
+        f.Range('d', 'a', 'b');
+        f.Now += TimeSpan.FromMinutes(1);
+        await f.Merge(8, 'b');
+        f.Reads.Running["tdd"] = "1.0.3";
+        await f.ReleaseInPrevious("1.0.3", 'b');
+        await f.Mature();
+        Assert.Contains(f.Of<PromoteRelease>(), c => c.Version == "1.0.3");
+        Assert.DoesNotContain(f.Of<PromoteRelease>(), c => c.Version == "1.0.2");
+    }
+
+    [Fact]
     public async Task AReleaseThatWaitsForThePreviousEnvironment_NamesTheItemsOfItsCommit_SoTheirJournalsCanSayWhy()
     {
         // V2.1: v1 journals "waits for the automatic promotion" on every item of the release even while its deployment to tdd is Failed or missing; a wait with no item is a line no item shows
