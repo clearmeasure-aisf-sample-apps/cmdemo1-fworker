@@ -314,7 +314,7 @@ function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string
     if ($script:DefaultEnvLabel -and -not @($Labels | Where-Object { "$_" -like 'env:*' }).Count) { $Labels = @($Labels) + $script:DefaultEnvLabel }
     $n = (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number
     # V3.2: a factory card in a step column gets its saga from the admission after the next pass of the board reconciler; a scripted worker that acts before that meets an item with no saga and then one that has (a start in the middle of the flow)
-    if ($script:V2Connection -and $script:SuiteName -ne 'saga' -and $Column -in 'Technical Design', 'Development', 'Functional Testing' -and @($Labels) -contains 'factory worker') { Wait-Admitted $n }
+    if ($script:V2Connection -and $script:SuiteName -notin 'saga', 'author' -and $Column -in 'Technical Design', 'Development', 'Functional Testing' -and @($Labels) -contains 'factory worker') { Wait-Admitted $n }
     return $n
 }
 # Waits (at most 20 s, never a failure) until the item has a row in the saga table of the suite's database.
