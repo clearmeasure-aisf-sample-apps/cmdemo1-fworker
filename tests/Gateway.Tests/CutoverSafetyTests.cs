@@ -12,7 +12,7 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// The three safety problems the review of the tdd cutover (W9.9c) found:
-/// 1. an environment where the engine does not act must not turn v1's intake on (intake.enabled is true for the image so that the engine's intake runs, and v1's intake leaves nothing in Todo once it is not told the engine's plans);
+/// 1. an environment outside engine.v2Environments must not turn v1's intake on (intake.enabled is true for the image so that the engine's intake runs, and v1's intake leaves nothing in Todo once it is not told the engine's plans);
 /// 2. tdd with v2 configured and no database must stay up and inert, not crash and not fall back to v1;
 /// 3. v1's sweep must not run beside the adoption of the term (no per-item lock between them).
 /// </summary>
@@ -39,7 +39,7 @@ public sealed class CutoverSafetyTests
         else env.Set("FACTORY_DB_CONNECTION", null);
         env.EditConfig = cfg =>
         {
-            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             cfg["intake"] = new JsonObject { ["enabled"] = true, ["v2Plans"] = new JsonArray("docs", "feature") };
         };
     }
@@ -54,46 +54,12 @@ public sealed class CutoverSafetyTests
         return SyncBoardCalls(env);
     }
 
-    // ---- 1. v1's intake ----------------------------------------------------------------------------------------------------------
-
-    [Fact]
-    public async Task SweeperWithIntakeOff_GivesTheScriptNoIntakeBlock_TheControlGivesIt()
-    {
-        foreach (var off in new[] { false, true })
-        {
-            var calls = new List<JsonObject>();
-            var runner = new Runner("/nonexistent/factory.ps1");
-            var routes = new V2VerbRoutes();
-            routes.Add(BoardRoutes.Verbs, "sync-board", (stdin, _) =>
-            {
-                lock (calls) calls.Add((JsonObject)JsonNode.Parse(stdin)!);
-                return Task.FromResult(new VerbAnswer(0, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray() }.ToJsonString()));
-            });
-            runner.Routes = routes;
-            var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
-            var hub = new EventHub();
-            var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
-            var restored = Task.CompletedTask;
-            var sweeper = new Sweeper(runner, hub, plant, qc, 3600, true, null, restored) { MayAct = () => true, IntakeOff = off };
-            await sweeper.StartAsync(default);
-            try
-            {
-                for (var i = 0; i < 300 && !Any(calls); i++) await Task.Delay(50);
-                lock (calls)
-                {
-                    Assert.NotEmpty(calls);
-                    Assert.Equal(!off, calls[0].ContainsKey("intake"));   // (the control proves the sweeper offers intake in this rig at all)
-                }
-            }
-            finally { await sweeper.StopAsync(default); }
-        }
-        static bool Any(List<JsonObject> l) { lock (l) return l.Count > 0; }
-    }
+    // ---- 1. an environment outside v2 and v1's intake ----------------------------------------------------------------------------------------------------------
 
     [Theory]
-    [InlineData("uat", "uat: the image has intake.enabled true and v1 acts")]
+    [InlineData("uat", "uat: the image has intake.enabled true and no engine acts")]
     [InlineData("prod", "prod: the same")]
-    public async Task WhereTheEngineDoesNotAct_V1TakesNoTodoItem(string environment, string why)
+    public async Task WhereTheEngineDoesNotAct_NothingSweepsAndNothingIsPulled(string environment, string why)
     {
         _ = why;
         if (!StubPwsh.Supported) return;
@@ -103,27 +69,9 @@ public sealed class CutoverSafetyTests
         using var host = new GatewayHost();
         _ = host.Server;
         var sweeper = host.Services.GetServices<IHostedService>().OfType<Sweeper>().Single();
-        Assert.Null(sweeper.V2);          // (v1 acts here)
-        Assert.True(sweeper.IntakeOff);
-        var calls = await WaitForSweeps(env, 40);
-        Assert.NotEmpty(calls);           // (v1 does sweep: only its intake is off)
-        Assert.All(calls, c => Assert.False(c.ContainsKey("intake"), "the sweep told the script to take intake: " + c.ToJsonString()));
-    }
-
-    [Fact]
-    public async Task APlainV1Gateway_WithNoPlansNamed_KeepsItsIntake()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        env.Set("FACTORY_SWEEP_SECONDS", "1"); env.Set("FACTORY_SWEEP_MIN_SECONDS", "1");
-        env.EditConfig = cfg => cfg["intake"] = new JsonObject { ["enabled"] = true };
-        env.Apply(); WriteAnswer(env);
-        using var host = new GatewayHost();
-        _ = host.Server;
-        Assert.False(host.Services.GetServices<IHostedService>().OfType<Sweeper>().Single().IntakeOff);
-        var calls = await WaitForSweeps(env, 40);
-        Assert.NotEmpty(calls);
-        Assert.True(calls[0].ContainsKey("intake"));
+        Assert.Null(sweeper.V2);          // (no engine acts here; v1's sweep is gone, V3.2)
+        await Task.Delay(TimeSpan.FromSeconds(6));
+        Assert.Empty(SyncBoardCalls(env));
     }
 
     // ---- 2. v2 configured, no database ----------------------------------------------------------------------------------------------------------------
@@ -176,16 +124,8 @@ public sealed class CutoverSafetyTests
     }
 
     [Fact]
-    public void TheItemsTheAdoptionCouldNotFence_AreLeftOutOfTheSweepLikeTheSagasItems()
+    public void TheItemsTheAdoptionCouldNotFence_AreNamedByTheGate()
     {
-        var own = new V2Ownership(new InMemoryWorkItemStore(), Home);
-        own.Set([3]);
-        var args = new JsonObject();
-        Sweeper.AddV2Arguments(args, own, [], [8, 3]);
-        Assert.Equal([3, 8], args["skip_items"]!.AsArray().Select(x => x!.GetValue<int>()).ToArray());
-        var onlyLeft = new JsonObject();
-        Sweeper.AddV2Arguments(onlyLeft, new V2Ownership(new InMemoryWorkItemStore(), Home), [], [8]);
-        Assert.Equal([8], onlyLeft["skip_items"]!.AsArray().Select(x => x!.GetValue<int>()).ToArray());
         var gate = new AdoptionGate(() => true, _ => true, () => true, () => 1, excluded: () => new HashSet<int> { 8 });
         Assert.Equal([8], gate.Excluded().ToArray());
     }
@@ -272,6 +212,7 @@ public sealed class CutoverSafetyTests
     sealed class Rig
     {
         public readonly List<(JsonObject Args, int Reads)> Calls = [];
+        public readonly EventHub Hub = new();
         public readonly CountingStore Store = new();
         public long Epoch = 1;
         public readonly HashSet<long> DoneEpochs = [];
@@ -279,22 +220,14 @@ public sealed class CutoverSafetyTests
 
         public Rig(Func<Rig, Func<CancellationToken, Task>>? poke = null)
         {
-            var runner = new Runner("/nonexistent/factory.ps1");
-            var routes = new V2VerbRoutes();
-            routes.Add(BoardRoutes.Verbs, "sync-board", (stdin, _) =>
-            {
-                lock (Calls) Calls.Add(((JsonObject)JsonNode.Parse(stdin)!, Store.Reads));
-                return Task.FromResult(new VerbAnswer(0, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray() }.ToJsonString()));
-            });
-            runner.Routes = routes;
             var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
-            var hub = new EventHub();
-            var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
+            var hub = Hub;
             var gate = new AdoptionGate(() => true, e => { lock (DoneEpochs) return DoneEpochs.Contains(e); }, () => true, () => Interlocked.Read(ref Epoch), poke: poke?.Invoke(this));
-            Sweeper = new Sweeper(runner, hub, plant, qc, 3600, false, null, Task.CompletedTask) { MayAct = () => true, V2 = new V2Ownership(Store, Home), Adoption = gate };
+            Sweeper = new Sweeper(hub, plant, 3600, false, Task.CompletedTask) { MayAct = () => true, V2 = new V2Ownership(Store, Home), Adoption = gate };
         }
 
-        public int Count() { lock (Calls) return Calls.Count; }
+        // a pass has run when the hub has a time for the last full one (the loop observes it within 50 ms; the reads are those of that moment)
+        public int Count() { lock (Calls) { if (Calls.Count == 0 && Hub.LastSweep != null) Calls.Add((new JsonObject(), Store.Reads)); return Calls.Count; } }
         public void Adopted(long epoch) { lock (DoneEpochs) DoneEpochs.Add(epoch); }
         public async Task<bool> WaitForCall(int seconds) { for (var i = 0; i < seconds * 20 && Count() == 0; i++) await Task.Delay(50); return Count() > 0; }
     }

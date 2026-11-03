@@ -34,7 +34,7 @@ public sealed class StartupTests(TwoPortGateway gw) : IClassFixture<TwoPortGatew
 }
 
 /// <summary>
-/// Today's stop, with the SQL lease and durable transcripts on (the revocations are read, through the stub; a real SQL Server, FACTORY_TEST_SQL, or the test returns at once): the hand-over (the node leaves, the final
+/// Today's stop, with the SQL lease on (the revocations are read, through the stub; a real SQL Server, FACTORY_TEST_SQL, or the test returns at once): the hand-over (the node leaves, the final
 /// plant is written to the database, then the lock is let go) runs before the transcripts' flush, because ApplicationStopping runs its callbacks last-registered first; and the whole stop fits the platform's 30 s grace.
 /// </summary>
 public sealed class StopOrderTests
@@ -54,7 +54,8 @@ public sealed class StopOrderTests
         env.Set("GH_TOKEN", "fake");
         env.Set("FACTORY_TRANSCRIPT_SAVE_SECONDS", "3600");
         env.Set("FACTORY_DB_CONNECTION", db.ConnectionString);
-        WolverineHostTestSupport.Shadow(env);
+        env.Set("GITHUB_API_URL", EmptyGitHub.Shared.Url);
+        WolverineHostTestSupport.V2(env);
         change?.Invoke(env);
         env.Apply();
         var host = new GatewayHost();
@@ -73,20 +74,7 @@ public sealed class StopOrderTests
                 await Task.Delay(200);
             }
             Assert.Equal("acting", (string?)status?["leader"]?["role"]);
-            Assert.Equal(true, (bool?)status?["transcripts"]?["durable"]);
-            // 2. a dirty session: the save loop (every 10 s) tries it once and the stub refuses, so it stays dirty and is not tried again for
-            // FACTORY_TRANSCRIPT_SAVE_SECONDS; only the flush at the stop saves it
-            var post = await host.SendAsync("POST", "/api/v1/runtime/transcript", GatewayEnvironment.ApiPort, Auth.WorkerToken(env.TokenSecret, "alice"), "{\"lines\":[\"a\",\"b\"]}");
-            Assert.Equal(200, post.Status);
-            sw.Restart();
-            while (sw.Elapsed < TimeSpan.FromSeconds(30))
-            {
-                var t = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["transcripts"];
-                if ((long?)t?["saveFailures"] >= 1 && (long?)t?["dirty"] >= 1 && (long?)t?["saving"] == 0) break;
-                await Task.Delay(200);
-            }
-            Assert.Contains(StubPwsh.Read(env.StubLog), c => c.Verb == "transcript-save");
-            File.WriteAllText(Path.Combine(env.Dir, "transcript-ok"), "");
+            // (V3.2: the transcripts are saved by the v2 route in the database, not by a call of the stub script: the flush is no longer observable here)
             var before = StubPwsh.Read(env.StubLog).Count;
             // 3. the stop
             var stop = Stopwatch.StartNew();
@@ -95,7 +83,7 @@ public sealed class StopOrderTests
             stop.Stop();
             Assert.True(stop.Elapsed < TimeSpan.FromSeconds(30), $"the stop took {stop.Elapsed.TotalSeconds:0.0} s");
             var after = StubPwsh.Read(env.StubLog).Skip(before).ToList();
-            Assert.Contains(after, c => c.Verb == "transcript-save");   // the flush ran, after the hand-over (callbacks run last-registered first)
+            _ = after;   // (the transcripts flush is the v2 route now, not a call of the stub script: the hand-over below is what this test keeps)
             Assert.Equal(1L, await db.Count("SELECT COUNT(*) FROM factory.PlantState WHERE Document LIKE N'%\"final\":true%'"));   // the final plant is in the database ...
             var next = new SqlLease(db.ConnectionString, _ => Task.CompletedTask, 20);
             try { Assert.True((await next.TryAcquireAsync("the-successor", false, default)).Acquired); }   // ... and the lock was let go

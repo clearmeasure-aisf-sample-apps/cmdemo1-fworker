@@ -20,7 +20,7 @@ sealed record RecurringJobIntervals(TimeSpan BoardReconciler, TimeSpan PlantStep
         int Num(string key, int fallback, int min, int max) => block?[key] is { } n && int.TryParse(n.ToString(), out var v) ? Math.Clamp(v, min, max) : fallback;
         // (never faster than every 5 seconds: the Tier 1 tests sweep every 2 seconds, and five script passes every 2 seconds on top of the sweep would load a CI machine for nothing)
         var plant = Num("plantStepsSeconds", Math.Max(5, sweepSeconds), 5, 3600);
-        return new(TimeSpan.FromSeconds(Num("boardReconcilerSeconds", 120, 30, 600)), TimeSpan.FromSeconds(plant), TimeSpan.FromSeconds(Math.Min(plant, Num("qcSyncSeconds", 60, 1, 3600))), TimeSpan.FromHours(Num("retentionHours", 24, 1, 168)), TimeSpan.FromSeconds(Num("baseWatchSeconds", 300, 5, 3600)));
+        return new(TimeSpan.FromSeconds(Num("boardReconcilerSeconds", 120, Environment.GetEnvironmentVariable("FACTORY_TEST_FAST_RECONCILER") == "1" ? 2 : 30, 600)), TimeSpan.FromSeconds(plant), TimeSpan.FromSeconds(Math.Min(plant, Num("qcSyncSeconds", 60, 1, 3600))), TimeSpan.FromHours(Num("retentionHours", 24, 1, 168)), TimeSpan.FromSeconds(Num("baseWatchSeconds", 300, 5, 3600)));
     }
 }
 
@@ -38,7 +38,9 @@ sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
     {
         var i = intervals ?? RecurringJobIntervals.Default;
         TimeSpan Soon(TimeSpan every) => TimeSpan.FromSeconds(Math.Min(every.TotalSeconds, 3));   // the first run of a plant-wide step: as soon as the leader may act (the job itself waits, a little, for the restore and the first read of the saga's items)
-        return new([new(BoardReconciler, i.BoardReconciler), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6)), new(IncidentHealth, TimeSpan.FromMinutes(1)), new(ItemSteps, TimeSpan.FromMinutes(1)),
+        var fast = Environment.GetEnvironmentVariable("FACTORY_TEST_FAST_RECONCILER") == "1";   // tests only: the jobs that carry an item from one step to the next run every few seconds, not every minute
+        RecurringJobSlot Quick(string name, TimeSpan every) => fast ? new(name, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(3)) : new(name, every);
+        return new([new(BoardReconciler, i.BoardReconciler, Environment.GetEnvironmentVariable("FACTORY_TEST_FAST_RECONCILER") == "1" ? TimeSpan.FromSeconds(2) : null), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), Quick(DocsIntake, TimeSpan.FromMinutes(1)), Quick(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6)), new(IncidentHealth, TimeSpan.FromMinutes(1)), Quick(ItemSteps, TimeSpan.FromMinutes(1)),
             new(ClaimRefReap, i.PlantSteps, Soon(i.PlantSteps)), new(BoardGuard, i.PlantSteps, Soon(i.PlantSteps)), new(QcSync, i.QcSync, Soon(i.QcSync)), new(Replenish, i.PlantSteps, Soon(i.PlantSteps)), new(BacklogLow, i.PlantSteps, Soon(i.PlantSteps)),
             new(RetentionPrune, i.Retention, TimeSpan.FromMinutes(10)), new(CapacityReap, TimeSpan.FromMinutes(5)), new(Adoption, TimeSpan.FromMinutes(1), Soon(TimeSpan.FromMinutes(1))),
             new(GapRenew, TimeSpan.FromMinutes(1), Soon(TimeSpan.FromMinutes(1))), new(BaseWatchFallback, i.BaseWatch == default ? TimeSpan.FromMinutes(5) : i.BaseWatch, Soon(i.BaseWatch == default ? TimeSpan.FromMinutes(5) : i.BaseWatch)), new(ReleaseQueueFlag, i.PlantSteps, Soon(i.PlantSteps))]);

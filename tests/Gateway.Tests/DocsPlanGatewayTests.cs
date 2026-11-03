@@ -491,6 +491,23 @@ public sealed class V2OfferTests
     }
 
     [Fact]
+    public async Task AStepWhoseSessionWasLost_IsOfferedAgainAsARelaunch_SoTheSessionResumes()
+    {
+        var (store, svc) = await Store();
+        var item = new ItemId(Home, 7);
+        await svc.Handle(new StartWorkItem(item, "intake", "docs"));
+        var own = new V2Ownership(store, Home, Column);
+        await own.RefreshAsync();
+        var s = (await store.Load(item.ToString(), default))!.State;
+        Assert.Equal("handoff", own.OfferNodes(_ => false)[0]["reason"]!.ToString());
+        // the lease of the step ran out with nobody holding it: the saga begins the step again and counts the launch
+        var r = await svc.Handle(new PhaseLeaseExpired(item, s.Generation, s.ArmId, s.LeaseDue ?? DateTimeOffset.UtcNow));
+        Assert.Equal(WorkItemOutcome.Applied, r.Decision.Outcome);
+        await own.RefreshAsync();
+        Assert.Equal("relaunch", own.OfferNodes(_ => false)[0]["reason"]!.ToString());
+    }
+
+    [Fact]
     public async Task AParkedItem_AnItemOnTheMerge_AnotherRepositorysItem_AndACompletedOne_AreNotOffered()
     {
         var (store, svc) = await Store();

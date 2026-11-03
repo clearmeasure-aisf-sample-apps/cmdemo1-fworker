@@ -235,7 +235,6 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp =>
         {
             var runner = sp.GetRequiredService<Runner>();
-            var shadow = sp.GetService<IShadowHistory>();   // W2.3: only in a shadow environment, with the Wolverine host
             // W3.2: only where v2 acts, with the Wolverine host. Resolved at the first journal line, not here: building the host resolves the leadership, which resolves the plant, so resolving the host while
             // the plant is built is a circle (the gateway of an environment in v2Environments never finished starting)
             var journalSink = new Lazy<JournalCommandSink?>(() => c.Engine.V2Acts ? sp.GetService<JournalCommandSink>() : null);
@@ -243,14 +242,12 @@ static class GatewayServiceCollectionExtensions
             {
                 // v2 acting: the line is a command in the outbox, written by the C# ledger (no `journal` verb); the chain of the plant only publishes
                 if (journalSink.Value is { } sink) { await sink.Send(item, ev, fields, key); return; }
-                var posted = false;
-                try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); posted = true; }
+                try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
                 catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-                shadow?.Journal(item, ev, fields, key, posted);   // after v1's call, best-effort, never throws
             }, timing.AckSeconds, gw.OwnerMode ? sp.GetRequiredService<IPlantHooks>() : null)
             { JournalCoded = (item, ev, code, key) => journalSink.Value is { } sink ? sink.Coded(item, ev, code, key) : Task.CompletedTask,   // W7.3: the code the plant takes off a journal line (session-gone)
                 Home = c.Credentials.HomeClaim, HomeBranch = instance.DefaultBranch, QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = instance.OneItemPerSession,
-                PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instance.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = rts.CaeJob, Cursor = rts.Cursor, Copilot = rts.Copilot, Octopus = rts.Octopus,
+                OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instance.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = rts.CaeJob, Cursor = rts.Cursor, Copilot = rts.Copilot, Octopus = rts.Octopus,
                 // the items the cloud runtimes' tasks own, and their part of the plant snapshot (C5c: set here, where Program.cs set them after Build())
                 CopilotOwns = rts.CopilotRuntime != null ? rts.CopilotRuntime.Owns : null, CopilotOwnersSnapshot = rts.CopilotRuntime != null ? rts.CopilotRuntime.OwnedJson : null, CopilotOwnersRestore = rts.CopilotRuntime != null ? rts.CopilotRuntime.Restore : null,
                 CursorOwns = rts.CursorRuntime != null ? rts.CursorRuntime.Owns : null, CursorOwnersSnapshot = rts.CursorRuntime != null ? rts.CursorRuntime.OwnedJson : null, CursorOwnersRestore = rts.CursorRuntime != null ? rts.CursorRuntime.Restore : null,
@@ -283,27 +280,21 @@ static class GatewayServiceCollectionExtensions
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
-        // W4.2: the Octopus watcher, read only; v1 promotes with the rule scripts. W5.2: it also runs in the shadow run of the delivery train (slower, a smaller call budget)
-        var shadowTrain = c.Engine.ShadowRuns && c.WolverineHost && c.Instance.Home != null;
-        if (c.Engine.V2Acts || shadowTrain)
+        // W4.2: the Octopus watcher, read only
+        if (c.Engine.V2Acts)
         {
-            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct, shadow: shadowTrain));
+            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct));
             services.AddHostedService(sp => sp.GetRequiredService<OctopusWatchService>());
         }
-        if (shadowTrain) services.AddHostedService(sp => new DeliveryShadowService(sp.GetRequiredService<DeliveryShadowHolder>(), DeliveryShadowService.DefaultInterval));   // W5.2: compares and stores
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddHostedService(sp => sp.GetRequiredService<RecurringJobScheduler>());   // W4.3
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
         var sweepSeconds = gw.SweepSeconds;
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
-        var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
+        var leaderOn = c.LeaderOn;
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
-        // Cutover review: v1's intake is off wherever intake.v2Plans names plans and the engine does not act on them (see Sweeper.IntakeOff): uat and prod (their image has intake.enabled true for tdd's engine), a v2 environment with no database.
-        // Where v2 is configured and there is no database the sweeper holds an ownership that is never loaded (EngineOptions.NoDatabase): it sweeps nothing at all.
-        var intakeOff = !v2Sweep && Fworker.Workflows.Intake.IntakeSettings.From(c.Instance.Root, Environment.GetEnvironmentVariable).V2Plans.Count > 0;
         if (v2Sweep) services.AddSingleton(sp => SagaPlantWiring.Make(c, sp));   // W9.10k: the plant's input for the saga's items, and the sources of the patrol's parks and the release check's in-flight work
-        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : c.Engine.NoDatabase ? V2Ownership.NeverLoaded() : null, Adoption = v2Sweep ? sp.GetRequiredService<AdoptionGate>() : null, IntakeOff = intakeOff, V2Plans = v2Sweep ? sp.GetService<WorkItemParts>()?.Intake.V2Plans ?? [] : [], PlantJobs = v2Sweep && sp.GetService<PlantStepJobs>() is not null, Feed = v2Sweep ? sp.GetRequiredService<SagaPlantFeed>() : null });   // (W9.10e: v1's intake leaves the Todo items of these plans to the engine's)
-        // V2.3: v1's AutoPromoter is gone; the delivery train promotes uat and prod where the engine acts
+        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, MayAct = () => leader.MayAct, LeaderOn = leaderOn, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : c.Engine.NoDatabase ? V2Ownership.NeverLoaded() : null, Adoption = v2Sweep ? sp.GetRequiredService<AdoptionGate>() : null, Feed = v2Sweep ? sp.GetRequiredService<SagaPlantFeed>() : null });   // V3.2: the plant is fed from the saga alone
         // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
         // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
         var transcripts = c.Transcripts;

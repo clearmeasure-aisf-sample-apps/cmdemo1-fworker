@@ -54,7 +54,7 @@ public sealed class CapacityWiringTests
         {
             using var env = new GatewayEnvironment();
             env.Set("FACTORY_DB_CONNECTION", cs);
-            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             env.Apply();
             var item = new ItemId(Home(env), 701);
             await using var gateway = new GatewayHost();
@@ -82,38 +82,6 @@ public sealed class CapacityWiringTests
         }
     }
 
-    [SqlFact]
-    public async Task InTheShadowRunOfTdd_NothingOfTheSchedulerExists_ARequestIsNotHandled()
-    {
-        if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
-        var sql = WolverineHostTestSupport.Sql!;
-        var db = "fw_w71s_" + Guid.NewGuid().ToString("N")[..10];
-        var master = With(sql, "master");
-        await Rows(master, $"CREATE DATABASE [{db}]");
-        var cs = With(sql, db);
-        try
-        {
-            using var env = new GatewayEnvironment();
-            env.Set("FACTORY_DB_CONNECTION", cs);
-            WolverineHostTestSupport.Shadow(env);
-            env.Apply();
-            await using var gateway = new GatewayHost();
-            _ = gateway.Server;
-            var wolverine = gateway.Services.GetRequiredService<WolverineHostService>();
-            Assert.True(await Until(() => Task.FromResult(wolverine.State == WolverineHostService.Phase.Running), 60), "the Wolverine host did not start");
-            // the table exists (the migration is the host's), the scheduler does not: nothing handles the message and nothing is written
-            Assert.Equal("1", (await Rows(cs, "SELECT COUNT(*) FROM sys.tables WHERE name = 'CapacityLedgers'"))[0]);
-            try { await wolverine.PublishAsync(Ask(new ItemId(new RepoId("acme", "orders"), 701))); } catch (Exception) { /* no handler and no route: the bus may refuse */ }
-            await Task.Delay(3000);
-            Assert.Equal("0", (await Rows(cs, "SELECT COUNT(*) FROM factory.CapacityLedgers"))[0]);
-            Assert.Equal("0", (await Rows(cs, "SELECT COUNT(*) FROM factory.ItemHistory WHERE Type LIKE 'capacity.%'"))[0]);
-        }
-        finally
-        {
-            SqlConnection.ClearAllPools();
-            try { await Rows(master, $"ALTER DATABASE [{db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{db}]"); } catch { }
-        }
-    }
 }
 
 /// <summary>The scheduler's wiring pieces that need no host: what the plant's managers count, and the settings of the source configuration.</summary>

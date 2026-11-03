@@ -14,11 +14,11 @@ public sealed class V2VerbRoutesTests : IDisposable
     readonly string dir = Directory.CreateTempSubdirectory("v2-routes-").FullName;
     public void Dispose() { try { Directory.Delete(dir, true); } catch { } }
 
-    EngineOptions Engine(string environment, string v2, string shadow = "", string? off = null)
+    EngineOptions Engine(string environment, string v2)
     {
         var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".json");
-        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2, shadow));
-        Func<string, string?> env = n => n == "FACTORY_V2_OFF" ? off : null;
+        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2));
+        Func<string, string?> env = _ => null;
         return EngineOptions.From(InstanceConfig.Load(path, env), environment, env);
     }
 
@@ -75,11 +75,10 @@ public sealed class V2VerbRoutesTests : IDisposable
     }
 
     [Theory]
-    [InlineData("tdd", "\"prod\"", "", null)]          // v1 acts
-    [InlineData("tdd", "", "\"tdd\"", null)]           // the shadow run: v1 acts
-    public void NothingIsRegistered_WhereV1Acts(string environment, string v2, string shadow, string? off)
+    [InlineData("tdd", "\"prod\"")]          // v1 acts
+    public void NothingIsRegistered_WhereV1Acts(string environment, string v2)
     {
-        var routes = V2VerbRoutes.Build(Engine(environment, v2, shadow, off), new ServiceCollection().BuildServiceProvider());
+        var routes = V2VerbRoutes.Build(Engine(environment, v2), new ServiceCollection().BuildServiceProvider());
         Assert.Equal(0, routes.Count);
     }
 

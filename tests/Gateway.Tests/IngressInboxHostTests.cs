@@ -107,7 +107,7 @@ public sealed class IngressInboxHostTests
         env.Set("FACTORY_DB_CONNECTION", cs);
         env.Set("GH_TOKEN", "ghp_" + new string('B', 26));   // composed at run time; the stub accepts anything
         env.Set("GITHUB_API_URL", stub.Base);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
         env.Apply();
         try
         {

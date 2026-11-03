@@ -348,11 +348,11 @@ public sealed class ReadModelsPortTests : IDisposable
 
     // ---- the registration ------------------------------------------------------------------------------------------------------------------------
 
-    static EngineOptions Engine(string dir, string environment, string v2, string? off = null)
+    static EngineOptions Engine(string dir, string environment, string v2)
     {
         var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".json");
-        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2, ""));
-        Func<string, string?> env = n => n == "FACTORY_V2_OFF" ? off : null;
+        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2));
+        Func<string, string?> env = _ => null;
         return EngineOptions.From(InstanceConfig.Load(path, env), environment, env);
     }
 

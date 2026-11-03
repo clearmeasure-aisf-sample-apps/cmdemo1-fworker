@@ -61,26 +61,17 @@ public sealed class OctopusWebhookTests
         }
     }
 
-    static async Task<List<IngressEvent>> FirstPoll(bool shadow)
+    static async Task<List<IngressEvent>> FirstPoll()
     {
         var ingress = new Recording();
-        var watch = OctopusWatchService.From(InstanceConfig.Load(WriteConfig(), _ => null), ingress, n => n == "OCTOPUS_API_KEY" ? "API-KEY" : null, () => true, new HttpClient(new OldOctopus()), shadow);
+        var watch = OctopusWatchService.From(InstanceConfig.Load(WriteConfig(), _ => null), ingress, n => n == "OCTOPUS_API_KEY" ? "API-KEY" : null, () => true, new HttpClient(new OldOctopus()));
         await watch.StartAsync(default); await Task.Delay(1500); await watch.StopAsync(default);
         lock (ingress.Got) return ingress.Got.ToList();
     }
 
-    [Fact] public async Task TheShadowWatcherReplaysTheWindowAtItsFirstPoll_SoTheTrainSeesTheWaitingReleases()
-    {
-        var shadow = await FirstPoll(shadow: true);
-        Assert.Contains(shadow, e => e is OctopusReleaseCreated { Version: "2.4.1288" });
-        Assert.Contains(shadow, e => e is OctopusDeploymentChanged { Environment: "tdd", Phase: OctopusDeploymentPhase.Succeeded });
-        Assert.IsType<OctopusReplayBegan>(shadow[0]);   // the train decides nothing between these two
-        Assert.IsType<OctopusReplayComplete>(shadow[^1]);
-    }
-
     [Fact] public async Task TheActingWatcherReplaysTheSameWindow_SoARestartLosesNothingOfAnOutageAndTheTrainOfTheCutoverStartsWithTheHistory()
     {
-        var acting = await FirstPoll(shadow: false);
+        var acting = await FirstPoll();
         Assert.Contains(acting, e => e is OctopusReleaseCreated { Version: "2.4.1288" });
         Assert.Contains(acting, e => e is OctopusDeploymentChanged { Environment: "tdd", Phase: OctopusDeploymentPhase.Succeeded });
         Assert.IsType<OctopusReplayBegan>(acting[0]);

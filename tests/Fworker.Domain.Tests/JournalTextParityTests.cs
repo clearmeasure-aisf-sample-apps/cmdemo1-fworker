@@ -306,7 +306,6 @@ public sealed class JournalTextParityTests
         ("base-updated", "base-updated", [("sha7", "{sha}"), ("worker", "bm1"), ("behind", 1), ("overlap", "src/Shared.cs"), ("prs", "#{#6}")]),
         ("branch-updated", "branch-updated", [("pr", "{#2}"), ("seconds", 30)]),
         ("board-added", "board-added", [("column", "Technical Design")]),
-        ("pulled", "pulled", [("from", "Todo"), ("column", "Technical Design"), ("wip", 1), ("wipLimit", 2)]),
         ("unparked closed", "unparked", [("code", "runtime-failed"), ("by", "the sweep"), ("reason", "the item is closed"), ("closed", true)]),
         ("promoted", "promoted", [("release", "3.1.1"), ("environment", "uat"), ("task", "ServerTasks-{n}")]),
         ("promotion-signoff", "promotion-signoff", [("release", "3.1.1"), ("environment", "prod"), ("task", "ServerTasks-{n}"), ("result", "Proceed")]),

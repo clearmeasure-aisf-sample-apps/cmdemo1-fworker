@@ -74,7 +74,7 @@ public sealed class ItemVerbsPortTests : IDisposable
     static readonly string Token = "ghp_" + new string('A', 36);   // (composed at run time, so the secret scan has nothing to match)
 
     static void V2Config(GatewayEnvironment env) =>
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
 
     [Fact]
     public void WhereTheEngineActs_WithACredential_TheEighteenVerbsAreRoutedToV2_AndNowhereElse()
@@ -101,6 +101,16 @@ public sealed class ItemVerbsPortTests : IDisposable
             var noCredential = host.Services.GetRequiredService<V2VerbRoutes>();
             Assert.All(ItemRoutes.Verbs, v => Assert.False(noCredential.TryGet(v, out _), v));
             Assert.IsType<V2VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());   // (the other groups' routes put it in front; the item verbs fall through to v1 behind the saga's feed)
+        }
+        // an environment not named for v2 is on v1: no route, the router of v1
+        using (var env = new GatewayEnvironment())
+        {
+            env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("GH_TOKEN", Token); env.Apply();
+            using var host = new GatewayHost();
+            _ = host.Server;
+            Assert.Equal(0, host.Services.GetRequiredService<V2VerbRoutes>().Count);
+            Assert.Null(host.Services.GetRequiredService<Runner>().Routes);   // W9.9a: every call of the gateway itself stays the rule script
+            Assert.IsType<V1VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
         }
     }
 

@@ -2,8 +2,7 @@ using System.Text.Json;
 using Fworker.Contracts.Seams;
 using Fworker.Integrations.Octopus;
 
-// W4.2: the Octopus watcher in the gateway. Where the engine acts (Engine.V2Acts) and, since W5.2, in the shadow run (Engine.ShadowRuns, with the delivery train) when OCTOPUS_API_KEY is set; v1 keeps
-// promoting with the rule scripts either way and in the shadow run this only feeds the comparison (slower and with a smaller call budget). It reads Octopus (GET only; never creates, changes or promotes anything) every octopus.watchSeconds (default 60) while this process may act
+// W4.2: the Octopus watcher in the gateway. Where the engine acts (Engine.V2Acts) when OCTOPUS_API_KEY is set. It reads Octopus (GET only; never creates, changes or promotes anything) every octopus.watchSeconds (default 60) while this process may act
 // (the leader lease), and at once when the Octopus subscription's webhook arrives. Its events go to the ingress (S3), where W4.1 routes them.
 sealed class OctopusWatchService : BackgroundService
 {
@@ -16,7 +15,6 @@ sealed class OctopusWatchService : BackgroundService
 
     public bool Enabled => watcher != null;
 
-    public const int ShadowMinSeconds = 120, ShadowMaxCalls = 30;
 
     /// <summary>
     /// How far back the first poll of a process reads, in the shadow run and where the engine acts. A restart must not lose what happened while no gateway was up: the board reconciler (W4.3) reads only the
@@ -28,17 +26,15 @@ sealed class OctopusWatchService : BackgroundService
     public static readonly TimeSpan Lookback = TimeSpan.FromDays(30);
 
     /// <summary>The settings from octopus.url, .space, .project, .watchSeconds and OCTOPUS_API_KEY; a watcher that is off (no key, URL, space or project) is built as off.</summary>
-    public static OctopusWatchService From(InstanceConfig cfg, IEventIngress ingress, Func<string, string?> env, Func<bool> mayAct, HttpClient? http = null, bool shadow = false)
+    public static OctopusWatchService From(InstanceConfig cfg, IEventIngress ingress, Func<string, string?> env, Func<bool> mayAct, HttpClient? http = null)
     {
         var o = cfg.Root?["octopus"];
         string S(string n) => o?[n]?.ToString() ?? "";
         var key = env("OCTOPUS_API_KEY") ?? "";
         var seconds = int.TryParse(S("watchSeconds"), out var w) && w >= 5 ? w : 60;
-        // W5.2: in the shadow run v1 is the one promoting and the watcher only feeds the comparison: it reads at most every ShadowMinSeconds and makes at most ShadowMaxCalls calls per poll (v1's own pass reads about as much)
-        if (shadow) seconds = Math.Max(seconds, ShadowMinSeconds);
         if (key == "" || S("url") == "" || S("space") == "" || S("project") == "") return new OctopusWatchService(null, TimeSpan.FromSeconds(seconds), mayAct);
         var reader = new HttpOctopusReader(http ?? new HttpClient(), S("url"), key);
-        return new OctopusWatchService(new OctopusWatcher(reader, ingress.Ingest, new OctopusWatchSettings(S("space"), S("project"), MaxCallsPerPoll: shadow ? ShadowMaxCalls : 60, Lookback: Lookback)), TimeSpan.FromSeconds(seconds), mayAct);
+        return new OctopusWatchService(new OctopusWatcher(reader, ingress.Ingest, new OctopusWatchSettings(S("space"), S("project"), MaxCallsPerPoll: 60, Lookback: Lookback)), TimeSpan.FromSeconds(seconds), mayAct);
     }
 
     /// <summary>Asks for a poll now (the webhook); several asks before the poll start are one.</summary>

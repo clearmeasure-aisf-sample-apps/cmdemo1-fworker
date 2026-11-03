@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Fworker.Workflows.WorkItem;
 
-// W9.10k: the plant fed from saga state. Where the engine acts, the sweep leaves the items that have a saga alone (skip_items, SweepV2Filter), so everything the sweep's answer says about them is gone: the plant would see no
+// W9.10k: the plant fed from saga state. Where the engine acts, the sweep leaves the items that have a saga alone (V3.2: the sweep no longer runs a script; this feed is the plant's only input), so the plant would otherwise see no
 // owner's lease, no park, no pin, no priority, no runtime label and no Release Queue entry for them, and after two sweeps it would drop their owners (Plant.ReplaceOwned). This is the adapter that builds the same fields from the
 // saga's state (V2Ownership.States: the step and its column, the lease, the park, the Deliver step) and from the labels of the reconciler's cards (BoardReconciler.LastCards), and adds them to the sweep's answer after the
 // filter, so the plant, the keeper, the status, the patrol digest and the manager read saga items as they read v1's. It adds nothing for an item without a saga, and nothing where the engine does not act (no feed is made).
@@ -100,7 +100,7 @@ sealed class SagaPlantFeed(V2Ownership ownership, Func<int, string?> ownerOf, Fu
     static string ReleaseOf(WorkItemState s) => new[] { "prod", "uat", "tdd" }.Select(e => s.Delivered.GetValueOrDefault(e, "")).FirstOrDefault(r => r.Length > 0) ?? "";
 
     /// <summary>
-    /// Adds <see cref="Build"/>'s fields to the sweep's answer, after SweepV2Filter took the saga items out of it: the keyed objects get the saga items' keys, the lists their entries. The rule script's answer may hold a one-entry
+    /// Adds <see cref="Build"/>'s fields to the sweep's answer (V3.2: the sweep's answer is now built from this alone): the keyed objects get the saga items' keys, the lists their entries. The rule script's answer may hold a one-entry
     /// list as an object (PowerShell), which becomes a list. Returns how many entries were added.
     /// </summary>
     public int Apply(JsonNode sweep)
@@ -192,6 +192,7 @@ static class SagaPlantWiring
             return hit.ByNumber.TryGetValue(item, out var l) ? l : null;
         }
         var rules = SagaLabelRules.From(c.Instance.Root);
+        sp.GetRequiredService<V2Ownership>().OwnerHeld = n => LabelsOf(n) is { } held && rules.OwnerHold(held);   // V3.2: no offer while the owner's hold label is on the card
         sp.GetRequiredService<V2Ownership>().PinOf = n => LabelsOf(n) is { } labels ? rules.Pin(labels) : null;   // V1.3: the offers of the saga's items carry the pin of the label
         var feed = new SagaPlantFeed(sp.GetRequiredService<V2Ownership>(), plant.OwnerNameOf, LabelsOf, rules, sp.GetService<V2ItemViews>());
         plant.SagaAttentionSource = feed.Attention; plant.SagaFlightSource = feed.InFlight;

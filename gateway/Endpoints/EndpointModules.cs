@@ -48,6 +48,7 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule>(sp => new OctopusWebhookEndpoints(sp));   // W4.2: answers 404 unless the Octopus watcher is on (v2 acting)
         services.AddSingleton<IEndpointModule>(sp => new AlertsEndpoints(sp, c.Gateway.EnvironmentName, c.Engine.V2Acts));   // W8.2: answers 404 unless the engine acts (Engine.V2Acts; the shadow run has the inbox but not this route)
         services.AddSingleton<IEndpointModule>(sp => ActivatorUtilities.CreateInstance<TestHookEndpoints>(sp, c.RuntimeNonces));
+        services.AddSingleton<IEndpointModule>(sp => new TestAdvanceEndpoint(sp, c.Instance.Home));   // V3.2: mapped only with FACTORY_TEST_HOOKS=1 against a GitHub other than api.github.com
         // C7b: what is not a service of its own comes from the composition (the runtime nonces; the worker sessions at /mcp, made after the mapping)
         services.AddSingleton<IEndpointModule>(sp => new WorkerAdminEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(),
             sp.GetRequiredService<KeeperSettings>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<Revocations>(),
@@ -60,13 +61,11 @@ static class EndpointModuleExtensions
             var v1 = new V1EventIngress(sp.GetRequiredService<EventHub>());
             if (sp.GetService<IngressInboxPort>() is { } inbox)
             {
-                // W4.1: where the engine acts, events also go to the durable inbox. W5.2: in the shadow run they do too, the Octopus watcher's events go to the train, and the history is kept
+                // W4.1: where the engine acts, events also go to the durable inbox, and the Octopus watcher's events go to the train
                 IEventIngress withInbox = new InboxEventIngress(v1, inbox);
-                if (sp.GetService<ShadowOctopusPort>() is not { } octopus) return withInbox;
-                withInbox = new OctopusShadowIngress(withInbox, octopus);
-                return sp.GetService<IShadowHistory>() is { } history ? new ShadowEventIngress(withInbox, history) : withInbox;
+                return sp.GetService<ShadowOctopusPort>() is { } octopus ? new OctopusShadowIngress(withInbox, octopus) : withInbox;
             }
-            return sp.GetService<IShadowHistory>() is { } shadow ? new ShadowEventIngress(v1, shadow) : v1;   // W2.3: shadow history records after v1 has done its part
+            return v1;
         });
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
         services.AddSingleton<IEndpointModule, CopilotEndpoints>();

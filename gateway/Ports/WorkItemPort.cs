@@ -16,7 +16,7 @@ using Wolverine;
 
 // W6.0 and W6.1 (docs/design/fworker-wolverine-implementation.md W6): the WorkItemSaga in the Wolverine host, in the hybrid composition the owner decided on (2026-10-28). Only where the engine acts
 // (Engine.V2Acts; tdd stays in the shadow run, so nothing of this exists there or in v1): v1's plant still offers the sessions and runs every verb the v2 engine does not own yet, v2's saga decides the items it
-// has started (the docs-only items the intake gave it), and v1's sweep leaves those items alone. The second half is V2Ownership and SweepV2Filter: the sweep's answer is read as before, and everything it says about
+// has started (the docs-only items the intake gave it), and v1's sweep leaves those items alone. The second half is V2Ownership (SweepV2Filter is gone in V3.2; the plant is fed from the saga alone; what v1 once said about
 // an item that has a saga (an offer, a trigger, a hold, a park, an owner) is dropped before the plant sees it, so the plant offers no session for it and notifies no owner of it. W9.10e passes the owned set into the script as well (sync-board `skip_items`: the item loop and the claim-ref reap skip those items, so v1
 // settles, merges, parks and demotes none of them), and until the first read of the table (V2Ownership.Loaded) the sweeper runs no pass at all.
 // W6.6 adds what makes it run (Ports/DocsPlanPort.cs: the merge, the card, the intake of docs items; Verbs/V2VerbFeed.cs: the verbs' events into the saga; the offers below), still only where the engine acts, and with
@@ -50,6 +50,8 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 
     /// <summary>V1.3: the worker a label pins an item to, from the labels of the reconciler's cards (set by the composition); null for none.</summary>
     public Func<int, string?>? PinOf { get; set; }
+    /// <summary>V3.2: whether the item carries the owner's hold label (hold:owner): it is offered to nobody while it does, and an open offer of it is dropped by the next pass (the sweep's rule, now the plant's).</summary>
+    public Func<int, bool>? OwnerHeld { get; set; }
 
     /// <summary>
     /// Cutover review: an ownership that is never loaded, for a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase). The sweep asks it and waits for ever, so v1 acts on no item;
@@ -80,7 +82,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     public string? Column(StepKind step) => columnOf?.Invoke(step);
 
     /// <summary>
-    /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items are dropped (SweepV2Filter), so
+    /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items were dropped (SweepV2Filter, gone in V3.2), so
     /// the saga is what says that an item waits for a session; the sessions and the plant that places them are v1's. Empty without the columns of the docs plan.
     /// W9.9b (review): after a break an item whose row is still the old generation and that the adoption has not examined is not offered (ReadoptionGate): v1 may have moved or merged it since, and the plant would start a
     /// session on a stale Develop. The gate is asked at each read, so the offer is back as soon as the adoption has examined the item (Adopted) or the gate is released; the sweep's full pass repeats it.
@@ -101,9 +103,11 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         var nodes = new List<JsonObject>();
         var s = snapshot;   // (offers and slots of one read)
         foreach (var (item, column) in OffersOf(s))
-            if (!hasOwner(item) && (only is null || only.Contains(item)))
+            if (!hasOwner(item) && (only is null || only.Contains(item)) && OwnerHeld?.Invoke(item) != true)
             {
-                var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
+                // V3.2: a step whose session was lost before (the lease ran out and the saga began it again) is a relaunch: the session resumes the work of the one before it (the plant reads mode "resume" from the reason)
+                var relaunch = s.States.Any(st => ItemId.TryParse(st.Item, out var sid) && sid.Number == item && sid.Repository == home && (st.FailuresOf(st.Step) > 0 || st.LaunchesOf(st.Step) > 0));
+                var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = relaunch ? "relaunch" : "handoff", ["v2"] = true };
                 // V1.3: a worker: label pins the item to that worker, as the sweep's pins do for v1's items (Plant.Plan reads it from the offers of an offer made outside a sweep, see PlanSagaOffers)
                 if (PinOf?.Invoke(item) is { Length: > 0 } pin) node["pin"] = pin;
                 // W9.10j: the slot the scheduler granted: the plant starts the session on its runtime, under the saga's arm, and the manager keeps the execution apart from its own counts
@@ -231,39 +235,6 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 
 /// <summary>The slot of the scheduler that the saga of an offered item holds (W9.10j).</summary>
 sealed record SlotOffer(string SlotId, string Runtime, string ArmId);
-
-static class SweepV2Filter
-{
-    // arrays of objects with an "item", arrays of numbers, and objects keyed by the number of the item
-    static readonly string[] ObjectLists = ["offers", "triggers", "held", "parks", "pass_unmerged", "flags", "release_queue"];
-    static readonly string[] NumberLists = ["unconfirmed", "unparked", "holds", "settling"];
-    static readonly string[] KeyedByNumber = ["owners", "owned", "pins", "priorities", "runtimes", "profiles"];
-
-    /// <summary>Removes from the sweep's answer everything it says about the items <paramref name="owns"/> names; returns how many entries it removed. The answer's own log of what the script did (actions, errors) is left as it is.</summary>
-    public static int Apply(JsonNode sweep, Func<int, bool> owns)
-    {
-        if (sweep is not JsonObject o) return 0;
-        var removed = 0;
-        foreach (var name in ObjectLists)
-            if (o[name] is JsonArray a) removed += RemoveWhere(a, x => x is JsonObject xo && Number(xo["item"]) is { } n && owns(n));
-        foreach (var name in NumberLists)
-            if (o[name] is JsonArray a) removed += RemoveWhere(a, x => Number(x) is { } n && owns(n));
-        foreach (var name in KeyedByNumber)
-            if (o[name] is JsonObject d)
-                foreach (var key in d.Select(kv => kv.Key).ToList())
-                    if (int.TryParse(key, out var n) && owns(n)) { d.Remove(key); removed++; }
-        return removed;
-    }
-
-    static int? Number(JsonNode? n) => n is JsonValue v && (v.TryGetValue<int>(out var i) || (v.TryGetValue<string>(out var s) && int.TryParse(s, out i))) ? i : null;
-
-    static int RemoveWhere(JsonArray a, Func<JsonNode?, bool> drop)
-    {
-        var n = 0;
-        for (var i = a.Count - 1; i >= 0; i--) if (drop(a[i])) { a.RemoveAt(i); n++; }
-        return n;
-    }
-}
 
 /// <summary>What the gateway builds for the saga: its service, the history writer, the ownership the sweep reads and the intake settings.</summary>
 sealed record WorkItemParts(WorkItemService Service, WorkItemHistory History, IWorkItemStore Store, V2Ownership? Ownership, IntakeSettings Intake, DocsPlanParts Docs, MergeTrainParts Merge, FeaturePlanParts Feature);

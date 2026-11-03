@@ -37,7 +37,9 @@ static class DeliveryShadowSettings
             // v1 promotes only where autoPromote is on and names this gateway's environment (AutoPromoteHere); otherwise the train observes
             var acts = cfg.AutoPromoteHere;
             var named = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
-            var environments = named;
+            // The train promotes the named environments (v1's AutoPromoter is gone: V3.2); nothing is decided in shadow any more.
+            List<string> shadowed = [];
+            var environments = shadowed.Count > 0 ? [] : named;
             var names = new Dictionary<string, string>(); var urls = new Dictionary<string, string>();
             foreach (var k in DeliveryPolicy.Chain)
             {

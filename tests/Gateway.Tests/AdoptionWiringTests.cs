@@ -8,7 +8,7 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// W9.9b: the adoption in a gateway, where it exists and where it must not. Only an engine that acts (with a database, a home repository and a GitHub credential) has the recurring job and the "adoption" block of the v2 status;
-/// tdd's shadow run and v1 have neither (nothing of it is made).
+/// v1 has neither (nothing of it is made).
 /// </summary>
 public sealed class AdoptionWiringTests
 {
@@ -21,7 +21,7 @@ public sealed class AdoptionWiringTests
         if (token) env.Set("GH_TOKEN", Token);
         env.EditConfig = cfg => cfg["engine"] = new JsonObject
         {
-            ["v2Environments"] = new JsonArray(mode == "v2" ? "tdd" : "other"), ["shadowEnvironments"] = new JsonArray(mode == "shadow" ? "tdd" : "other"),
+            ["v2Environments"] = new JsonArray(mode == "v2" ? "tdd" : "other"),
         };
         env.Apply();
         return env;
@@ -59,17 +59,6 @@ public sealed class AdoptionWiringTests
         env.Set("GH_TOKEN", "unset");
         using var host = Start();
         Assert.False(host.Services.GetRequiredService<RecurringJobRegistry>().Has(RecurringJobSlots.Adoption));
-        Assert.False((await host.Services.GetRequiredService<V2Health>().Block(default)).ContainsKey("adoption"));
-    }
-
-    [Fact]
-    public async Task TheShadowRun_HasNoAdoption_AndWritesNoMarker()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = Env("shadow");
-        using var host = Start();
-        Assert.Null(host.Services.GetService<RecurringJobRegistry>());
-        Assert.Null(host.Services.GetRequiredService<WolverineHostService>().BeforeHost);   // (tdd's shadow run holds nothing)
         Assert.False((await host.Services.GetRequiredService<V2Health>().Block(default)).ContainsKey("adoption"));
     }
 }

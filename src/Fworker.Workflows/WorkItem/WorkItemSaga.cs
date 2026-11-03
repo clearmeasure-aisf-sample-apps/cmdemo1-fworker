@@ -157,6 +157,8 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         if (recorded.Outcome != WorkItemOutcome.Applied) return recorded;
         state.ReviewsComplete.Add(StepKind.Develop.ToString());
         c.Advance("Develop done: the gateway settled the coding agent's task");
+        // the watcher may have read the checks of this head before the settle was applied (a red then costs no round in Development): the item enters Functional Testing on a red head, which is a fix-forward round now
+        if (state.Step == StepKind.Verify && WorkPlans.IsCode(state.Plan) && state.ChecksState == FeatureFlow.Red && MergeSteps.SameHead(state.ChecksHead, state.Head)) FeatureFlow.FixForward(c, "CI is red on the head under test");
         return StepAnswer.Applied;
     }
 

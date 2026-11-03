@@ -246,17 +246,11 @@ public sealed class OwnershipLookupTests
         rig.Store.FailReads = true;                                         // (the table cannot be read as a whole)
         Assert.True(await rig.Own.OwnsOrFindAsync(2));
         Assert.False(rig.Own.Loaded);
-        var runner = new Runner("/nonexistent/factory.ps1");
-        var routes = new V2VerbRoutes();
-        var calls = 0;
-        routes.Add(BoardRoutes.Verbs, "sync-board", (_, _) => { Interlocked.Increment(ref calls); return Task.FromResult(new VerbAnswer(20, "{}")); });
-        runner.Routes = routes;
         var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
         var hub = new EventHub();
-        var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
-        var sweeper = new Sweeper(runner, hub, plant, qc, 3600, true, null, Task.CompletedTask) { MayAct = () => true, V2 = rig.Own };
+        var sweeper = new Sweeper(hub, plant, 3600, true, Task.CompletedTask) { MayAct = () => true, V2 = rig.Own };
         await sweeper.StartAsync(default);
-        try { await Task.Delay(TimeSpan.FromSeconds(5)); Assert.Equal(0, Volatile.Read(ref calls)); Assert.False(rig.Own.Loaded); }
+        try { await Task.Delay(TimeSpan.FromSeconds(5)); Assert.Null(hub.LastSweep); Assert.False(rig.Own.Loaded); }
         finally { await sweeper.StopAsync(default); }
     }
 
@@ -406,45 +400,4 @@ public sealed class OwnershipLookupTests
     // ---- the sweep ---------------------------------------------------------------------------------------------------------------------------------
 
     static readonly SagaLabelRules Rules = SagaLabelRules.From(JsonNode.Parse("""{ "priorityLabels": { "top": "priority:top", "high": "priority:high" }, "testLabel": "factory test", "ownerHoldLabel": "hold:owner" }"""));
-
-    // The script reads the board after the set was read. A saga that started meanwhile has its card in a working column, and the script offers the item as v1's: the sweep reads the set again before it drops v1's word about
-    // the saga's items, so the plant gets no offer of v1's for an item that has a saga (the saga's own offer, with its slot, is what the plant is given).
-    [Fact]
-    public async Task ASagaThatStartsWhileTheScriptRuns_IsNotOfferedToThePlantAsV1sItem()
-    {
-        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30) { Msg = new MessagingSettings { Configured = true, Enabled = true, OwnedGraceSeconds = 0 } };
-        var rig = new Rig();
-        await rig.Own.RefreshAsync();   // (the set read before the script: empty)
-        var runner = new Runner("/nonexistent/factory.ps1");
-        var routes = new V2VerbRoutes();
-        var calls = 0;
-        routes.Add(BoardRoutes.Verbs, "sync-board", async (_, _) =>
-        {
-            if (Interlocked.Increment(ref calls) == 1) await rig.Svc.Handle(new StartWorkItem(Item, "intake", "feature"));   // (the saga has its row, its card moves, the script reads the board; a feature item waits for a slot of the scheduler, so the saga offers nothing yet)
-            return new VerbAnswer(0, new JsonObject
-            {
-                ["ok"] = true, ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray(), ["owned"] = new JsonObject(), ["owners"] = new JsonObject(), ["pins"] = new JsonObject(),
-                ["parks"] = new JsonArray(), ["release_queue"] = new JsonArray(), ["held"] = new JsonArray(),
-                ["offers"] = new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Technical Design", ["kind"] = "own-item", ["reason"] = "new" }, new JsonObject { ["item"] = 8, ["column"] = "Technical Design", ["kind"] = "own-item", ["reason"] = "new" }),
-            }.ToJsonString());
-        });
-        runner.Routes = routes;
-        var hub = new EventHub();
-        var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
-        var sweeper = new Sweeper(runner, hub, plant, qc, 3600, true, null, Task.CompletedTask) { MayAct = () => true, PlantJobs = true, V2 = rig.Own, Feed = new SagaPlantFeed(rig.Own, plant.OwnerNameOf, _ => null, Rules) };
-        await sweeper.StartAsync(default);
-        try
-        {
-            var waiting = new List<int>();
-            for (var i = 0; i < 200 && !waiting.Contains(8); i++)
-            {
-                waiting = plant.PlantData()["waiting"]!.AsArray().Select(r => r!["item"]!.GetValue<int>()).ToList();
-                if (!waiting.Contains(8)) await Task.Delay(50);
-            }
-            Assert.Contains(8, waiting);                 // (v1's offer of an item with no saga reached the plant: the observation works)
-            Assert.DoesNotContain(7, waiting);           // (and the one of the item that has a saga did not)
-            Assert.True(rig.Own.Owns(7));
-        }
-        finally { await sweeper.StopAsync(default); }
-    }
 }

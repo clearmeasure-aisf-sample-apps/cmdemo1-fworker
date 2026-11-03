@@ -55,7 +55,7 @@ public sealed class LegacyDatabaseGatewayTests(ITestOutputHelper output)
 
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", db.ConnectionString);
-        WolverineHostTestSupport.Shadow(env);
+        WolverineHostTestSupport.V2(env);
         env.Apply();
         var host = new GatewayHost();
         try

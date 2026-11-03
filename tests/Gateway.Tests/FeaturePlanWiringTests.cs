@@ -102,7 +102,7 @@ public sealed class FeaturePlanWiringTests
             using var env = new GatewayEnvironment();
             env.EditConfig = cfg =>
             {
-                cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+                cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
                 cfg["intake"] = new JsonObject { ["enabled"] = false, ["wipLimit"] = 6, ["fromColumn"] = "Todo", ["v2Plans"] = new JsonArray("docs", "feature") };
                 cfg["priorityLabels"] = new JsonObject { ["top"] = "priority:top", ["high"] = "priority:high" };
             };
@@ -178,7 +178,7 @@ public sealed class FeaturePlanWiringTests
             env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("GH_TOKEN", Token);
             env.EditConfig = cfg =>
             {
-                cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+                cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
                 cfg["intake"] = new JsonObject { ["enabled"] = false, ["wipLimit"] = 6, ["fromColumn"] = "Todo", ["v2Plans"] = new JsonArray(plans.Select(p => (JsonNode)p).ToArray()) };
             };
             env.Apply();
@@ -196,7 +196,7 @@ public sealed class FeaturePlanWiringTests
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("GH_TOKEN", Token);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
         env.Apply();
         using var host = new GatewayHost();
         var started = Task.Run(() => host.Server);
@@ -211,7 +211,7 @@ public sealed class FeaturePlanWiringTests
         foreach (var slot in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune })
             Assert.True(jobs.Has(slot), slot);
         Assert.NotNull(host.Services.GetService<PlantStepJobs>());
-        Assert.Contains(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), h => h is Sweeper { PlantJobs: true });
+        Assert.Contains(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), h => h is Sweeper { Feed: not null });
     }
 
     [Fact]
@@ -219,7 +219,7 @@ public sealed class FeaturePlanWiringTests
     {
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); env.Apply();
+        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Apply();
         using var host = new GatewayHost();
         _ = host.Server;
         foreach (var t in new[] { typeof(WorkItemParts), typeof(FeaturePlanParts), typeof(SlotRequestPort), typeof(FeatureNotice), typeof(V2Ownership), typeof(PlantStepJobs) })

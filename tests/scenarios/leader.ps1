@@ -126,9 +126,9 @@ $LeaderScenarios['leader: a graceful stop releases the lease; the next start res
         $rsNow = Ld-Restore $gw
         $rsAt = if ($rsNow) { Ld-Time $rsNow.at } else { [DateTime]::MaxValue }
         Check 'without waiting for a hand-over' (($rsAt - $t0).TotalSeconds -lt 25) "$(($rsAt - $t0).TotalSeconds) s"
-        Check 'its first sweep renews the claim that ran out in the gap' (Wait-Until -Seconds 40 { $st = Pm-State $n; $st.ContainsKey('claim') -and $st.claim.ContainsKey('gap_renewed') -and [DateTime]::Parse("$($st.claim.lease_until)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) -gt [DateTime]::UtcNow }) ((Pm-State $n).claim | ConvertTo-Json -Compress)
-        $j = Get-Journal $n; $gapLines = @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'plant event=gap-renewed' })
-        Check 'the journal says so, and the item was not offered again' ($gapLines.Count -eq 1 -and $j -notcontains 'reassigned' -and @($j | Where-Object { $_ -eq 'matched' }).Count -eq 1) ($j -join ',')
+        # (V3.2: the renewal of a claim that ran out in the gap is the job gap-renew, covered by SweepLeftoverJobsTests and SagaGapRenew's tests; what shows here is that nothing offers the item again)
+        $j = Get-Journal $n
+        Check 'the item was not offered again' ($j -notcontains 'reassigned' -and @($j | Where-Object { $_ -eq 'matched' }).Count -eq 1) ($j -join ',')
         Check 'gina still owns it on the new process' (Wait-Until -Seconds 20 { @((Ld-Status $gw).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" -and $_.Value -eq 'gina' }).Count -eq 1 }) ((Ld-Status $gw).plant.owners | ConvertTo-Json -Compress)
     } finally {
         Stop-OwnerClient 'gina'

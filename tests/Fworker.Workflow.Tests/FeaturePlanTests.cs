@@ -157,6 +157,18 @@ public class FeaturePlanTests
     }
 
     [Fact]
+    public async Task SettlingDevelopmentByTheGateway_OnAHeadWhoseChecksWereReadRedBeforeIt_IsAFixForwardRound()
+    {
+        var fx = await At(StepKind.Develop);
+        await fx.Send(new PullRequestChanged(Item, 1, "pr|1", 11, Head, []));
+        await Checks(fx, ChecksVerdict.Red, Head, "Build");   // read while the item was still in Development: no round
+        Assert.Equal(StepKind.Develop, fx.State.Step);
+        await fx.Send(new DevelopmentSettled(Item, 1, "settled|1", 11, Head, []));
+        Assert.Equal(StepKind.Develop, fx.State.Step);   // Develop done, Verify entered, the red head sent it back
+        Assert.Equal(1, fx.State.FixForwardRounds);
+    }
+
+    [Fact]
     public async Task SettlingDevelopmentByTheGateway_LeavesAParkThatIsNotTheAgentsFailureAlone()
     {
         var fx = await At(StepKind.Develop);

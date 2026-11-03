@@ -288,7 +288,12 @@ function TmpFile([string]$Name, [string]$Text) { $p = Join-Path $script:Work $Na
 
 function Check([string]$Name, [bool]$Ok, $Detail = '') {
     $script:Checks++
-    if ($Ok) { Write-Host "    ok    $Name" } else { Write-Host "    FAIL  $Name  $Detail"; [void]$script:Failures.Add("$($script:Current): $Name $Detail") }
+    if ($Ok) { Write-Host "    ok    $Name"; return }
+    # V3.2a diagnostic: an item that is not offered is either not admitted (no saga yet) or not offered by its saga; the status says which (v2.admission and the rest of v2). It goes into the failure line, which the job log keeps.
+    if ($Name -match 'offered' -and (Get-Command Get-Plant -ErrorAction SilentlyContinue)) {
+        try { $st = Get-Plant; $pick = { param($o, $n) if ($o -and $o.PSObject.Properties[$n]) { $o.$n } else { $null } }; $v2 = & $pick $st 'v2'; $pl = & $pick $st 'plant'; $dg = [ordered]@{ admission = (& $pick $v2 'admission'); v2keys = $(if ($v2) { @($v2.PSObject.Properties.Name) } else { @() }); waiting = (& $pick $pl 'waiting'); unowned = (& $pick $pl 'unowned') } | ConvertTo-Json -Compress -Depth 5; if ($dg.Length -gt 2500) { $dg = $dg.Substring(0, 2500) }; $Detail = "$Detail DIAG $dg" } catch { $Detail = "$Detail DIAG status unreadable: $($_.Exception.Message)" }
+    }
+    Write-Host "    FAIL  $Name  $Detail"; [void]$script:Failures.Add("$($script:Current): $Name $Detail")
 }
 # A check that is known to fail now and then for a cause not yet found (docs/HANDOFF.md names it under -Issue). It runs and reports like any
 # check; when it fails it prints QUARANTINED (failed) with the detail and is counted in a total of its own (the suite summary and run-all show it),
@@ -305,7 +310,46 @@ function CheckExit($Name, $r, [int]$Exit, [string]$Code = '') {
 }
 
 # a suite whose definition names DefaultEnvLabel (copilot: its gateway is env-scoped): an item given no env: label gets that one
-function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string]$Column = 'Technical Design') { if ($script:DefaultEnvLabel -and -not @($Labels | Where-Object { "$_" -like 'env:*' }).Count) { $Labels = @($Labels) + $script:DefaultEnvLabel }; (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number }
+function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string]$Column = 'Technical Design') {
+    if ($script:DefaultEnvLabel -and -not @($Labels | Where-Object { "$_" -like 'env:*' }).Count) { $Labels = @($Labels) + $script:DefaultEnvLabel }
+    $n = (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number
+    # V3.2: a factory card in a step column gets its saga from the admission after the next pass of the board reconciler; a scripted worker that acts before that meets an item with no saga and then one that has (a start in the middle of the flow)
+    if ($script:V2Connection -and $script:SuiteName -notin 'saga', 'author' -and $Column -in 'Technical Design', 'Development', 'Functional Testing' -and @($Labels) -contains 'factory worker') { Wait-Admitted $n }
+    return $n
+}
+# Completes the current step of the item's saga, as the session working it would (the gateway's test seam /api/v1/_test/advance: mapped only with FACTORY_TEST_HOOKS=1 against the fake GitHub). Waits until the saga has the item.
+function Advance-Saga([int]$Number, [int]$Pr = 0, [string]$Head = '') {
+    Wait-Admitted $Number
+    $colBefore = (Get-FakeIssue $Number).column
+    $body = @{ item = $Number }; if ($Pr -gt 0) { $body.pr = $Pr }; if ($Head) { $body.head = $Head }
+    try {
+        $r = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/_test/advance" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body ($body | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+        if ([int]$r.StatusCode -ne 200) { Check "the saga of #$Number advances" $false "$([int]$r.StatusCode) $($r.Content)"; return $null }
+        Write-Host "      advance #$Number : $($r.Content)"
+        # the saga's decision moves the card through its projection a moment later: wait for the move, as the scenario used to make it at once
+        [void](Wait-Until -Seconds 30 { (Get-FakeIssue $Number).column -ne $colBefore })
+        return ($r.Content | ConvertFrom-Json)
+    } catch { Check "the saga of #$Number advances" $false $_.Exception.Message; return $null }
+}
+# Waits (at most 20 s, never a failure) until the item has a row in the saga table of the suite's database.
+function Wait-Admitted([int]$Number) {
+    try {
+        if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) { Open-SqlLibs }
+        $end = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $end) {
+            $c = [Microsoft.Data.SqlClient.SqlConnection]::new($script:V2Connection)
+            try { $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = "SELECT COUNT(*) FROM factory.WorkItems WHERE ItemKey LIKE N'%#$Number'"; $has = [int]$cmd.ExecuteScalar() } finally { $c.Dispose() }
+            if ($has -gt 0) { return }
+            Start-Sleep -Milliseconds 500
+        }
+    } catch { }
+}
+function Open-SqlLibs {
+    $bin = Join-Path $script:Root 'gateway/bin/Release/net10.0'; $rt = if ($IsWindows) { 'win' } else { 'unix' }
+    # (the managed assembly of the platform; its dependencies are the gateway's own, resolved from the same folder)
+    [AppDomain]::CurrentDomain.add_AssemblyResolve({ param($sender, $e) $f = Join-Path $bin "$(($e.Name -split ',')[0]).dll"; if (Test-Path $f) { [Reflection.Assembly]::LoadFrom($f) } })
+    Add-Type -Path (Join-Path $bin "runtimes/$rt/lib/net9.0/Microsoft.Data.SqlClient.dll")
+}
 
 # The scripted worker: runs one column the way the skill does, with canned judgement.
 function Do-TechnicalDesign([int]$n, [string]$Holder = 'w1', [bool]$DocsOnly = $true) {
@@ -580,6 +624,16 @@ function Wait-SweepGap([double]$Fresh = 0) {
         Start-Sleep -Milliseconds 100
     }
 }
+# Empties the tables that hold per-item state of the engine (the sagas, their history, the merge and delivery records, the idempotency records, the board memory) in the suite's database. Test isolation only: a scenario starts on a board
+# of its own (the fake's reset), and the gateway reads the tables again at its next pass.
+function Reset-SagaState {
+    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) { Open-SqlLibs }
+    $tables = 'WorkItems', 'OpenInstances', 'ItemHistory', 'ProjectionVersions', 'MergeTrains', 'MergedItems', 'DeliveredTo', 'Correlations', 'IngressDedup', 'BoardSeen', 'QcEnvironments', 'IdempotencyClaims', 'IdempotencyLedger', 'CopilotReservations'
+    $sql = ($tables | ForEach-Object { "IF OBJECT_ID(N'factory.$_') IS NOT NULL DELETE FROM factory.$_;" }) -join "`n"
+    $c = [Microsoft.Data.SqlClient.SqlConnection]::new($script:V2Connection)
+    try { $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = 60; [void]$cmd.ExecuteNonQuery() } finally { $c.Dispose() }
+}
+
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $script:Current = $Name; Write-Host "  $Name"
     $tmStart = [Diagnostics.Stopwatch]::StartNew(); $tmChecks = $script:Checks; $tmFailed = $script:Failures.Count
@@ -587,6 +641,8 @@ function Run-Scenario([string]$Name, [scriptblock]$Body) {
     try {
         try { Wait-SweepGap } catch { }
         Fake 'reset' @{} | Out-Null
+        # V3.2: every open card has a saga in the suite's database, keyed by the issue number; the fake's reset restarts the numbers, so the sagas of the scenario before would meet the issues of this one
+        if ($script:V2Connection) { try { Reset-SagaState } catch { Check 'the scenario starts with no saga of an earlier one' $false $_.Exception.Message } }
         # a suite whose gateway keeps state in a database across the scenarios (the delivery train of -Engine v2) starts each scenario on a gateway of its own state: $script:BeforeScenario, after the reset of the fake
         if ($script:BeforeScenario) { try { & $script:BeforeScenario } catch { Check 'the scenario starts on a fresh gateway' $false $_.Exception.Message } }
         # the record of this scenario's writes starts after the reset (tests/scenarios/golden/README.md)
