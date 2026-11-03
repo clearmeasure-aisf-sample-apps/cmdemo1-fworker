@@ -136,7 +136,7 @@ $CursorScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'verdict' } $w2)
         Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $prn).merged })
         Check 'not done before master is green and the delivery' ((Cop-Comments $n '*Owner done:*').Count -eq 0)
-        Check 'master goes green for the merge' (Wait-Until -Seconds 120 { (Cop-Comments $n '*master is GREEN*').Count -ge 1 }) (Cop-Brief $n)
+        # (V3.2: the v1 journal line is gone: master's CI is the saga's SweepSteps rules, covered by SweepStepsTests and ItemStepsTests)
         # the fake's merge makes the release that carries it and its prod deployment succeeds at once, so the settle's own path always delivers
         # (no harness write stands in for it: one that raced the gateway's own delivery made the writes depend on the timing, issue #386)
         # (V3.2: the delivery to production and the owner's end are the delivery train's; this suite's gateway has no deployables: DeliveryTrainTests and OwnerReleaseTests cover them)

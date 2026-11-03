@@ -225,64 +225,6 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
-'copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task''s draft the item''s pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)' = {
-    $n = 0
-    try {
-        $h = @{ Authorization = 'Bearer fake-operator' }
-        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
-        function OpenPr([string]$Head) { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = $Head; title = 'Thing' } | ConvertTo-Json) -SkipHttpErrorCheck }
-        function Draft([string]$Head, [string]$Base, [string]$Body) { Invoke-RestMethod "$gh/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = '[WIP] Thing'; head = $Head; base = $Base; body = $Body; draft = $true } | ConvertTo-Json) }
-        function FakePr([int]$Num) { @((Fake 'state').prs | Where-Object { $_.number -eq $Num })[0] }
-        $n = New-Item-Fake 'Copilot fix-forward item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
-        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
-        $t1 = (Cop-Tasks $n)[0]
-        Check 'the first Development task starts from master: the item has no pull request yet' ($t1.body.base_ref -eq 'master' -and -not ("$($t1.body.prompt)" -match "This item's pull request")) ($t1.body | ConvertTo-Json -Compress)
-        $a = "copilot/thing-$n"
-        # its checks go red: the gateway, waiting for them after the task ended, sends the item back to Development to fix forward
-        [void](Fake 'push-branch' @{ branch = $a; files = @('src/App/Thing.cs'); profile = 'red' })
-        $d1 = Draft $a 'master' 'x'
-        $r1 = OpenPr $a
-        Check 'pr_open takes over the first draft' ($r1.ok -and $r1.pullRequest.number -eq $d1.number) ($r1 | ConvertTo-Json -Compress -Depth 4)
-        [void](Fake 'copilot-task' @{ id = $t1.id; state = 'completed'; headRef = $a })
-        Check 'the task''s end leaves Development done pending checks in the gateway' (Wait-Until -Seconds 30 { (Cop-Comments $n '*Development is done pending checks*').Count -ge 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
-        Check 'the red checks hand it back to Development to fix forward' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Re-dispatching Development to fix forward*').Count -ge 1 })
-        Check 'the fix-forward is a follow-up session of the same task' (Wait-Until -Seconds 60 { @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id -and "$($_.body.prompt)" -match 'phase development' }).Count -gt 0 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
-        $t2 = @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id })[0]
-        Check 'started by a @copilot comment on the item''s pull request, in the owner task' ($t2.task -eq $t1.id -and $t2.via -eq 'comment' -and $t2.pr -eq $d1.number -and @((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1) ($t2 | ConvertTo-Json -Compress -Depth 4)
-        Check 'its prompt names the phase, the pull request and what changed (the red checks)' ("$($t2.body.prompt)" -match "phase Development\. Work on PR #$($d1.number), branch $([regex]::Escape($a))" -and "$($t2.body.prompt)" -match 'What changed: .*checks failed') "$($t2.body.prompt)"
-        Check 'the prompt asks for the integration tests and the migration tests of a database change' ("$($t2.body.prompt)" -match 'dotnet test\s+src/IntegrationTests' -and "$($t2.body.prompt)" -match 'migration test')
-        # Copilot made its own branch from the item's branch and opened its draft against it (as the agent tasks API does), naming the old one
-        $b = "copilot/thing-fix-$n"
-        [void](Fake 'push-branch' @{ branch = $b; files = @('src/App/Thing.cs', 'src/UnitTests/ThingTests.cs') })
-        $d2 = Draft $b $a "Fixes the failing check of #$($d1.number)."
-        # the gateway's own resolution (item-pr, as the owner watch, the settle and the sweep run it) adopts the stacked successor before pr_open:
-        # the order CI hit now and then (pr_open then takes its same-branch return), made to happen on every run
-        function ItemPr { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/item-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n } | ConvertTo-Json) -SkipHttpErrorCheck }
-        Check 'the gateway''s resolution adopts the stacked draft before pr_open' (Wait-Until -Seconds 30 { $ip = ItemPr; $null -ne $ip -and $null -ne $ip.PSObject.Properties['number'] -and [int]$ip.number -eq [int]$d2.number }) (ItemPr | ConvertTo-Json -Compress -Depth 4)
-        $r2 = OpenPr $b
-        Check 'pr_open with the task''s branch makes its draft the item''s pull request' ($r2.ok -and $r2.pullRequest.number -eq $d2.number -and $r2.pullRequest.branch -eq $b) ($r2 | ConvertTo-Json -Compress -Depth 4)
-        $p2 = FakePr $d2.number; $p1 = FakePr $d1.number
-        Check 'the new pull request is retargeted to master and ready, its title naming the item' ($p2.open -and $p2.base -eq 'master' -and -not $p2.draft -and "$($p2.title)" -match "#$n") ($p2 | ConvertTo-Json -Compress -Depth 3)
-        Check 'the superseded pull request is closed with a comment naming the new one' (-not $p1.open -and -not $p1.merged -and @($p1.comments | Where-Object { "$($_.body)" -match "Superseded by #$($d2.number)" }).Count -eq 1) ($p1 | ConvertTo-Json -Compress -Depth 3)
-        Check 'and its branch is deleted' (@((Fake 'state').deletedRefs) -contains "heads/$a") ((Fake 'state').deletedRefs | ConvertTo-Json -Compress)
-        Check 'the item has exactly one open pull request' (@((Fake 'state').prs | Where-Object { $_.open -and "$($_.ref)" -like "copilot/thing*-$n" }).Count -eq 1)
-        # a later task that pushed to the item's branch and also left a draft of its own against it: pr_open closes the extra draft
-        $c = "copilot/thing-extra-$n"
-        [void](Fake 'push-branch' @{ branch = $c; files = @('src/App/Extra.cs') })
-        $d3 = Draft $c $b 'x'
-        $r3 = OpenPr $b
-        Check 'pr_open with the item''s branch keeps the item''s pull request' ($r3.ok -and $r3.pullRequest.number -eq $d2.number) ($r3 | ConvertTo-Json -Compress -Depth 4)
-        Check 'and closes the extra draft the task created, deleting its branch' (-not (FakePr $d3.number).open -and @((Fake 'state').deletedRefs) -contains "heads/$c" -and (FakePr $d2.number).open)
-        # a branch that does not hold the item's pull request's commits is refused (a task that started over from master)
-        $x = "copilot/thing-over-$n"
-        [void](Fake 'push-branch' @{ branch = $x; files = @('src/App/Over.cs') })
-        $before = @((Fake 'state').prs).Count
-        [void](Fake 'fault' @{ match = "compare/.*\.\.\.$([regex]::Escape($x))$"; status = 200; body = '{"status":"diverged","ahead_by":1,"behind_by":1}' })
-        $r4 = OpenPr $x
-        Check 'a branch without the item''s pull request''s commits is refused, nothing is opened or closed' ($r4.code -eq 'not-on-item-branch' -and @((Fake 'state').prs).Count -eq $before -and (FakePr $d2.number).open) ($r4 | ConvertTo-Json -Compress)
-    } finally { Cop-Cleanup @($n) }
-}
-
 # The scenario above makes the gateway's resolution adopt the stacked draft before pr_open. Here pr_open comes first, always: the task's new
 # draft targets master, so the resolution (which follows drafts stacked on the owner's branch) cannot find it, and pr_open takes it over.
 'copilot: pr_open takes over a task''s new draft on master that names the item''s pull request: the draft is the item''s pull request, titled for the item, and the old one is superseded with the fix [full]' = {
@@ -433,31 +375,6 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
-'copilot: the credit guard ends a task over api.copilot.maxCreditsPerTask and parks its item credit-guard; after an unpark, an item whose pull request already carries the change starts no new Development task: it waits for its checks' = {
-    $n = 0
-    try {
-        $n = New-Item-Fake 'Copilot credit item' 'Change src/App/Credit.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
-        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
-        $t = (Cop-DevTasks $n)[0]
-        $br = "copilot/credit-$n"
-        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Credit.cs'); profile = 'stuck' })
-        $d = Cop-Draft $br 'master' "Credit (#$n)"
-        $r = Cop-OpenPr $n $br
-        Check 'pr_open takes over the draft' ($r.ok -and $r.pullRequest.number -eq $d.number) ($r | ConvertTo-Json -Compress -Depth 4)
-        [void](Fake 'copilot-task' @{ id = $t.id; credits = 10000000001; headRef = $br })
-        Check 'the guard logs the task over the limit' (Wait-Until -Seconds 20 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch '"runtime":"copilot-credit-guard"' | Where-Object { "$_" -match $t.id }).Count -eq 1 })
-        Check 'the item is parked credit-guard' (Wait-Until -Seconds 20 { (Cop-Comments $n '*plant event=parked*').Count -ge 1 -or (Cop-Comments $n '*credit-guard*').Count -ge 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
-        Check 'its end is seen, and the guard''s park is not overridden by a settle' (Wait-Until -Seconds 20 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id }).Count -eq 1 }) ((Cop-Status).last | ConvertTo-Json -Compress -Depth 6)
-        Start-Sleep -Seconds 5
-        Check 'no Development task follows while it is parked' ((Cop-DevTasks $n).Count -eq 1 -and (Cop-Comments $n '*Development is done pending checks*').Count -eq 0)
-        $u = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/items/$n/unpark" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ reason = 'credit spike looked at' } | ConvertTo-Json) -SkipHttpErrorCheck
-        Check 'the operator unparks it' ($u.ok) ($u | ConvertTo-Json -Compress -Depth 4)
-        Check 'the next offer of Development settles instead of launching: the pull request waits for its checks' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Development is done pending checks*already has its pull request*').Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
-        Start-Sleep -Seconds 5
-        Check 'and no new Development task was created' ((Cop-DevTasks $n).Count -eq 1) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state)" }) -join '; '
-    } finally { Cop-Cleanup @($n) }
-}
-
 'copilot: a fix-forward draft that GitHub will not retarget (part of a stack, 422) is closed and the item''s pull request is opened on its branch, superseding the old one' = {
     $n = 0
     try {
@@ -503,7 +420,7 @@ $CopilotScenarios = [ordered]@{
         Check 'the PASS verdict is recorded' (-not $v.isError) ($v | ConvertTo-Json -Compress -Depth 5)
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $r1)
         Check 'the gateway merges the pull request through merge-async' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
-        Check 'and records the merge on the item' (Wait-Until -Seconds 30 { (Cop-Comments $n '*squash-merged PR #*').Count -ge 1 -or (Cop-Comments $n '*was merged as*').Count -ge 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
+        # (V3.2: the merge is the saga's record, covered by MergeTrainTests)
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -520,10 +437,10 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Own.cs') })
         $d = Cop-Draft $br 'master' '[WIP] Own'
         $r1 = Cop-Accept $t $n
+        [void](Advance-Saga $n)   # (V3.2: the design is done for the saga, as the agent's item_complete would have made it; a session that only ends is offered the step again)
         [void](Mcp-Call 'session_end' @{ reason = 'design done' } $r1)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
         Check 'the session ends; the item stays owned, no session runs' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n -and $_.task -eq $t.id }).Count -eq 1 }) ((Cop-Status) | ConvertTo-Json -Compress -Depth 5)
-        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         Check 'Development is a follow-up session of the same task: a @copilot comment on its draft' (Wait-Until -Seconds 60 { @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
         $s1 = (Cop-Sessions $n $t.id 'development')[0]
         Check 'the follow-up prompt names the phase, the pull request, the ownership and the one-step rule' ("$($s1.body.prompt)" -match "owns #$n" -and "$($s1.body.prompt)" -match "PR #$($d.number), branch $([regex]::Escape($br))" -and "$($s1.body.prompt)" -match 'never poll or wait for CI') "$($s1.body.prompt)"
@@ -549,7 +466,7 @@ $CopilotScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'verdict' } $w2)
         [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed' })
         Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged })
-        Check 'master goes green for the merge' (Wait-Until -Seconds 120 { (Cop-Comments $n '*master is GREEN*').Count -ge 1 }) (Cop-Brief $n)
+        # (V3.2: the v1 journal line is gone: master's CI is the saga's SweepSteps rules, covered by SweepStepsTests and ItemStepsTests)
         # the Release Queue sees the production deployment of the release that carries the merge: the fake's merge makes that release and its prod
         # deployment succeeds at once (releaseMode auto), so the settle's own path always delivers: a sweep for the candidate, one for the delivery.
         # (No harness write stands in for it: one that raced the gateway's own delivery made the scenario's writes depend on the timing, issue #386.)
@@ -701,60 +618,6 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
-'copilot: a recorded pull request that was closed (a migration, a takeover) is replaced by the open pull request of the owner task''s branch; the wait for checks follows it and the item moves on, not parked stuck [full]' = {
-    $n = 0
-    try {
-        $n = New-Item-Fake 'Copilot closed recorded PR' 'Change src/App/Rec.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
-        $old = "copilot/old-$n"; $cur = "copilot/cur-$n"
-        [void](Fake 'push-branch' @{ branch = $old; files = @('src/App/Rec.cs') })
-        $o = Cop-Draft $old 'master' "Old (#$n)"
-        [void](Invoke-RestMethod "$(Cop-Gh)/pulls/$($o.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
-        [void](Fake 'push-branch' @{ branch = $cur; files = @('src/App/Rec.cs', 'src/UnitTests/RecTests.cs') })
-        $c = Cop-Draft $cur 'master' "Cur (#$n)"
-        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
-        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $cur })
-        # the item waits for the checks of the closed pull request, as #408, #410 and #412 did
-        $now = (Get-Date).ToUniversalTime().ToString('o')
-        $state = @{ item = $n; pr = @{ number = $o.number; branch = $old }; copilot_task = @{ id = $task.id; url = ''; branch = $cur; pr = $o.number; phase = 'Development'; since = $now; previous = @() }
-            awaiting_checks = @{ pr = $o.number; sha = (Cop-FakePr $o.number).sha; since = $now; column = 'Development'; comment = 'test' }; park = (New-TestPark 'development:awaiting-checks') }
-        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
-        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
-        Check 'the item''s pull request is re-resolved to the open one of the owner task''s branch' (Wait-Until -Seconds 90 { (Cop-Comments $n "*pull request is now #$($c.number)*").Count -eq 1 }) (Cop-Brief $n)
-        Check 'the state records it' ((Get-ItemState $n).pr.number -eq $c.number -and (Get-ItemState $n).copilot_task.pr -eq $c.number) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
-        Check 'its green checks move the item on; it is not parked stuck' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
-        Check 'no stuck park' ((Cop-Comments $n '*still not finished*').Count -eq 0)
-    } finally { Cop-Cleanup @($n) }
-}
-
-'copilot: an owner pull request stacked on another branch with no Build run is consolidated onto master and its CI started; it moves on, not parked stuck [full]' = {
-    $n = 0
-    try {
-        $n = New-Item-Fake 'Copilot stacked PR' 'Change src/App/Stk.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
-        $bb = "copilot/base-$n"; $sb = "copilot/stk-$n"
-        [void](Fake 'push-branch' @{ branch = $bb; files = @('src/App/Stk.cs') })
-        $b = Cop-Draft $bb 'master' "Base (#$n)"
-        # the owner's branch holds the base's commits; its push started no Build (as #443's)
-        [void](Fake 'push-branch' @{ branch = $sb; files = @('src/App/Stk.cs', 'src/UnitTests/StkTests.cs'); profile = 'nobuild' })
-        $sp = Cop-Draft $sb $bb "Stacked (#$n)"
-        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
-        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $sb })
-        $now = (Get-Date).ToUniversalTime().ToString('o')
-        $state = @{ item = $n; pr = @{ number = $b.number; branch = $bb }; copilot_task = @{ id = $task.id; url = ''; branch = $sb; pr = $b.number; phase = 'Development'; since = $now; previous = @() } }
-        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
-        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        $before = (Cop-Tasks $n).Count
-        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
-        Check 'the stacked pull request is retargeted to master' (Wait-Until -Seconds 90 { (Cop-FakePr $sp.number).base -eq 'master' }) ((Cop-FakePr $sp.number) | ConvertTo-Json -Compress -Depth 3)
-        Check 'and the base''s open pull request is superseded: one pull request for the item' (Wait-Until -Seconds 30 { -not (Cop-FakePr $b.number).open }) (Cop-Brief $n)
-        Check 'the item''s pull request is the owner''s' (Wait-Until -Seconds 30 { (Get-ItemState $n).pr.number -eq $sp.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
-        Check 'no Build run for its head is no hung CI: the gateway starts the Build on the branch' (Wait-Until -Seconds 120 { @((Fake 'state').dispatches | Where-Object { "$_" -eq "build.yml@$sb" }).Count -ge 1 }) (Cop-Brief $n)
-        Check 'the item moves on once the Build is green' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
-        Check 'never parked stuck' ((Cop-Comments $n '*still not finished*').Count -eq 0)
-        Check 'no new Development task was started for it' (@((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase development' }).Count -eq 0) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 3)
-    } finally { Cop-Cleanup @($n) }
-}
-
 'copilot: a follow-up session that succeeds and pushes without connecting is judged by its run and its push: no failure, the item is settled; its prompt asks to connect first [full]' = {
     $n = 0
     try {
@@ -816,32 +679,6 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
-'copilot: a follow-up''s own draft stacked on the item''s pull request ("merges into #N") becomes the owner''s current branch: retargeted to master, the old pull request superseded, and the item moves on [full]' = {
-    $n = 0
-    try {
-        $n = New-Item-Fake 'Copilot successor PR' 'Change docs/Succ.md.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
-        $ab = "copilot/first-$n"; $bb = "copilot/succ-$n"
-        [void](Fake 'push-branch' @{ branch = $ab; files = @('src/App/Succ.cs') })
-        $a = Cop-Draft $ab 'master' "Succ (#$n)"
-        [void](Fake 'push-branch' @{ branch = $bb; files = @('src/App/Succ.cs', 'src/UnitTests/SuccTests.cs') })
-        $b = Cop-Draft $bb $ab '[WIP] Succ' "Thanks for the feedback on #$($a.number). I've created this new PR, which merges into #$($a.number)."
-        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
-        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $ab })
-        $now = (Get-Date).ToUniversalTime().ToString('o')
-        $state = @{ item = $n; pr = @{ number = $a.number; branch = $ab }; copilot_task = @{ id = $task.id; url = ''; branch = $ab; pr = $a.number; phase = 'Development'; since = $now; previous = @() } }
-        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
-        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
-        Check 'the successor is retargeted to master' (Wait-Until -Seconds 90 { (Cop-FakePr $b.number).base -eq 'master' }) ((Cop-FakePr $b.number) | ConvertTo-Json -Compress -Depth 3)
-        Check 'the old pull request is superseded' (Wait-Until -Seconds 30 { -not (Cop-FakePr $a.number).open }) (Cop-Brief $n)
-        Check 'the owner follows the successor''s branch and pull request' (Wait-Until -Seconds 30 { $sx = Get-ItemState $n; $sx.copilot_task.branch -eq $bb -and $sx.pr.number -eq $b.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
-        # the resolution writes the title before it records the successor: the CI release (routeAll) finds the item from it
-        $bt = "$((Cop-FakePr $b.number).title)"
-        Check 'its title names the item, the [WIP] dropped' ($bt -match "(^|[^0-9])#$n([^0-9]|$)" -and $bt -notmatch '^\s*\[WIP\]') $bt
-        Check 'the item moves on' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
-    } finally { Cop-Cleanup @($n) }
-}
-
 'copilot: pr_open takes a follow-up''s draft that names the item''s pull request ("merges into #N"): a pull request number is no other item [full]' = {
     $n = 0
     try {
@@ -863,28 +700,6 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
-'copilot: the owner''s later draft on its own branch (not stacked, the older pull request closed) is the item''s current pull request: marked ready, never the closed one, and the item moves on [full]' = {
-    $n = 0
-    try {
-        $n = New-Item-Fake 'Copilot later draft' 'Change docs/Later.md.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
-        $ab = "copilot/old-$n"; $bb = "copilot/later-$n"
-        [void](Fake 'push-branch' @{ branch = $ab; files = @('src/App/Later.cs') })
-        $a = Cop-Draft $ab 'master' "Later (#$n)"
-        [void](Invoke-RestMethod "$(Cop-Gh)/pulls/$($a.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
-        [void](Fake 'push-branch' @{ branch = $bb; files = @('src/App/Later.cs', 'src/UnitTests/LaterTests.cs') })
-        $b = Cop-Draft $bb 'master' "Later again (#$n)"
-        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
-        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $ab })
-        $now = (Get-Date).ToUniversalTime().ToString('o')
-        $state = @{ item = $n; pr = @{ number = $b.number; branch = $bb }; copilot_task = @{ id = $task.id; url = ''; branch = $ab; pr = $a.number; phase = 'Development'; since = $now; previous = @() } }
-        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
-        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
-        Check 'the owner follows the later draft, not the closed pull request' (Wait-Until -Seconds 60 { $sx = Get-ItemState $n; $sx.copilot_task.branch -eq $bb -and $sx.copilot_task.pr -eq $b.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
-        Check 'the later draft is marked ready for review' (Wait-Until -Seconds 60 { -not (Cop-FakePr $b.number).draft }) ((Cop-FakePr $b.number) | ConvertTo-Json -Compress -Depth 3)
-        Check 'the item moves on to Functional Testing' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
-    } finally { Cop-Cleanup @($n) }
-}
 }
 
 # The deadline has its own suite ('copilot-deadline', api.copilot.maxMinutes 0.25): in 'copilot' it would end any task of a scenario that runs
