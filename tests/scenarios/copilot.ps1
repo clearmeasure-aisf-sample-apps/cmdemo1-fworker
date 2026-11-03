@@ -523,7 +523,7 @@ $CopilotScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'design done' } $r1)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
         Check 'the session ends; the item stays owned, no session runs' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n -and $_.task -eq $t.id }).Count -eq 1 }) ((Cop-Status) | ConvertTo-Json -Compress -Depth 5)
-        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         Check 'Development is a follow-up session of the same task: a @copilot comment on its draft' (Wait-Until -Seconds 60 { @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
         $s1 = (Cop-Sessions $n $t.id 'development')[0]
         Check 'the follow-up prompt names the phase, the pull request, the ownership and the one-step rule' ("$($s1.body.prompt)" -match "owns #$n" -and "$($s1.body.prompt)" -match "PR #$($d.number), branch $([regex]::Escape($br))" -and "$($s1.body.prompt)" -match 'never poll or wait for CI') "$($s1.body.prompt)"
@@ -553,17 +553,10 @@ $CopilotScenarios = [ordered]@{
         # the Release Queue sees the production deployment of the release that carries the merge: the fake's merge makes that release and its prod
         # deployment succeeds at once (releaseMode auto), so the settle's own path always delivers: a sweep for the candidate, one for the delivery.
         # (No harness write stands in for it: one that raced the gateway's own delivery made the scenario's writes depend on the timing, issue #386.)
-        Check 'the Release Queue sees the production delivery of the merge''s release' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Delivered to `*`*Prod`*`**').Count -ge 1 }) (Cop-Brief $n)
+        # (V3.2: the delivery to production and the owner's end are the delivery train's, which this suite's gateway has no deployables for: DeliveryTrainTests and OwnerReleaseTests cover them)
         # the owner watch reads the item at most every max(30 s, 3 x ciReleaseSeconds) and closes the owner once the settle recorded done_at
-        Check 'delivered to production: the owner is done, with the task''s link' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
-        $cs = @((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" })
-        $gi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'master is GREEN' }); $oi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -like '*Owner done:*' })
-        $di = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'Delivered to \*\*Prod\*\*' })
-        Check 'the owner is done only after master is green and the production delivery' ($gi -ge 0 -and $oi -gt $gi -and $di -ge 0 -and $oi -gt $di -and "$($cs[$oi])" -match 'delivered to production' -and "$($cs[$oi])" -match 'ca-cmdemo1-prod-ui') "green $gi delivered $di done $oi $($cs[$oi])"
-        Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks/$([regex]::Escape($t.id))")
         Check 'one task, three sessions, never a second task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1 -and (Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; '
         Check 'no worker but the task''s sessions was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
-        Check 'status: the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -634,7 +627,6 @@ $CopilotScenarios = [ordered]@{
         Wait-SweepGap -Fresh 1.0   # (the edits in the gap after a sweep: none reads the state before them and saves it after)
         Set-ItemState $n { param($st) $st.merge.green_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = 'release-candidate'; $st.merge.rc_deadline = (Get-Date).ToUniversalTime().AddHours(1).ToString('o'); $st.Remove('park') }
         Set-ItemState $n { param($st) $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
-        Check 'delivered to production: the owner is done' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
         Check 'and the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
     } finally { Cop-Cleanup @($n) }
 }
@@ -727,7 +719,7 @@ $CopilotScenarios = [ordered]@{
             awaiting_checks = @{ pr = $o.number; sha = (Cop-FakePr $o.number).sha; since = $now; column = 'Development'; comment = 'test' }; park = (New-TestPark 'development:awaiting-checks') }
         $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
         [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         Check 'the item''s pull request is re-resolved to the open one of the owner task''s branch' (Wait-Until -Seconds 90 { (Cop-Comments $n "*pull request is now #$($c.number)*").Count -eq 1 }) (Cop-Brief $n)
         Check 'the state records it' ((Get-ItemState $n).pr.number -eq $c.number -and (Get-ItemState $n).copilot_task.pr -eq $c.number) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
         Check 'its green checks move the item on; it is not parked stuck' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
@@ -752,7 +744,7 @@ $CopilotScenarios = [ordered]@{
         $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
         [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
         $before = (Cop-Tasks $n).Count
-        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         Check 'the stacked pull request is retargeted to master' (Wait-Until -Seconds 90 { (Cop-FakePr $sp.number).base -eq 'master' }) ((Cop-FakePr $sp.number) | ConvertTo-Json -Compress -Depth 3)
         Check 'and the base''s open pull request is superseded: one pull request for the item' (Wait-Until -Seconds 30 { -not (Cop-FakePr $b.number).open }) (Cop-Brief $n)
         Check 'the item''s pull request is the owner''s' (Wait-Until -Seconds 30 { (Get-ItemState $n).pr.number -eq $sp.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
@@ -839,7 +831,7 @@ $CopilotScenarios = [ordered]@{
         $state = @{ item = $n; pr = @{ number = $a.number; branch = $ab }; copilot_task = @{ id = $task.id; url = ''; branch = $ab; pr = $a.number; phase = 'Development'; since = $now; previous = @() } }
         $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
         [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         Check 'the successor is retargeted to master' (Wait-Until -Seconds 90 { (Cop-FakePr $b.number).base -eq 'master' }) ((Cop-FakePr $b.number) | ConvertTo-Json -Compress -Depth 3)
         Check 'the old pull request is superseded' (Wait-Until -Seconds 30 { -not (Cop-FakePr $a.number).open }) (Cop-Brief $n)
         Check 'the owner follows the successor''s branch and pull request' (Wait-Until -Seconds 30 { $sx = Get-ItemState $n; $sx.copilot_task.branch -eq $bb -and $sx.pr.number -eq $b.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
@@ -887,7 +879,7 @@ $CopilotScenarios = [ordered]@{
         $state = @{ item = $n; pr = @{ number = $b.number; branch = $bb }; copilot_task = @{ id = $task.id; url = ''; branch = $ab; pr = $a.number; phase = 'Development'; since = $now; previous = @() } }
         $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
         [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         Check 'the owner follows the later draft, not the closed pull request' (Wait-Until -Seconds 60 { $sx = Get-ItemState $n; $sx.copilot_task.branch -eq $bb -and $sx.copilot_task.pr -eq $b.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
         Check 'the later draft is marked ready for review' (Wait-Until -Seconds 60 { -not (Cop-FakePr $b.number).draft }) ((Cop-FakePr $b.number) | ConvertTo-Json -Compress -Depth 3)
         Check 'the item moves on to Functional Testing' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"

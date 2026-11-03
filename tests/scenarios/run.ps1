@@ -409,7 +409,7 @@ function Invoke-SuiteDef($Def) {
     if ($V2DefaultEnvSuites -notcontains $Def.Name -or $envs.ContainsKey('FACTORY_ENVIRONMENT')) { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName }
     $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1'
     # V3.2a: every card gets its saga from the admission after a pass of the board reconciler; the scenarios wait seconds, not minutes (test knobs: the reconciler's floor and the age a card must have)
-    $envs['FACTORY_TEST_FAST_RECONCILER'] = '1'; $envs['FACTORY_ADMISSION_MIN_AGE_SECONDS'] = '2'
+    $envs['FACTORY_TEST_FAST_RECONCILER'] = '1'; $envs['FACTORY_TEST_HOOKS'] = '1'; $envs['FACTORY_ADMISSION_MIN_AGE_SECONDS'] = '2'
     # a saga profile: the intake is the config's (intake.enabled), not an environment switch that the rule script and the engine would both read
     if ($script:IsSagaProfile) { $envs.Remove('FACTORY_INTAKE') }
     $script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }

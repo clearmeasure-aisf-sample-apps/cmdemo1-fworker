@@ -317,6 +317,20 @@ function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string
     if ($script:V2Connection -and $script:SuiteName -notin 'saga', 'author' -and $Column -in 'Technical Design', 'Development', 'Functional Testing' -and @($Labels) -contains 'factory worker') { Wait-Admitted $n }
     return $n
 }
+# Completes the current step of the item's saga, as the session working it would (the gateway's test seam /api/v1/_test/advance: mapped only with FACTORY_TEST_HOOKS=1 against the fake GitHub). Waits until the saga has the item.
+function Advance-Saga([int]$Number, [int]$Pr = 0, [string]$Head = '') {
+    Wait-Admitted $Number
+    $colBefore = (Get-FakeIssue $Number).column
+    $body = @{ item = $Number }; if ($Pr -gt 0) { $body.pr = $Pr }; if ($Head) { $body.head = $Head }
+    try {
+        $r = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/_test/advance" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body ($body | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+        if ([int]$r.StatusCode -ne 200) { Check "the saga of #$Number advances" $false "$([int]$r.StatusCode) $($r.Content)"; return $null }
+        Write-Host "      advance #$Number : $($r.Content)"
+        # the saga's decision moves the card through its projection a moment later: wait for the move, as the scenario used to make it at once
+        [void](Wait-Until -Seconds 30 { (Get-FakeIssue $Number).column -ne $colBefore })
+        return ($r.Content | ConvertFrom-Json)
+    } catch { Check "the saga of #$Number advances" $false $_.Exception.Message; return $null }
+}
 # Waits (at most 20 s, never a failure) until the item has a row in the saga table of the suite's database.
 function Wait-Admitted([int]$Number) {
     try {
