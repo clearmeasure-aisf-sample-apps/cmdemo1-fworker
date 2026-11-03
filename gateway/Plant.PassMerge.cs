@@ -1,33 +1,16 @@
 using System.Text.Json.Nodes;
 
-// Three plant rules of 2026-10-13 (issues 33, 30 and 31 of the gateway repository):
-// - the gateway merges a PASS by itself (Verbs.Merge.ps1 -Gateway, run by validation-verdict and the sweep). The sweep reports what it could not
-//   merge yet as pass_unmerged; the plant keeps that list for /status and the patrol digest (kind pass-unmerged, after timing.passUnmergedDigestMinutes);
+// Two plant rules of 2026-10-13 (issues 30 and 31 of the gateway repository):
 // - an accept is honoured only for the offer that stands for that session now (a late accept of a withdrawn offer is refused, stale-assignment);
 // - a session that let timing.offerMissLimit offers in a row lapse is not offered more work for timing.offerCoolDownMinutes, or until it calls a verb.
 //   Issue 100: an item taken back from a session counts as a miss as well, and a streak with a take-back in it blocks the session until it calls a
 //   verb of its own; the client's own accept (accepted_by client) never counts as answering.
 sealed partial class Plant
 {
-    public double PassUnmergedDigestMinutes { get; set; } = 5;
     public int OfferMissLimit { get; set; } = 2;
     public double OfferCoolDownMinutes { get; set; } = 5;
 
-    readonly Dictionary<int, (string Code, DateTime Since, int Pr)> passUnmerged = new();
     readonly Dictionary<int, DateTime> mergedAt = new();   // issue 107: when the plant released an item's owner at its merge (kept an hour)
-
-    // The sweep's pass_unmerged replaces the list (an item the sweep merged, or that left the state, is gone from it).
-    // scope (issue 92): the items of an incremental pass; only their entries are replaced
-    public void SetPassUnmerged(JsonArray? list, IReadOnlyCollection<int>? scope = null)
-    {
-        lock (gate)
-        {
-            if (scope == null) passUnmerged.Clear(); else foreach (var i in scope) passUnmerged.Remove(i);
-            foreach (var x in list ?? new JsonArray())
-                if (x is JsonObject && x["item"] is JsonValue v && v.TryGetValue<int>(out var item) && item > 0)
-                    passUnmerged[item] = (GatedCode(x["code"]?.ToString()) is { Length: > 0 } c ? c : "other", Time(x["since"]) ?? DateTime.UtcNow, int.TryParse(x["pr"]?.ToString(), out var pr) ? pr : 0);
-        }
-    }
 
     // The item's pull request was merged (by the gateway, by the merge verb, or by a person): its open assignments are done, and so is its owner. The
     // gateway carries the item from here on (settle: master green, the release candidate, the Release Queue, Done), so the owner is released at
@@ -38,7 +21,6 @@ sealed partial class Plant
         lock (gate)
         {
             foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
-            passUnmerged.Remove(item);
             // a sweep that read the claim before the merge removed it must not name the owner again (Plan skips it)
             mergedAt[item] = DateTime.UtcNow;
             if (ownerOf.TryGetValue(item, out var owner))
@@ -49,19 +31,6 @@ sealed partial class Plant
             }
         }
     }
-
-    // For the digest (under the gate): the items that waited longer than the threshold; the grace before the first try is no wait.
-    void AddPassUnmerged(DigestInput d, DateTime now)
-    {
-        d.PassUnmergedMinutes = PassUnmergedDigestMinutes;
-        foreach (var (item, p) in passUnmerged.OrderBy(kv => kv.Key))
-            if (p.Code != "grace" && (now - p.Since).TotalMinutes >= PassUnmergedDigestMinutes) d.PassUnmerged.Add((item, p.Code, p.Pr, p.Since));
-    }
-
-    JsonArray PassUnmergedJson(DateTime now) => new(passUnmerged.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonObject
-    {
-        ["item"] = kv.Key, ["pr"] = kv.Value.Pr, ["code"] = kv.Value.Code, ["waitingMinutes"] = (int)Math.Max(0, Math.Floor((now - kv.Value.Since).TotalMinutes))
-    }).ToArray());
 
     // Issue 30. Called before the accept verb runs: the offer must still stand for this session (or be accepted by it already). A withdrawn offer,
     // one that went to another session, or one the plant no longer knows (dropped, or made before a restart) is refused with exit 11, so the session
@@ -110,8 +79,11 @@ sealed partial class Plant
 
     // Issue 100, under the gate, from the lease's take-back (Lease.cs Finish): the item was taken back from the session, which is a miss. Returns the
     // text added to the journal line when the session is blocked by it.
+    // V3.2: an item taken back from a session is offered again to resume the work of the session before it (the sweep said "relaunch" for it; the saga's offers do not know of a take-back of the plant)
+    readonly HashSet<int> takenBackItems = new();
     string NoteTakeBack(string name, int item)
     {
+        takenBackItems.Add(item);
         if (!workers.TryGetValue(name, out var w)) return "";
         w.Missed++; w.TakeBackMisses++;
         if (OfferMissLimit <= 0 || w.Missed < OfferMissLimit) return "";

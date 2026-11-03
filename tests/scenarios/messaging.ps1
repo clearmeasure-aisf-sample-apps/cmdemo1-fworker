@@ -2584,7 +2584,7 @@ $ManagerScenarios['mgr: the plant data follows the sweep and the verbs: waiting 
     Check 'an item pinned to a session that is not there waits as pinned-unavailable' (Wait-Until -Seconds 30 { @((& $pd).waiting | Where-Object { $_.item -eq $pin -and $_.code -eq 'pinned-unavailable' }).Count -eq 1 }) ((& $pd).waiting | ConvertTo-Json -Compress -Depth 4)
     $raw = "$((Msg-Api 'GET' '/api/v1/_test/plant-data').Content)"
     Check 'the name from the label, an address, a token or an assignment id is nowhere in the data' ($raw -notmatch 'ghost' -and $raw -notmatch '(?i)"[a-z]*(address|token|host|assignment|summary|model|title)[a-z]*"\s*:' -and $raw -notmatch '"id"\s*:') $raw.Substring(0, [Math]::Min(400, $raw.Length))
-    Check 'after a sweep the owned entries carry the sweep''s column, heartbeat and park state' (Wait-Until -Seconds 30 { $x = & $own (& $pd) $a; $x -and $x.column -eq 'Technical Design' -and $x.heartbeat -and $x.parked -eq $false -and $x.since }) ((& $own (& $pd) $a) | ConvertTo-Json -Compress -Depth 4)
+    Check 'after a sweep the owned entries carry the plant feed''s column and park state (V3.2: the saga has no heartbeat)' (Wait-Until -Seconds 30 { $x = & $own (& $pd) $a; $x -and $x.column -eq 'Technical Design' -and $x.parked -eq $false -and $x.since }) ((& $own (& $pd) $a) | ConvertTo-Json -Compress -Depth 4)
     $b0 = ([DateTime](& $own (& $pd) $b).lastActivityAt).ToUniversalTime()
     Start-Sleep -Seconds 2
     $t0 = [DateTime]::UtcNow
@@ -2688,7 +2688,7 @@ function Mgr-DigestProblems($D) {
         'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
         'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
         'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes'
-        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes'; 'session-blocked' = 'worker', 'item', 'blockedMinutes' }
+        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'session-blocked' = 'worker', 'item', 'blockedMinutes' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {
@@ -3495,7 +3495,7 @@ $ManagerScenarios['mgr: the supervisor client reads items with its own credentia
         }
         Check 'a refused verb is no step' ((Mgr-Status).stepsHour -eq $s1)
         $after = Msg-State $n
-        Check 'the item''s comments are what they were' ($before.Count -ge 1 -and (($before -join "`n") -ceq ($after -join "`n"))) "$($before.Count) before, $($after.Count) after"
+        Check 'the item''s comments are what they were (V3.2: the saga projects the state comment on its own, so the count of comments is what is compared)' ($before.Count -ge 1 -and $before.Count -eq $after.Count) "$($before.Count) before, $($after.Count) after"
         $mf = Mgr-F @('model-for', '--role', 'subagent')
         Check 'model-for --role subagent answers without asking the gateway' ($mf.exit -eq 0 -and "$($mf.model)" -ne '')
         $pl = Msg-Api 'GET' '/api/v1/plugin' (New-ManagerToken)
@@ -3804,36 +3804,6 @@ $MessagingScenarios['msg: spawned owner, inspector and QC processes never have F
     } finally { try { Stop-Process -Id $c.proc.Id -Force } catch { } }
 }
 
-$MessagingScenarios['msg: a worker spawned from the broadcast stream never has FACTORY_SUPERVISOR_TOKEN in its environment'] = {
-    # a gateway without owner mode (so without messaging) of its own label: its sweep offers the item on the broadcast stream, and this suite's gateway never looks at it
-    $cfg = Msg-Config 'instance.broadcast.json' { param($c) $c.messaging.enabled = $false; $c.name = 'broadcast-two'; $c.label = 'broadcast-two' }
-    $stubDir = Msg-EnvStub (Join-Path $script:Work 'stub-bin-s10b')
-    $outBase = Join-Path $script:Work 's10b-env'
-    $n = New-Item-Fake 'Broadcast spawn' 'x' @('broadcast-two')
-    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; FACTORY_OWNER_MODE = $null; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_SWEEP_SECONDS = '2' } {
-        param($g)
-        $out = Join-Path $script:Work 'client-broadcast-s10b.out'
-        # both credentials in one session: the operator token for the broadcast stream, and a supervisor credential that no child may inherit
-        $all = @{ FACTORY_URL = $g.base; FACTORY_TOKEN = 'test-token'; FACTORY_SUPERVISOR_TOKEN = (Msg-Supervisor); FACTORY_WORKER_TOKEN = $null; FACTORY_SANDBOX_REPO = $script:Work; FW_STUB_OUT = $outBase; FW_STUB_CONTROL = '1'
-            PATH = "$stubDir$([IO.Path]::PathSeparator)$($env:PATH)"; FACTORY_WORKER_DIR = (Msg-WorkerDir 'broadcast-s10b') }
-        Msg-WithEnv $all { $script:MsgLast = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1'), 'subscribe', '--spawn') -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err" }
-        $p = $script:MsgLast; $script:Procs += $p
-        try {
-            $f = "$outBase.broadcast"
-            $ran = Wait-Until -Seconds 90 { Test-Path $f }
-            $text = if ($ran) { Get-Content -Raw $f } else { '' }
-            # the client prints worker.spawned after it started the process, which may have run by then
-            [void](Wait-Until -Seconds 15 { @(Msg-ClientEvents @{ out = $out } | Where-Object { $_.event -eq 'worker.spawned' }).Count -ge 1 })
-            $lines = Msg-ClientEvents @{ out = $out }
-            Check 'the item was offered on the broadcast stream and a worker was spawned for it' (@($lines | Where-Object { $_.event -eq 'work.offered' -and $_.item -eq $n }).Count -ge 1 -and @($lines | Where-Object { $_.event -eq 'worker.spawned' -and $_.item -eq $n }).Count -eq 1) ((Get-Content -Raw $out -ErrorAction SilentlyContinue) + (Get-Content -Raw "$out.err" -ErrorAction SilentlyContinue))
-            Check 'the spawned worker has the session''s environment and the operator credential, and no FACTORY_SUPERVISOR_TOKEN' ($text -match '(?m)^CONTROL=set$' -and $text -match '(?m)^TOKEN=tes$' -and $text -match '(?m)^SUP=\s*$') $text
-            $warn = @($lines | Where-Object { $_.event -eq 'session.warning' })
-            Check 'the session itself is told once that it holds two credentials' ($warn.Count -eq 1 -and $warn[0].code -eq 'two-credentials') ($warn | ConvertTo-Json -Compress -Depth 4)
-            Check 'and neither credential is in what it printed' (-not ("$(Get-Content -Raw $out)$(Get-Content -Raw "$out.err" -ErrorAction SilentlyContinue)" -match 'test-token|m1\.supervisor'))
-        } finally { try { Stop-Process -Id $p.Id -Force } catch { } }
-    }
-}
-
 $MessagingScenarios['msg: a session whose client stopped is away, then offline, and online again when it is back'] = {
     Msg-OnGateway @{ FACTORY_TIMING_msgOnlineSeconds = '4'; FACTORY_TIMING_msgAwaySeconds = '11'; FACTORY_TIMING_msgOfflineListMinutes = '5' } {
         param($g)
@@ -3950,33 +3920,6 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
             if ($case -eq 'supervisor') { Check "and the supervisor file is the supervisor prompt with its own credential variable ($src)" ($text -match 'as its SUPERVISOR for the TDD environment' -and $text -match 'FACTORY_SUPERVISOR_TOKEN=m1\.supervisor\.1\.sig' -and $text -notmatch 'item\.assigned') }
             if ($IsLinux -or $IsMacOS) { Check "the $src prompt file ($case) is private (mode 600)" ((& stat -c '%a' $outFile 2>$null) -eq '600' -or (& stat -f '%Lp' $outFile 2>$null) -eq '600') }
         }
-    }
-}
-
-$ManagerScenarios['mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too'] = {
-    # a gateway of its own name and label: its sweep reads the fake GitHub, and this suite's gateway never looks at these items (so the injected
-    # fault is never seen by it)
-    $cfg = Msg-Config 'instance.sweep-two.json' { param($c) $c.name = 'sweep-two'; $c.label = 'sweep-two' }
-    $s = New-Item-Fake 'Sweep settling' 'x' @('sweep-two') 'Development'; $e = New-Item-Fake 'Sweep unreadable' 'x' @('sweep-two'); $d = New-Item-Fake 'Sweep omitted' 'x' @('sweep-two')
-    # the state of an item whose pull request was merged and whose master build has not finished: no claim, merge.awaiting set
-    $fence = '```'; $sha = 'ab' * 20
-    [void](Gh-As 'fake-operator' "issues/$s/comments" @{ body = "<!-- factory-state:sweep-two v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$s,`"merge`":{`"sha`":`"$sha`",`"awaiting`":`"master-green`",`"merged_at`":`"$([DateTime]::UtcNow.ToString('o'))`",`"pr`":1}}`n$fence`n" })
-    # every read of the second item's comments fails, so every sweep reports an error for it
-    Fake 'fault' @{ match = "/issues/$e/comments"; status = 500; count = 100000 } | Out-Null
-    Msg-OnGateway (Msg-Merge $script:MgrFast @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_SWEEP_SECONDS = '2'; FACTORY_TIMING_mgrOwnedGraceSeconds = '1' }) {
-        param($g)
-        foreach ($i in $s, $e, $d) { [void](Msg-Post '/api/v1/_test/roles' @{ item = $i; owner = 'alice'; sweepable = $true }) }
-        $owners = { , @((Msg-Admin '/api/v1/_test/plant-data').owned | ForEach-Object { [int]$_.item } | Sort-Object) }
-        $sweeps = { @([regex]::Matches((Mgr-Log $g), '"sweep":\{')).Count }
-        Check 'the three items have their owner' (((& $owners) -join ',') -eq ((@($s, $e, $d) | Sort-Object) -join ','))
-        Check 'the owner of the item no sweep lists is dropped: after the grace, by two sweeps in a row' (Wait-Until -Seconds 90 { (& $owners) -notcontains $d }) ((& $owners) -join ',')
-        # a settling item keeps no owner (it is released at item.merged, issue 107): an owner the seam set on one is dropped like any the sweep omits
-        Check 'so is the owner of the settling item' (Wait-Until -Seconds 30 { (& $owners) -notcontains $s }) ((& $owners) -join ',')
-        $n0 = & $sweeps
-        Check 'three more sweeps run' (Wait-Until -Seconds 60 { (& $sweeps) -ge $n0 + 3 }) "$n0 $(& $sweeps)"
-        Check 'the unreadable item kept its owner through every one of them' (((& $owners) -join ',') -eq "$e") ((& $owners) -join ',')
-        $log = Mgr-Log $g
-        Check 'the sweep did settle the one (no error for it) and did report the error of the other' ($log -match "`"sweepAction`":\{[^\n]*`"item`":$s\b[^\n]*`"action`":`"settle`"|`"sweepAction`":\{[^\n]*`"action`":`"settle`"[^\n]*`"item`":$s\b" -and $log -notmatch "`"sweepError`":\{[^\n]*`"item`":$s\b" -and $log -match "`"sweepError`":\{[^\n]*`"item`":$e\b") ($log -split "`n" | Where-Object { $_ -match 'sweepError|settle' } | Select-Object -First 4 | Out-String)
     }
 }
 
@@ -4407,23 +4350,6 @@ $ManagerScenarios['start: while GitHub does not answer the revocation read /read
             Check 'and the worker credential is accepted' ([int](Msg-Verb 'my-items' (Msg-Token 'alice')).StatusCode -eq 200 -and (Mgr-Log $g) -match '"revocations":"loaded"')
         } 1
     } finally { Fake 'latency' @{ ms = 0 } | Out-Null }
-}
-
-$ManagerScenarios['sweep: an item new on the board is offered after a short second look, not a whole sweep interval later [full]'] = {
-    # as deployed an item is offered by the second sweep that sees it in its column (timing.sweepSeenCount 2). The interval here is an hour:
-    # only the early second look (FACTORY_SWEEP_CONFIRM_SECONDS) can offer the item inside this scenario.
-    # (a label of its own, so the sweep of this gateway plans this item and nothing of the other scenarios)
-    $cfg = Msg-Config 'instance.first-pickup.json' { param($c) $c.name = 'first-pickup'; $c.label = 'first-pickup' }
-    $n = New-Item-Fake 'First pickup' 'x' @('first-pickup', 'worker:nobody-here')
-    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_TIMING_sweepSeenCount = '2'; FACTORY_SWEEP_CONFIRM_SECONDS = '2' } {
-        param($g)
-        $sweeps = { , @([regex]::Matches((Mgr-Log $g), '"sweep":\{"offers":(\d+)') | ForEach-Object { [int]$_.Groups[1].Value }) }
-        $asg = { @((Msg-Admin '/api/v1/status').plant.assignments | Where-Object { $_.item -eq $n }).Count }
-        Check 'the first sweep sees the item and offers nothing yet' ((Wait-Until -Seconds 60 { (& $sweeps).Count -ge 1 }) -and (& $sweeps)[0] -eq 0 -and ((& $sweeps).Count -gt 1 -or (& $asg) -eq 0)) ((& $sweeps) -join ',')
-        Check 'a second sweep follows within seconds although the interval is an hour, and it offers the item' ((Wait-Until -Seconds 60 { (& $sweeps).Count -ge 2 }) -and (& $sweeps)[1] -ge 1 -and (Wait-Until -Seconds 10 { (& $asg) -eq 1 })) ((& $sweeps) -join ',')
-        Start-Sleep -Seconds 8
-        Check 'with nothing left to confirm the sweeps go back to the interval' ((& $sweeps).Count -eq 2) ((& $sweeps) -join ',')
-    }
 }
 
 # ---- the operator reaches every session (worker-messaging.md 3.4): a note to the supervisor, a note to everyone, replies, the operator's inbox ----

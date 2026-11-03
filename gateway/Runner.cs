@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-sealed class Runner(string entry) : IRuleScriptCalls
+sealed class Runner(string entry)
 {
     // runner.pool > 0: long-lived pwsh workers take the calls (RunnerPool.cs); null (the default): one process per call, as below.
     readonly RunnerPool? pool = RunnerPool.Create(entry);
@@ -111,9 +111,18 @@ sealed class Runner(string entry) : IRuleScriptCalls
             return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "github-budget", reason = $"the gateway's GitHub budget ({low.Resource}) is below its reserve; this call waits for the reset", retryAfterSeconds = Math.Max(1, (int)(low.ResetAt - DateTime.UtcNow).TotalSeconds), resetAt = low.ResetAt.ToString("o"), exit = 20 }));
         }
         var fenced = FencedVerbs.Contains(verb);
+        // (counted first, then the check: a drain that ran between the two finds the call and waits for it. The check is made again where the call really starts - after the wait for a runner slot, once the process or
+        // the pool worker is registered where DrainFencedAsync finds it - because a call can wait for a slot longer than the drain does)
         if (fenced) Interlocked.Increment(ref fencedInFlight);
+        if (fenced && MayAct?.Invoke() == false)
+        {
+            Interlocked.Decrement(ref fencedInFlight);
+            var lost = (20, JsonSerializer.Serialize(new { ok = false, verb, code = "lease-lost", reason = $"this gateway no longer holds the leader lock; the step was not performed: {verb}", exit = 20 }));
+            NoteFenced(verb, lost.Item1, lost.Item2);
+            return lost;
+        }
         int code; string output;
-        try { (code, output) = await RunProcessAsync(verb, InjectLease(verb, stdin), timeout); }
+        try { (code, output) = await RunProcessAsync(verb, InjectLease(verb, stdin), timeout, fenced); }
         finally { if (fenced) Interlocked.Decrement(ref fencedInFlight); }
         if (fenced) NoteFenced(verb, code, output);
         return (code, Budget?.Take(output) ?? output);
@@ -127,7 +136,11 @@ sealed class Runner(string entry) : IRuleScriptCalls
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced", ["verb"] = verb, ["epoch"] = Lease?.Invoke() is { } l ? l.Epoch : null, ["exit"] = code }.ToJsonString());
     }
 
-    async Task<(int Code, string Output)> RunProcessAsync(string verb, string stdin, TimeSpan timeout)
+    bool MayStart(bool fenced) => !fenced || MayAct?.Invoke() != false;
+
+    (int, string) LeaseLost(string verb) => (20, JsonSerializer.Serialize(new { ok = false, verb, code = "lease-lost", reason = $"this gateway no longer holds the leader lock; the step was not performed: {verb}", exit = 20 }));
+
+    async Task<(int Code, string Output)> RunProcessAsync(string verb, string stdin, TimeSpan timeout, bool fenced = false)
     {
         // test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: the serving request's cause id as "_cause"
         stdin = TestCause.Inject(stdin);
@@ -141,7 +154,9 @@ sealed class Runner(string entry) : IRuleScriptCalls
         // the wait for the slot is taken from the time the call may run, down to a quarter of it: a caller that set a timeout is not kept much longer
         var waited = DateTime.UtcNow - queuedAt;
         if (waited > TimeSpan.Zero) timeout = timeout - waited > timeout / 4 ? timeout - waited : timeout / 4;
-        if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout) is { } pooled) return pooled;
+        if (!MayStart(fenced)) return LeaseLost(verb);
+        if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout, () => MayStart(fenced)) is { } pooled) return pooled;
+        if (!MayStart(fenced)) return LeaseLost(verb);
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", entry, "--server", verb }) psi.ArgumentList.Add(a);
         RunnerEnv.Apply(psi);
@@ -149,6 +164,8 @@ sealed class Runner(string entry) : IRuleScriptCalls
         var key = Interlocked.Increment(ref liveKey); live[key] = p; liveVerb[key] = verb;
         try
         {
+            // registered where the drain finds it: if the lock went before that, the drain did not see this process, so it ends here and nothing of it has run
+            if (!MayStart(fenced)) { try { p.Kill(true); } catch { } return LeaseLost(verb); }
             await p.StandardInput.WriteAsync(stdin); p.StandardInput.Close();
             var outTask = p.StandardOutput.ReadToEndAsync(); var errTask = p.StandardError.ReadToEndAsync();
             using var cts = new CancellationTokenSource(timeout);

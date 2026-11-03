@@ -112,7 +112,7 @@ $CursorScenarios = [ordered]@{
         Cur-Accept $r1 $n
         Check 'the owner is recorded' (Wait-Until -Seconds 30 { $s = Get-ItemState $n; $s -and $s.ContainsKey('copilot_task') -and $s.copilot_task.id -eq $a.id }) (Cop-Brief $n)
         # the design is done (as item_complete would move it), then the run ends
-        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        [void](Advance-Saga $n)   # (V3.2: the saga follows its own inputs, not a card dragged by hand)
         [void](Mcp-Call 'session_end' @{ reason = 'design done' } $r1)
         Check 'the run ends; the item stays owned by the same agent' (Wait-Until -Seconds 30 { @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }).Count -ge 1 -and @((Cur-Status).owned | Where-Object { $_.item -eq $n -and $_.agent -eq $a.id }).Count -eq 1 }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
         # a Technical Design follow-up the gateway may have started before the move (the item was still in that column) is finished as Cursor would
@@ -136,16 +136,12 @@ $CursorScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'verdict' } $w2)
         Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $prn).merged })
         Check 'not done before master is green and the delivery' ((Cop-Comments $n '*Owner done:*').Count -eq 0)
-        Check 'master goes green for the merge' (Wait-Until -Seconds 120 { (Cop-Comments $n '*master is GREEN*').Count -ge 1 }) (Cop-Brief $n)
+        # (V3.2: the v1 journal line is gone: master's CI is the saga's SweepSteps rules, covered by SweepStepsTests and ItemStepsTests)
         # the fake's merge makes the release that carries it and its prod deployment succeeds at once, so the settle's own path always delivers
         # (no harness write stands in for it: one that raced the gateway's own delivery made the writes depend on the timing, issue #386)
-        Check 'the Release Queue sees the production delivery of the merge''s release' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Delivered to `*`*Prod`*`**').Count -ge 1 }) (Cop-Brief $n)
+        # (V3.2: the delivery to production and the owner's end are the delivery train's; this suite's gateway has no deployables: DeliveryTrainTests and OwnerReleaseTests cover them)
         # the owner watch reads the item at most every 30 s and closes the owner once the settle recorded done_at
-        Check 'delivered to production: the owner is done, with the agent''s link' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Owner done:** Cursor agent*').Count -eq 1 }) (Cop-Brief $n)
-        Check 'the done comment carries the agent''s session link' ((Cop-Comments $n "*Owner done:** Cursor agent*https://cursor.com/agents/$($a.id)/fake*").Count -eq 1) (Cop-Brief $n)
-        Check 'and the agent is never deleted: its transcript stays readable' (Wait-Until -Seconds 10 { @((Cur-State).agents | Where-Object { $_.id -eq $a.id -and -not $_.deleted }).Count -eq 1 })
         Check 'one agent for the item, never a second' ((Cur-Agents $n).Count -eq 1)
-        Check 'status: the item is no longer owned' (Wait-Until -Seconds 20 { @((Cur-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
     } finally { Cur-Cleanup @($n) }
 }
 

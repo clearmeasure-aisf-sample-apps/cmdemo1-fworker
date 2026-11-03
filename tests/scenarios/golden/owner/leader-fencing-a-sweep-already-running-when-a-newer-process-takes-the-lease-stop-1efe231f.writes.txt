@@ -1,9 +1,0 @@
-# suite: owner
-# scenario: leader: fencing: a sweep already running when a newer process takes the lease stops at its next item and answers fenced
-# runs: 2
-~ rule PATCH /repos/{repo}/git/refs/factory/factory-worker/gateway-leader 200 {"force":false,"sha":"{sha}"}
-~ rule POST /repos/{repo}/git/commits 201 {"message":"{\"acquired_at\":\"{time}\",\"epoch\":1,\"holder\":\"gw-flight-a\",\"kind\":\"gateway-leader\",\"predecessor\":null,\"released\":false,\"renewed_at\":\"{time}\",\"replica\":\"\",\"revision\":\"\",\"until\":\"{time}\",\"v\":1,\"version\":\"test\"}","parents":[],"tree":"{sha}"}
-~ rule POST /repos/{repo}/git/commits 201 {"message":"{\"acquired_at\":\"{time}\",\"epoch\":2,\"holder\":\"gw-flight-b\",\"kind\":\"gateway-leader\",\"predecessor\":{\"acquired_at\":\"{time}\",\"epoch\":1,\"holder\":\"gw-flight-a\",\"released\":false,\"renewed_at\":\"{time}\",\"replica\":\"\",\"revision\":\"\",\"until\":\"{time}\",\"version\":\"test\"},\"released\":false,\"renewed_at\":\"{time}\",\"replica\":\"\",\"revision\":\"\",\"until\":\"{time}\",\"v\":1,\"version\":\"test\"}","parents":["{sha}"],"tree":"{sha}"}
-~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/gateway-leader","sha":"{sha}"}
-~ rule STATE factory-worker v1 #{#1}
-~ rule STATE factory-worker v1 #{#2}

@@ -18,7 +18,7 @@ sealed class DeliveryKitSource(Func<DeliveryVerbHost> host) : IRuleKitSource
 }
 
 /// <summary>The release of an item's owner that waited out a hold. Never throws for an owner that is gone: the claim may be released already, the item closed, or another owner may hold it by now.</summary>
-public sealed class OwnerRelease(Func<IVerbRouter?> router, Action<int, string>? forget = null)
+public sealed class OwnerRelease(Func<IVerbRouter?> router, Action<int, string>? forget = null, Action<int>? merged = null, Action<int>? completed = null)
 {
     static readonly TimeSpan Timeout = TimeSpan.FromSeconds(120);
 
@@ -26,18 +26,27 @@ public sealed class OwnerRelease(Func<IVerbRouter?> router, Action<int, string>?
     {
         if (router() is not { } verbs) throw new InvalidOperationException("the gateway has no verb router yet");
         var item = m.Item.Number;
+        // V3.2: the item's pull request was merged, or the item completed. The plant lets the owner go first (Plant.Merged: its open assignments are done and its session is told session.end; Plant.Complete: the slot is free),
+        // whatever the claim says, then the claim itself goes as below. Idempotent: the plant hooks and the release both find nothing to do the second time.
+        var over = m.Kind is OwnerReleaseKinds.Merged or OwnerReleaseKinds.Completed;
+        if (over)
+            try { (m.Kind == OwnerReleaseKinds.Merged ? merged : completed)?.Invoke(item); }
+            catch (Exception e) { Console.Error.WriteLine($"owner release of {m.Item} ({m.Kind}): the plant could not let the owner go: {e.GetType().Name}"); }
         var got = await verbs.RunAsync("get-item", new JsonObject { ["item"] = item }.ToJsonString(), Timeout);
         // an item that is not there (or not this gateway's) has no owner to release; any other refusal is tried again by the host
         if (got.Code is 11 or 12 or 10) return "no-item";
+        // an item that is over keeps its claim at worst until the lease runs out; the plant has let the owner go already, so a fault here is logged, not tried again into the dead letters
+        if (got.Code != 0 && over) { Console.Error.WriteLine($"owner release of {m.Item} ({m.Kind}): get-item answered {got.Code}; the claim is left"); return "unreadable"; }
         if (got.Code != 0) throw new InvalidOperationException($"get-item answered {got.Code}");
         var claim = Parse(got.Output)?["state"]?["claim"] as JsonObject;
         var holder = claim?["holder"]?.ToString() ?? "";
         if (holder.Length == 0) return "no-claim";
         var released = await verbs.RunAsync("release", new JsonObject { ["item"] = item, ["holder"] = holder, ["reason"] = m.Reason }.ToJsonString(), Timeout);
         if (released.Code == 40) return "other-owner";   // claim-not-held: someone took the item meanwhile
+        if (released.Code != 0 && over) { Console.Error.WriteLine($"owner release of {m.Item} ({m.Kind}): release answered {released.Code}; the claim is left"); return "unreadable"; }
         if (released.Code != 0) throw new InvalidOperationException($"release answered {released.Code}");
-        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = "owner-released-idle", ["item"] = item, ["holder"] = holder, ["reason"] = m.Reason }.ToJsonString());
-        try { forget?.Invoke(item, holder); } catch (Exception e) { Console.Error.WriteLine($"owner release of {m.Item}: the plant could not forget {holder}: {e.GetType().Name}"); }
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = over ? $"owner-released-{m.Kind}" : "owner-released-idle", ["item"] = item, ["holder"] = holder, ["reason"] = m.Reason }.ToJsonString());
+        if (!over) try { forget?.Invoke(item, holder); } catch (Exception e) { Console.Error.WriteLine($"owner release of {m.Item}: the plant could not forget {holder}: {e.GetType().Name}"); }
         return "released";
     }
 

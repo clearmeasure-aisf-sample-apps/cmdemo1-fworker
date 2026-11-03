@@ -5,7 +5,7 @@ using Fworker.Integrations.Correlation;
 
 // W8.2: the alert ingress. Azure Monitor's action group calls POST /webhooks/azure-monitor?deployable=<name>&environment=<name>&secret=<secret> (common alert schema); an accepted alert becomes an incident trigger
 // event of the ingress inbox (AzureMonitorAlerts, W4.1's durable queue "ingress-inbox"), where the IncidentSaga (W8.1) takes it from. The route exists only where the engine acts (Engine.V2Acts): v1, the shadow run (which has the
-// ingress inbox too, for the delivery train, but no IncidentSaga) and FACTORY_V2_OFF answer 404 as if it were not there, so they are what they were.
+// ingress inbox too, for the delivery train, but no IncidentSaga) answer 404 as if it were not there, so they are what they were.
 //
 // Credential: the per-source secret of W4.0 (WebhookSecrets, FACTORY_WEBHOOK_SECRET_AZURE_MONITOR). An action group cannot send a header, so the secret is the query parameter "secret" of the webhook URI
 // (TLS, never logged); a relay may send it in X-Azure-Monitor-Secret instead. A source without a secret refuses every delivery. The check is made before the body is read, and the body is bounded.

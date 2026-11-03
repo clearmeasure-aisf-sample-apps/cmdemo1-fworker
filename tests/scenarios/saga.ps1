@@ -328,8 +328,9 @@ $SagaScenarios['saga: slots: three sessions against a day budget of three are st
         # the fourth item: the budget is spent, so the scheduler holds it, and no run is made
         $n4 = New-Item-Fake 'Slots session 4' "Change the code, as the criteria say.`n`n- criterion one" ($OctLabels) 'Todo'
         $items += $n4
-        Check "the intake pulls #$n4 from Todo (the item the budget holds)" (Slots-WaitFor 200 { (Saga-Col $n4) -eq 'Technical Design' }) "column $(Saga-Col $n4)"
-        Check "the scheduler holds #$n4 for the day budget (runtime-budget)" (Slots-WaitFor 60 { (Slots-Reasons $n4) -match 'runtime-budget' }) "decisions: $(Slots-Reasons $n4)"
+        # V1.2: the intake counts the runtime's free capacity, and the day budget is part of it: the item is not pulled, it waits in Todo (over two runs of the intake job) and the job's outcome says why
+        $pulled4 = Slots-WaitFor 130 { (Saga-Col $n4) -ne 'Todo' }
+        Check "the intake does not pull #$n4 from Todo while the day budget is spent" (-not $pulled4) "column $(Saga-Col $n4)"
         Start-Sleep -Seconds 5
         Check "no session is started for #${n4}: the day budget of $($script:SlotsBudget) is the limit" ((Slots-Runs $n4).Count -eq 0 -and (Slots-AllRuns).Count -eq $script:SlotsBudget) "runs: $((Slots-AllRuns).Count)"
     } finally {
@@ -341,6 +342,99 @@ $SagaScenarios['saga: slots: three sessions against a day budget of three are st
         Restart-Gateway
         [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
         try { [void](Fake 'octo-reset') } catch { }
+    }
+}
+
+# ---- V1.2 and V1.3 (v2-only plan, #622): the intake's slots from the runtime's capacity, the runtime of an item from its labels, the pin of an offer, and the plan of a hotfix label (v2 only) ------------------------------
+# tdd has no owner session: the sessions are the Octopus runtime's, started by the plant per item and phase, so the plant's count of free owner slots is always 0 and the intake never pulled. The intake now adds the scheduler's
+# free capacity of the runtime (maxConcurrent less what runs and waits, the day budget, the hosts' room). These scenarios play it against the fake Octopus, as the slots scenario above does, and need no owner session.
+function Lbl-Enter([scriptblock]$Edit) {
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $envNames = 'OCTOPUS_RUNBOOK_API_KEY', 'FACTORY_OCTOPUS_HOST_TOKEN', 'FACTORY_TRANSCRIPT_SAVE_SECONDS', 'FACTORY_INTAKE_WIP'
+    $oldEnv = @{}; foreach ($e in $envNames) { $oldEnv[$e] = [Environment]::GetEnvironmentVariable($e) }
+    $cfg = $orig | ConvertFrom-Json -AsHashtable
+    $cfg.scheduler.featureSlots = $true
+    $cfg.messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+    $cfg.runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = "http://127.0.0.1:$($script:FakePort)"; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
+        agent = 'codex'; perHostCapacity = 2; overflowRoles = @(); overflowMax = 0; maxConcurrent = 1; maxExecutionsPerDay = 20; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 600; listSeconds = 1; reportGraceSeconds = 2 } }
+    if ($Edit) { & $Edit $cfg }
+    $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+    $env:OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()); $env:FACTORY_OCTOPUS_HOST_TOKEN = [guid]::NewGuid().ToString('N'); $env:FACTORY_TRANSCRIPT_SAVE_SECONDS = '2'; $env:FACTORY_INTAKE_WIP = '10'
+    [void](Fake 'octo-reset'); Oct-Machines $OctDefaultMachines
+    # no owner session: the one of an earlier scenario goes
+    if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+    Restart-Gateway
+    [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    Slots-Report
+    return @{ path = $cfgPath; orig = $orig; env = $oldEnv }
+}
+function Lbl-Leave($Saved, [int[]]$Items, [string[]]$Clients) {
+    # the sagas of the scenario's items stay in the database for the scenarios after this one: parked, so that no session is offered them and none of them holds the intake back (an unowned offer in Technical Design does)
+    foreach ($n in $Items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
+    foreach ($n in $Items) { Rt-Close $n }
+    foreach ($c in $Clients) { if ($c -and $script:Workers.ContainsKey($c)) { Stop-OwnerClient $c } }
+    try { foreach ($r in @((Oct-State).runs | Where-Object { $_.state -eq 'Executing' })) { [void](Fake 'octo-task' @{ id = $r.task; state = 'Success' }) } } catch { }
+    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline
+    foreach ($e in $Saved.env.Keys) { [Environment]::SetEnvironmentVariable($e, $Saved.env[$e]) }
+    Restart-Gateway
+    [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    try { [void](Fake 'octo-reset') } catch { }
+}
+
+$SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the runtime''s free capacity (never past maxConcurrent), a runtime: label with no capacity passes the item over, a hotfix label starts the hotfix plan'] = {
+    Saga-NumbersAbove 100
+    $items = @(); $clients = @()
+    # the runtime runs two sessions at most; the plans of the intake name the hotfix plan too (as config/deploy.overrides.json does)
+    $saved = Lbl-Enter { param($cfg) $cfg.runtimes.octopus.maxConcurrent = 2; $cfg.intake.v2Plans = @('docs', 'feature', 'hotfix', 'redeliver') }
+    try {
+        Check 'no owner session is connected' (@((Get-Plant).plant.workers | Where-Object { $_.connected -and $_.roles -contains 'owner' }).Count -eq 0) ((Get-Plant).plant.workers | ConvertTo-Json -Compress -Depth 3)
+        # V1.2: the intake pulls with the runtime's capacity alone
+        $a = New-Item-Fake 'Intake on capacity' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $items += $a
+        Check "the intake pulls #$a from Todo with the runtime's capacity alone" (Slots-WaitFor 200 { (Saga-Col $a) -eq 'Technical Design' }) "column $(Saga-Col $a); $(Slots-Reasons $a)"
+        Check "the scheduler's slot starts the session of #$a on the Octopus runtime (no label: the default runtime)" (Slots-WaitFor 90 { (Slots-Runs $a).Count -ge 1 }) "runs: $((Slots-Runs $a).Count); $(Slots-Reasons $a)"
+        if ((Slots-Runs $a).Count -lt 1) { return }
+        $clients += (Slots-Take $a (Slots-Runs $a)[0])
+        Check "#$a was not held for a runtime" ((Slots-Reasons $a) -notmatch 'runtime-off') (Slots-Reasons $a)
+        # V1.3: the label names copilot-cloud, which is off in this environment: the intake has no capacity for that runtime and passes the item over, while octopus has room (the hotfix below is pulled after it)
+        $b = New-Item-Fake 'Label routes to copilot' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'runtime:copilot-cloud') 'Todo'
+        $items += $b
+        # V1.3 (D3): a person's hotfix label starts the hotfix plan: no design step, and the card goes to Development
+        $h = New-Item-Fake 'Hotfix by a person' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'hotfix') 'Todo'
+        $items += $h
+        Check "the intake pulls #$h from Todo" (Slots-WaitFor 200 { $null -ne (Saga-View $h) }) "column $(Saga-Col $h)"
+        $v = Saga-View $h
+        Check "the saga of #$h is on the hotfix plan, in Develop (no design step)" ($null -ne $v -and "$($v.plan)" -eq 'hotfix' -and "$($v.step)" -eq 'Develop') ($v | ConvertTo-Json -Compress -Depth 4)
+        Check "the card follows the saga to Development" (Slots-WaitFor 60 { (Saga-Col $h) -eq 'Development' }) "column $(Saga-Col $h)"
+        Check "the session of the hotfix starts on the Octopus runtime" (Slots-WaitFor 90 { (Slots-Runs $h).Count -ge 1 }) "runs: $((Slots-Runs $h).Count); $(Slots-Reasons $h)"
+        # V1.2: the runtime runs its two sessions (maxConcurrent 2): the next Todo item stays in Todo, over two runs of the intake job
+        $d = New-Item-Fake 'Intake bound by capacity' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $items += $d
+        $pulledD = Slots-WaitFor 75 { (Saga-Col $d) -ne 'Todo' }
+        Check "#$d stays in Todo while the runtime runs its two sessions (maxConcurrent 2)" (-not $pulledD) "column $(Saga-Col $d)"
+        Check "no third session is started" ((Slots-AllRuns).Count -eq 2) "runs: $((Slots-AllRuns).Count)"
+        Check "#$b, whose runtime has no capacity, was passed over all the time (still in Todo, no session)" ((Saga-Col $b) -eq 'Todo' -and (Slots-Runs $b).Count -eq 0) "column $(Saga-Col $b)"
+    } finally { Lbl-Leave $saved $items $clients }
+}
+
+$SagaScenarios['saga: intake: a worker: pin is honoured on the saga''s offer (only the pinned session is offered the item)'] = {
+    Saga-NumbersAbove 160
+    if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+    Start-OwnerClient 'pn1' 'persistent-local' '--capacity 1 --no-auto-accept'
+    Start-OwnerClient 'pn2' 'persistent-local' '--capacity 1 --no-auto-accept'
+    $iso = { param($t) $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+    # the pinned card was put into Technical Design by a person (the intake does not pull a pinned item from Todo): the adoption makes its saga at the start
+    $n = New-Item-Fake 'Pinned to pn2' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'worker:pn2') 'Technical Design'
+    try {
+        Adopt-State $n @{ design = @{ docs_only = $false } }
+        Restart-Gateway
+        Check 'both sessions are connected again' (Wait-Until -Seconds 60 { @((Get-Plant).plant.workers | Where-Object { $_.name -in 'pn1', 'pn2' -and $_.connected }).Count -eq 2 }) ((Get-Plant).plant.workers | ConvertTo-Json -Compress -Depth 3)
+        Check "#$n is the saga's, in Design" (Wait-Until -Seconds 150 { $v = Saga-View $n; $null -ne $v -and "$($v.step)" -eq 'Design' }) ((Saga-View $n) | ConvertTo-Json -Compress -Depth 4)
+        Check "the pinned session pn2 is offered #$n" (Wait-Until -Seconds 240 { (Get-Assigned 'pn2' $n).Count -gt 0 }) "events pn2: $(@(Get-WorkerEvents 'pn2' | ForEach-Object { $_.event }) -join ','); pn1: $(@(Get-WorkerEvents 'pn1' | ForEach-Object { $_.event }) -join ',')"
+        Check "the other session pn1 is not offered #$n" ((Get-Assigned 'pn1' $n).Count -eq 0) "events pn1: $(@(Get-WorkerEvents 'pn1' | ForEach-Object { $_.event }) -join ',')"
+    } finally {
+        try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { }
+        foreach ($c in 'pn1', 'pn2') { Stop-OwnerClient $c }
     }
 }
 
@@ -403,5 +497,156 @@ $SagaScenarios['saga: adoption: a start with v1 items in flight adopts them (the
     } finally {
         # the items stay the saga's: parked, so that no session is offered them to the scenarios after this one
         foreach ($n in $items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
+    }
+}
+
+# ---- V1.1: the admission (v2 only) -----------------------------------------------------------------------------------------------------------------------------------------------------------------
+# docs/design/fworker-wolverine-implementation.md "Revision 2026-11-01 (v2 only)", row V1.1: every open card in a step column has a saga, whoever put it there. After every pass of the board reconciler the admission starts the saga of a
+# card that has none: the one at the step of its column when the card has no state comment (a card a person moves, an item whose start was lost), v1's mapping when it has one (the scenario 'adoption: a start' and AdmissionTests).
+# Replenish starts the saga of the item it creates itself, in the pass that creates it. v1 has neither (its sweep runs these items), so both scenarios are v2 only. The reconciler is set to its fastest pass (30 s) in the configuration of the scenario.
+function Adm-Park([int[]]$Items) {
+    foreach ($n in $Items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
+}
+# the history of the item's saga: "action reason reason ..." for each decision
+function Adm-History([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return '' }; (@($v.history | ForEach-Object { "$($_.action) $(@($_.reasons) -join ' ')" }) -join ' | ') }
+function Adm-Status { try { return (Invoke-RestMethod "$(Get-GatewayBase)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5).v2.admission } catch { return $null } }
+
+$SagaScenarios['saga: admission: a replenished item starts its saga in the pass that creates it, at Technical Design, and the admission has counted its passes'] = {
+    Saga-NumbersAbove 120
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $items = @()
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        $cfg.keeper.replenish = @{ enabled = $true; maxPerDay = 2; targetOpen = 4 }
+        if (-not $cfg.ContainsKey('recurringJobs')) { $cfg.recurringJobs = @{} }
+        $cfg.recurringJobs.boardReconcilerSeconds = 30
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        # no owner session is left to be offered the items
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        # an item that reached Done today, as v1 and v2 leave one: closed, with merge.done_at in its state comment
+        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+        $d = New-Item-Fake 'Admission finished' 'Done in production.' $OwnerLabels 'Done'
+        $items += $d
+        $state = @{ item = $d; merge = @{ sha = 'abc1234'; merged_at = (Get-Date).ToUniversalTime().ToString('o'); done_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = $null } }
+        $cbody = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+        [void](Invoke-RestMethod "$gh/issues/$d/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $cbody } | ConvertTo-Json))
+        [void](Invoke-RestMethod "$gh/issues/$d" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
+        Restart-Gateway
+        Check 'the Wolverine host runs' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        $made = { @((Get-FakeState).issues | Where-Object { "$($_.body)" -match '<!-- keeper-replenish -->' -and "$($_.body)" -match "work item #$d " }) }
+        $created = Wait-Until -Seconds 150 { @(& $made).Count -eq 1 -and @(& $made)[0].column -eq 'Technical Design' }
+        Check "Replenish creates one item for the finished #$d and places it in Technical Design" $created ((Get-FakeState).issues | ForEach-Object { "#$($_.number) $($_.column)" } | Out-String)
+        if (-not $created) { return }
+        $m = [int]@(& $made)[0].number
+        $items += $m
+        $started = Wait-Until -Seconds 90 { $null -ne (Saga-View $m) }
+        Check "#$m has a saga" $started "view $((Saga-View $m) | ConvertTo-Json -Compress -Depth 4)"
+        if (-not $started) { return }
+        [void](Wait-Until -Seconds 40 { (Adm-History $m) -match 'started' })   # (the view is read at most every 5 seconds and its history can be a read behind)
+        $v = Saga-View $m
+        Check "the saga of #$m is on the feature plan, at Design, and was started by Replenish (source replenish), not adopted" ("$($v.step)" -eq 'Design' -and "$($v.plan)" -eq 'feature' -and (Adm-History $m) -match 'started replenish' -and (Adm-History $m) -notmatch 'adopted') "view $($v | ConvertTo-Json -Compress -Depth 4); history $(Adm-History $m)"
+        Check "the card of #$m is still in Technical Design" ((Saga-Col $m) -eq 'Technical Design') "column $(Saga-Col $m)"
+        # a pass of the board reconciler and its admission after that: nothing is started twice
+        $passes = [int](Adm-Status).passes
+        $more = Wait-Until -Seconds 90 { $s = Adm-Status; $null -ne $s -and [int]$s.passes -gt $passes }
+        $s = Adm-Status
+        Check 'the admission ran again after a later pass of the board reconciler (v2.admission.passes)' $more ($s | ConvertTo-Json -Compress -Depth 4)
+        Check "and started nothing for #$m (one decision 'started', v2.admission.started 0)" ((@(Saga-Actions $m) -eq 'started').Count -eq 1 -and [int]$s.started -eq 0 -and [int]$s.errors -eq 0) "#${m}: $((Saga-Actions $m) -join ','); $($s | ConvertTo-Json -Compress -Depth 4)"
+    } finally {
+        Adm-Park $items
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    }
+}
+
+$SagaScenarios['saga: admission: a card a person moves from Todo into Development gets a saga that begins at Develop, and a card in Todo gets none'] = {
+    Saga-NumbersAbove 140
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $items = @()
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        if (-not $cfg.ContainsKey('recurringJobs')) { $cfg.recurringJobs = @{} }
+        $cfg.recurringJobs.boardReconcilerSeconds = 30
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        # no owner session: the intake has no free slot, so it pulls nothing and the card stays where the person puts it
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        $stay = New-Item-Fake 'Admission stays in Todo' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $moved = New-Item-Fake 'Admission moved by a person' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $items += $stay, $moved
+        Restart-Gateway
+        Check 'the Wolverine host runs' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        $passes = Wait-Until -Seconds 120 { $s = Adm-Status; $null -ne $s -and [int]$s.passes -ge 1 }
+        Check 'the admission has made a pass (v2.admission.passes)' $passes ((Adm-Status) | ConvertTo-Json -Compress -Depth 4)
+        Check "neither card has a saga while both are in Todo" ($null -eq (Saga-View $stay) -and $null -eq (Saga-View $moved)) "views $((Saga-View $stay) | ConvertTo-Json -Compress -Depth 3) / $((Saga-View $moved) | ConvertTo-Json -Compress -Depth 3)"
+        # the person moves the card into Development
+        [void](Fake 'move' @{ number = $moved; column = 'Development' })
+        $admitted = Wait-Until -Seconds 150 { $null -ne (Saga-View $moved) }
+        Check "the card moved into Development gets a saga within the next passes" $admitted "view $((Saga-View $moved) | ConvertTo-Json -Compress -Depth 4); $((Adm-Status) | ConvertTo-Json -Compress -Depth 4)"
+        if (-not $admitted) { return }
+        $v = Saga-View $moved
+        # (v1's sweep may have written a state comment for the card before the admission's pass: then the admission adopts it, with the same step; both are the rule)
+        Check "the saga begins at Develop on the feature plan, started by the admission from the board or adopted from the state comment v1 wrote" ("$($v.step)" -eq 'Develop' -and "$($v.plan)" -eq 'feature' -and (Adm-History $moved) -match '(started board|adopted)') "view $($v | ConvertTo-Json -Compress -Depth 4); history $(Adm-History $moved)"
+        Check "the card stays in Development" ((Saga-Col $moved) -eq 'Development') "column $(Saga-Col $moved)"
+        Check "the card left in Todo has still no saga" ($null -eq (Saga-View $stay)) ((Saga-View $stay) | ConvertTo-Json -Compress -Depth 3)
+        $s = Adm-Status
+        Check 'the status counts the start or the adoption' (([int]$s.started + [int]$s.adopted) -ge 1 -and [int]$s.errors -eq 0) ($s | ConvertTo-Json -Compress -Depth 4)
+    } finally {
+        Adm-Park $items
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    }
+}
+
+$SagaScenarios['saga: admission: an item whose issue a person closed and then reopened gets a second generation (a reopened item), and v1''s sweep does nothing to a card of its own that has no saga'] = {
+    Saga-NumbersAbove 160
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $oldGrace = [Environment]::GetEnvironmentVariable('FACTORY_ADMISSION_REOPEN_GRACE_SECONDS')
+    $items = @()
+    $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $setState = { param($n, $state) [void](Invoke-RestMethod "$gh/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = $state } | ConvertTo-Json)) }
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        if (-not $cfg.ContainsKey('recurringJobs')) { $cfg.recurringJobs = @{} }
+        $cfg.recurringJobs.boardReconcilerSeconds = 30
+        $cfg.intake.v2Plans = @('docs', 'feature', 'hotfix')   # (v1's sweep leaves every item to the engine only when the engine carries every plan)
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        $env:FACTORY_ADMISSION_REOPEN_GRACE_SECONDS = '20'
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        $r = New-Item-Fake 'Admission reopened' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Development'
+        # a held card (the admission gives it no saga) with a merge record waiting for master, which v1's settle would act on, in an AI column
+        $items += $r
+        Restart-Gateway
+        Check 'the Wolverine host runs' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        [void](Wait-Until -Seconds 120 { $x = Adopt-Run; $null -ne $x -and "$($x.outcome)" -eq 'done' })
+        $h = New-Item-Fake 'Admission v1 own' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'hold:owner') 'Development'
+        $items += $h
+        $iso = { param($t) $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+        Adopt-State $h @{ design = @{ docs_only = $false }; merge = @{ sha = 'abc1234'; merged_at = (& $iso (Get-Date).AddMinutes(-3)); awaiting = 'master-green'; pr = 5 } }
+        $before = @((Saga-FakeLog) | Where-Object { $_ -match "^(POST|PATCH|PUT) /repos/[^/]+/[^/]+/issues/$h(/|$)" }).Count
+        Check "the card in Development gets a saga (started at Develop)" (Wait-Until -Seconds 150 { $v = Saga-View $r; $null -ne $v -and "$($v.step)" -eq 'Develop' }) "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4)"
+        # a person closes the issue: the poll of the board reconciler ends the saga
+        & $setState $r 'closed'
+        $done = Wait-Until -Seconds 150 { $v = Saga-View $r; ($null -eq $v) -or ("$($v.status)" -eq 'completed') -or ('completed' -in (Saga-Actions $r)) }
+        Check "the saga of #$r ends when its issue is closed" $done "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4); $((Saga-Actions $r) -join ',')"
+        Start-Sleep -Seconds 35   # (the board reconciler sees the card closed in one pass, and open in a later one)
+        [void](Fake 'reopen' @{ number = $r })
+        [void](Fake 'move' @{ number = $r; column = 'Development' })
+        $fi = Get-FakeIssue $r
+        Check "the person's reopening and move took (issue open, card in Development)" ($fi.open -eq $true -and "$($fi.column)" -eq 'Development') "issue: column $($fi.column), open $($fi.open)"
+        $again = Wait-Until -Seconds 240 { $v = Saga-View $r; $null -ne $v -and [int]$v.generation -ge 2 -and "$($v.status)" -eq 'open' }
+        Check "the issue reopened after the board showed its card closed gets the next generation" $again "view $((Saga-View $r) | ConvertTo-Json -Compress -Depth 4); $((Adm-Status) | ConvertTo-Json -Compress -Depth 4)"
+        Check 'the status counts the reopening' ([int](Adm-Status).reopened -ge 1) ((Adm-Status) | ConvertTo-Json -Compress -Depth 4)
+        # v1's sweep (every few seconds in the tests) did nothing to the hotfix item: no write to its issue, no saga for it
+        $after = @((Saga-FakeLog) | Where-Object { $_ -match "^(POST|PATCH|PUT) /repos/[^/]+/[^/]+/issues/$h(/|$)" }).Count
+        Check "v1 wrote nothing to #$h, whose merge record its settle would have acted on (the engine acts: every item is its own)" ($after -eq $before) "writes before $before, after $after"
+        Check "#$h has no saga (held; v1 does nothing to it either)" ($null -eq (Saga-View $h)) ((Saga-View $h) | ConvertTo-Json -Compress -Depth 3)
+    } finally {
+        Adm-Park $items
+        [Environment]::SetEnvironmentVariable('FACTORY_ADMISSION_REOPEN_GRACE_SECONDS', $oldGrace)
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
     }
 }

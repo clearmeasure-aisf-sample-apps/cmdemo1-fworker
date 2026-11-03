@@ -60,6 +60,8 @@ public static class AdoptionMapper
             if (cfg.Columns.IsDone(column)) return Skip("card-done");
             if (cfg.Columns.StepOf(column) is not { } onCard) return Skip(string.IsNullOrWhiteSpace(column) ? "not-on-the-board" : $"column-of-no-step: {column}");
             step = onCard;
+            // the hotfix plan has no Design: an adopted hotfix item in the design column begins at Develop
+            if (plan == WorkPlans.Hotfix && step == StepKind.Design) { step = StepKind.Develop; notes.Add("the hotfix plan has no Design step: Develop"); }
             // a PASS in the validation column is waiting for its merge, held or not (the merge happens in the validation column)
             if (step == StepKind.Verify && passed) step = StepKind.Merge;
             // Development done and waiting for CI (awaiting_checks): the saga enters Verify when Development completes, whether the checks are green or still running
@@ -136,6 +138,8 @@ public static class AdoptionMapper
     // P: the design's decision (state.design.docs_only, or for a legacy item the body's marker) says docs; a pull request that changes anything but documentation says feature
     static string PlanOf(AdoptionSnapshot s, JsonObject st, AdoptionSettings cfg, List<string> notes)
     {
+        // V1.1: a hotfix item is adopted onto the hotfix plan, never the feature plan (a plan the engine does not carry is skipped by the caller)
+        if (cfg.HotfixLabel.Length > 0 && s.Labels.Contains(cfg.HotfixLabel, StringComparer.OrdinalIgnoreCase)) return WorkPlans.Hotfix;
         var designFlag = V1State.NullableBool(V1State.Obj(st, "design"), "docs_only");
         var docsOnly = DocsOnly.ItemIsDocsOnly(designFlag, new DocsOnlyItem(s.Column, s.Body, s.CreatedAt, s.Labels), cfg.DocsOnly);
         if (!docsOnly) return WorkPlans.Feature;

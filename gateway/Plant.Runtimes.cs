@@ -87,14 +87,16 @@ sealed partial class Plant
     /// </summary>
     public void PlanSagaOffers(JsonArray offers, IReadOnlyCollection<int> items)
     {
-        JsonObject labels = new(), profiles = new();
+        JsonObject labels = new(), profiles = new(), pins = new();
+        // V1.3: the pin the offer carries (V2Ownership.OfferNodes): the offer made at a slot's grant honours a worker: label as the sweep's full pass does
+        foreach (var o in offers) if (o?["pin"]?.ToString() is { Length: > 0 } pin && o["item"] is JsonValue iv && iv.TryGetValue<int>(out var pinned)) pins[pinned.ToString()] = pin;
         lock (gate)
             foreach (var i in items)
             {
                 if (runtimeLabels[i.ToString()] is { } l) labels[i.ToString()] = l.DeepClone();
                 if (itemProfiles[i.ToString()] is { } p) profiles[i.ToString()] = p.DeepClone();
             }
-        Plan(offers, null, null, null, items, null, DateTime.UtcNow, items, labels, profiles);
+        Plan(offers, null, pins, null, items, null, DateTime.UtcNow, items, labels, profiles);
     }
 
     // After the plant's lock: the executions decided in it are started.

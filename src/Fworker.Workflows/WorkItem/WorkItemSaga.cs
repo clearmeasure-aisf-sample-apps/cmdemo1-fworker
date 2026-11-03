@@ -46,6 +46,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         switch (input)
         {
             case StartWorkItem s: return Start(existing, s, now);
+            case ReopenWorkItem when existing is { IsOpen: false } && !policy.Carries(PlanOfReopen(existing)): return Nothing(existing, WorkItemOutcome.Refused, "the plan is not carried by this engine");
             case ReopenWorkItem r when existing is { IsOpen: false }: return NewGeneration(input.Item, existing, r.Reason.Length == 0 ? "reopened" : $"reopened: {r.Reason}", PlanOfReopen(existing), now, r.Key, WorkItemActions.Reopened);
             case DeliveryLost l when existing is { IsOpen: false }: return Redeliver(existing, l, now);
         }
@@ -92,6 +93,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 return StepAnswer.Applied;
             case ResumeWorkItem:
                 return Resume(c);
+            case DevelopmentSettled d: return Settled(c, d);
             case ItemClosed:
                 // W9.10h: the merge decides for an item that is merged or merging (the merge closes its issue); a delivered item is in its settle window
                 if (state.Status == WorkItemStatus.Settling) return StepAnswer.Refused("the item is delivered");
@@ -138,6 +140,27 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
 
     /// <summary>The park reason of a hold label (W9.10h): a removal of the label lifts exactly this park.</summary>
     public const string HoldParkPrefix = "hold: ";
+
+    // The gateway settled Development for a coding agent's task (copilot-settle awaiting): the pull request of the task's branch is the item's, the step is done without a session's review, and an agent's failure report that parked the
+    // item (worker-failure) is overridden. Any other park, and any step but Develop, is left alone.
+    static StepAnswer Settled(StepContext c, DevelopmentSettled d)
+    {
+        var state = c.State;
+        if (state.Status != WorkItemStatus.Open || state.Step != StepKind.Develop) return StepAnswer.Stale("the item is not in Development");
+        if (state.Parked)
+        {
+            if (!state.ParkReason.StartsWith("worker-failure", StringComparison.Ordinal)) return StepAnswer.Refused($"the item is parked: {state.ParkReason}");
+            state.Parked = false; state.ParkReason = ""; c.ClearParkTimers(); c.TimerChanged = true;
+            c.Decide(WorkItemActions.Resumed, "the gateway settled Development over the agent's failure report");
+        }
+        var recorded = c.StepOf(StepKind.Develop).Handle(c, new PullRequestChanged(d.Item, d.Generation, d.Key, d.PullRequest, d.Head, d.Files));
+        if (recorded.Outcome != WorkItemOutcome.Applied) return recorded;
+        state.ReviewsComplete.Add(StepKind.Develop.ToString());
+        c.Advance("Develop done: the gateway settled the coding agent's task");
+        // the watcher may have read the checks of this head before the settle was applied (a red then costs no round in Development): the item enters Functional Testing on a red head, which is a fix-forward round now
+        if (state.Step == StepKind.Verify && WorkPlans.IsCode(state.Plan) && state.ChecksState == FeatureFlow.Red && MergeSteps.SameHead(state.ChecksHead, state.Head)) FeatureFlow.FixForward(c, "CI is red on the head under test");
+        return StepAnswer.Applied;
+    }
 
     // the budgets of the phase start again and the step is armed anew
     static StepAnswer Resume(StepContext c)
@@ -227,21 +250,24 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         if (plan is null || plan.Name == WorkPlans.Redeliver) return Nothing(existing, WorkItemOutcome.Refused, $"there is no plan '{s.Plan}' to start on");
         if (existing is { IsOpen: true })
         {
+            // V1.1: a start that names the step (Replenish's, the admission's) for an item that has a saga does nothing at all: the two can meet in one pass, a pass can come twice, a message can be redelivered. A start lost
+            // between the save and its publication (a crash) is not repeated by the message: WorkItemRearm sends the timers and commands of the saved row again, and the decision is the row's history.
+            if (s.Step is not null) return Nothing(existing, WorkItemOutcome.Refused, "the item is open");
             // a redelivery of the start finds its own transition still the last and publishes it again; a start of an item that has moved on changes nothing
             if (existing.LastKey == "start") return Reemit(existing, WorkItemState.FromJson(existing.ToJson()));
             return Nothing(existing, WorkItemOutcome.Refused, "the item is open");
         }
-        return NewGeneration(s.Item, existing, s.Source.Length == 0 ? "started" : s.Source, plan.Name, now, "start", WorkItemActions.Started);
+        return NewGeneration(s.Item, existing, s.Source.Length == 0 ? "started" : s.Source, plan.Name, now, "start", WorkItemActions.Started, s.Step);
     }
 
     static string PlanOfReopen(WorkItemState completed) => completed.Plan == WorkPlans.Redeliver ? WorkPlans.Feature : completed.Plan;
 
     // the next instance: a fresh state on the plan's first step; the decision sequence goes on across generations
-    WorkItemTransition NewGeneration(ItemId item, WorkItemState? previous, string source, string planName, DateTimeOffset now, string key, string action)
+    WorkItemTransition NewGeneration(ItemId item, WorkItemState? previous, string source, string planName, DateTimeOffset now, string key, string action, StepKind? at = null)
     {
         var plan = WorkPlans.Get(planName);
         var state = new WorkItemState { Item = item.ToString(), Generation = (previous?.Generation ?? 0) + 1, Plan = plan.Name, StartedAt = now, Source = source, Sequence = previous?.Sequence ?? 0 };
-        return Begin(state, plan, source, now, key, action);
+        return Begin(state, plan, source, now, key, action, at);
     }
 
     WorkItemTransition Redeliver(WorkItemState completed, DeliveryLost l, DateTimeOffset now)
@@ -254,12 +280,14 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         return Begin(state, WorkPlans.RedeliverPlan, state.Source, now, l.Key, WorkItemActions.Reopened);
     }
 
-    WorkItemTransition Begin(WorkItemState state, WorkPlan plan, string source, DateTimeOffset now, string key, string action)
+    WorkItemTransition Begin(WorkItemState state, WorkPlan plan, string source, DateTimeOffset now, string key, string action, StepKind? at = null)
     {
         var c = new StepContext(state, policy, docs, now);
-        state.Step = plan.First;
+        // V1.1: a card that stands in the column of a step of the plan begins there (Design, Develop or Verify: the only steps a column stands for)
+        var first = at is StepKind.Design or StepKind.Develop or StepKind.Verify && plan.Has(at.Value) ? at.Value : plan.First;
+        state.Step = first;
         c.Decide(action, source);
-        c.Enter(plan.First, "first step of the plan");
+        c.Enter(first, first == plan.First ? (at is not null && at != first ? $"the {at} column is not a step of the {plan.Name} plan: begins at its first step" : "first step of the plan") : $"the card stands in the {first} column");
         return Seal(c, null, key);
     }
 
@@ -307,7 +335,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 StartSession st => new SessionStartRequested(item, state.Generation, st.ArmId, st.Key, st.SlotId, st.Runtime, st.Host, st.Phase),
                 ChangeFootprint f => new Capacity.FootprintChanged(item, f.Key, f.Files, state.Generation),
                 LeaveTrain l => new Merge.MergeTrainLeft(item.Repository.ToString(), item, l.Reason, state.Generation),
-                ReleaseOwner r => new OwnerReleaseRequested(item, r.Key, r.Reason, state.Generation),
+                ReleaseOwner r => new OwnerReleaseRequested(item, r.Key, r.Reason, state.Generation, r.Kind),
                 _ => throw new InvalidOperationException($"no message for the command {c.GetType().Name}"),
             });
         if (state.MergeRequestEmitted && state.MergeRequest is { } m && state.Status == WorkItemStatus.Open && !state.Parked)

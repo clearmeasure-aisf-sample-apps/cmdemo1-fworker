@@ -49,6 +49,12 @@ public sealed record DocsPlanSettings(
 
     /// <summary>Whether the engine carries the feature plan: its steps run, its items are pulled by the intake and its checks are watched.</summary>
     public bool CarriesFeature => CarriedPlans.Contains(WorkPlans.Feature, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>V1.3: whether the engine carries the hotfix plan (intake.v2Plans names it): a person's <c>hotfix</c> label then starts that plan at the intake (D3).</summary>
+    public bool CarriesHotfix => CarriesFeature && CarriedPlans.Contains(WorkPlans.Hotfix, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The label a person puts on an item to start the hotfix plan (the incident saga writes it on its own hotfix item).</summary>
+    public const string HotfixLabel = "hotfix";
 }
 
 public static class DocsPlanSettingsReader
@@ -307,7 +313,7 @@ public static class DocsProjectionHandler
 /// the body only chooses the plan the item starts on; the design still decides (a design without the marker switches the item to the feature plan, which hands it to v1). Off unless intake is enabled and names the docs plan.
 /// </summary>
 public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, WorkItemIntake intake, Func<BoardRef?> board, RepoId home, DocsPlanSettings settings, IReadOnlyList<string> aiColumns,
-    Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, IItemIssueReader? issues = null)
+    Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, IItemIssueReader? issues = null, Func<IReadOnlyList<string>, string?, CancellationToken, Task<int>>? capacitySlots = null)
 {
     const int Looked = 10;
 
@@ -332,12 +338,36 @@ public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, 
             // the item's own body decides the plan it starts on
             var body = facts.Body ?? "";
             // (an item that names no marker is known to be a code change only when the engine carries the feature plan; otherwise v1's own intake takes it)
-            var plan = body.Contains(settings.DocsMarker, StringComparison.Ordinal) ? WorkPlans.Docs : settings.CarriesFeature ? WorkPlans.Feature : null;
+            // V1.3 (D3): a person's hotfix label starts the hotfix plan (top rank, no design step) where the engine carries it
+            var plan = body.Contains(settings.DocsMarker, StringComparison.Ordinal) ? WorkPlans.Docs
+                : settings.CarriesHotfix && facts.Labels.Contains(DocsPlanSettings.HotfixLabel, StringComparer.OrdinalIgnoreCase) ? WorkPlans.Hotfix
+                : settings.CarriesFeature ? WorkPlans.Feature : null;
             // W9.10h (D1): the items it depends on are met, or the intake passes the item over ("depends-on"), as v1's does (W9.10e left the items that name a dependency to v1; v1's intake now skips every item of the plans the engine takes)
             candidates.Add(new IntakeCandidate(id, true, true, facts.Labels, await DependenciesMet(id, body, homeCards, met, ct), plan));
         }
-        var d = await intake.Run(candidates, freeSlots(), designWaiting(), inFlight, ct);
-        return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason;
+        // V1.2: a candidate is pulled only where a slot is free for it (see Slots); the others stay in the column
+        var owners = Math.Max(0, freeSlots());
+        var pullable = new List<IntakeCandidate>();
+        var noRoom = new List<int>();
+        foreach (var c in candidates) if (await Slots(c, owners, ct) > 0) pullable.Add(c); else noRoom.Add(c.Item.Number);
+        var d = await intake.Run(pullable, pullable.Count > 0 ? 1 : candidates.Count == 0 ? owners : 0, designWaiting(), inFlight, ct);   // (no candidate at all: the reason is the rule's own)
+        // (the item that waits for want of capacity stays in Todo; the outcome of the job, in the status of the recurring jobs, says so)
+        var waiting = capacitySlots is not null && noRoom.Count > 0 ? $" ({string.Join(", ", noRoom.Select(n => "#" + n))} wait for capacity: no free slot of the runtime, its day budget or its hosts)" : "";
+        return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason + waiting;
+    }
+
+    /// <summary>
+    /// V1.2: the free slots for one candidate. An item of a plan that asks the scheduler for a slot (feature, hotfix) needs the scheduler's free capacity of the runtime its labels name (the runtime: label, else the routing, else
+    /// scheduler.runtime): a connected owner session is no slot for it, and an item whose runtime has no room (or is off) is passed over, whatever room octopus has. An item of the docs plan, which the plant places, may take a
+    /// connected owner session's free slot or the runtime's capacity. Where no owner session exists (tdd: its sessions are runtime sessions the plant starts) the capacity is the only term. A ledger that cannot be read counts none.
+    /// </summary>
+    async Task<int> Slots(IntakeCandidate c, int owners, CancellationToken ct)
+    {
+        var scheduled = c.Plan is { } plan && settings.Policy.Schedules(plan);
+        var own = scheduled ? 0 : owners;
+        if (capacitySlots is null) return own;
+        try { return own + Math.Max(0, await capacitySlots(c.Labels, c.Plan, ct)); }
+        catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"intake: the scheduler's free capacity could not be read ({e.GetType().Name})"); return own; }
     }
 
     /// <summary>

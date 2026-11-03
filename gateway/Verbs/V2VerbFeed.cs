@@ -9,7 +9,7 @@ using Fworker.Workflows.WorkItem;
 // W6.6 (#335), W7.3 (#340): the decision verbs of an item the WorkItemSaga owns, in the hybrid composition (seam S1, docs/design/fworker-wolverine-refactor.md 4). v1's rule script still does what the verb does (the comment, the
 // state comment, the card, the claim) and answers the session; this router then tells the saga what happened, as the inputs of its docs plan (ReviewRecorded, VerdictRecorded, StepCompleted, ...), which the saga publishes decisions,
 // timers and the merge call for. So the verb's answer is v1's and unchanged (the golden writes of a verb are the script's), the saga is never ahead of the script, and v1 can take the item back at any time with its own state intact
-// (FACTORY_V2_OFF, or the saga handing the item back). What the saga decides on top of the script, it decides alone: the merge, the demotions and parks of D5's rows are the same numbers, so they agree with the script's.
+// (the saga handing the item back). What the saga decides on top of the script, it decides alone: the merge, the demotions and parks of D5's rows are the same numbers, so they agree with the script's.
 // An event that cannot be handed to the saga (the host is down) is tried again and then dropped with a log line: the saga's lease runs out and its failure budget parks the item, which is the way a lost session ends too.
 // Only where the engine acts; an item without a saga costs one look at the ownership.
 // W7.3 adds the feature plan: its design carries a `Files:` line (the footprint of D6), the pull request of its development completion brings its changed files, and a development completion of a feature item is asked to
@@ -124,8 +124,37 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
     /// <summary>W9.4: a verb answered by a v2 route (not by the script under this router) is a sign of life of the session as well: it renews the step's lease as the calls of the script do.</summary>
     public async Task Observe(string verb, string stdin, string output)
     {
+        if (verb == "copilot-settle") { await Settled(stdin, output); return; }
         if (DocsVerbs.Activity.Contains(verb)) await Feed(verb, stdin, output);
     }
+
+    /// <summary>
+    /// copilot-settle answered "awaiting" (a coding agent's task ended with its change on a branch that is the item's pull request, or the item already has one): the script's side is the state comment, the saga's side is
+    /// <see cref="DevelopmentSettled"/>: Development is done and the checks of the pull request decide what follows. An answer of any other action says nothing the saga needs.
+    /// </summary>
+    async Task Settled(string stdin, string output)
+    {
+        if (JsonNode.Parse(output) is not JsonObject answer || Text(answer, "action") != "awaiting") return;
+        var number = Int(answer, "id");
+        if (number <= 0) number = JsonNode.Parse(stdin) is JsonObject body ? Int(body, "item") : 0;
+        void Skip(string why) => Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"v2settle\":\"skipped\",\"item\":{number},\"why\":\"{why}\"}}");
+        if (number <= 0) { Skip("no-item"); return; }
+        if (!await ownership.OwnsOrFindAsync(number)) { Skip("not-owned"); return; }
+        var id = new ItemId(home, number);
+        if ((await store.Load(id.ToString(), CancellationToken.None))?.State is not { } state) { Skip("no-state"); return; }
+        if (!state.IsOpen || state.Step != StepKind.Develop) { Skip($"step-{state.Step}"); return; }
+        if (!DocsVerbs.Fed(state, settings)) { Skip("not-fed"); return; }
+        var pr = Int(answer, "pr");
+        if (pr <= 0) { Skip("no-pr"); return; }
+        var head = Text(answer, "sha");
+        if (head.Length == 0 && heads is not null) head = await heads.HeadOf(home, pr, CancellationToken.None);
+        IReadOnlyList<string> files = heads is not null && WorkPlans.IsCode(state.Plan) ? await heads.FilesOf(home, pr, CancellationToken.None) ?? [] : [];
+        await Send(new DevelopmentSettled(id, state.Generation, $"settled|{state.ArmId}|{pr}|{head}", pr, head, files));
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"v2settle\":\"sent\",\"item\":{number},\"pr\":{pr}}}");
+    }
+
+    static string Text(JsonObject o, string name) { try { return o[name]?.ToString() ?? ""; } catch { return ""; } }
+    static int Int(JsonObject o, string name) { try { return o[name] is JsonValue v && (v.TryGetValue<int>(out var i) || (v.TryGetValue<string>(out var s) && int.TryParse(s, out i))) ? i : 0; } catch { return 0; } }
 
     // (V2Ownership.OwnsOrFindAsync: an item the set lacks is looked for in the table by its key, one read at a time for an item; a saga can start after the set was read, and a fast session would send its design to nobody)
 

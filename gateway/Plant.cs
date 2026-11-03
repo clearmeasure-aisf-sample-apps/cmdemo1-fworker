@@ -894,7 +894,6 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             d.VerbErrors.Add((g.Key.Item, g.Key.Name, g.Count(), g.GroupBy(x => x.Code).OrderByDescending(c => c.Count()).ThenBy(c => c.Key, StringComparer.Ordinal).Select(c => (c.Key, c.Count())).ToList()));
         foreach (var k in mergeRefused.Where(kv => (now - kv.Value.At).TotalMinutes > Msg.NoteMinutes).Select(kv => kv.Key).ToList()) mergeRefused.Remove(k);
         foreach (var (item, mr) in mergeRefused.OrderBy(kv => kv.Key)) d.MergeRefused.Add((item, mr.RoundTrip, mr.At));
-        AddPassUnmerged(d, now);
         // (a blocked session that went away for good is no more news: only the connected ones are reported)
         foreach (var w in workers.Values.Where(w => Blocked(w) && w.Connected && Auth.ValidName(w.Name)).OrderBy(w => w.Name, StringComparer.Ordinal)) d.BlockedSessions.Add((w.Name, w.BlockedItem, w.BlockedSince!.Value));
         if (returned.Count > 0 && (now - startedAt).TotalMinutes < Msg.RestartMinutes)
@@ -1992,6 +1991,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
                 if (kind == "own-item" && OwnerRuntime(item) != null) pin = null;   // an item a Copilot task or Cursor agent owns goes to that task only (Plant.Runtimes.cs)
+                // V1.3: an item of the scheduler holds a slot (the offer carries it); a pin that no connected session of the plant can honour is ignored, so that RouteRuntime starts the session on the slot. A pin to a runtime worker
+                // (the bot re-pins items to the worker that ran them: it takes only the item it was started for), to a worker that is gone or to one that is not connected would keep the slot, and the offer waiting for it, for ever
+                if (kind == "own-item" && !string.IsNullOrEmpty(pin) && (o["slot"]?.ToString() ?? "").Length > 0 && !(workers.TryGetValue(pin, out var pinned) && pinned.Connected && !RuntimeWorker(pinned))) pin = null;
                 if (assignments.TryGetValue(key, out var ex))
                 {
                     // the offer predates the acceptance: the sweep read the board before the accept (issue 75: a sweep takes tens of seconds and reads
@@ -2007,7 +2009,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 var a = ex != null && !ex.Accepted ? ex : new Assignment
                 {
                     Id = "a-" + Interlocked.Increment(ref counter).ToString("x") + DateTime.UtcNow.Ticks.ToString("x")[^4..], Key = key, Item = item, Column = o["column"]?.ToString() ?? "",
-                    Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
+                    Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" || takenBackItems.Remove(item) ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
                 if (ReferenceEquals(a, ex) && o["column"]?.ToString() is { Length: > 0 } nc) a.Column = nc;   // a waiting assignment follows its card (issue 97)
                 if (kind == "own-item") { a.Slot = o["slot"]?.ToString() ?? ""; a.SlotRuntime = a.Slot.Length > 0 ? o["runtime"]?.ToString() ?? "" : ""; a.Arm = o["arm"]?.ToString() ?? ""; }   // W9.10j: the scheduler's slot of a saga item
@@ -2284,13 +2286,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 ["runtimes"] = RuntimesStatus(),
                 ["pinFallbackMinutes"] = PinFallbackMinutes,
                 ["pinsSetAside"] = new JsonObject(pinFallback.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
-                ["held"] = HeldJson(),
                 ["unowned"] = UnownedJson(),
                 ["orphans"] = new JsonArray(orphanSince.Where(kv => !ownerOf.ContainsKey(kv.Key)).OrderBy(kv => kv.Value).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key,
                     ["column"] = Gated(assignments.Values.FirstOrDefault(a => a.Item == kv.Key && a.Kind == "own-item")?.Column), ["since"] = kv.Value.ToString("o"),
                     ["minutes"] = (int)(DateTime.UtcNow - kv.Value).TotalMinutes }).ToArray()),
                 ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
-                ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["sessionsBlocked"] = sessionsBlocked,
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["mode"] = w.Runtime == "local" ? "manual" : w.Runtime is "cursor-cloud" or "copilot-cloud" ? "api" : "hosted", ["role"] = "seat", ["execution"] = RuntimeOf(w.Name)?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
