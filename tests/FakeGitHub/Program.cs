@@ -1082,7 +1082,8 @@ sealed class World
             return (200, J(("Items", new JsonArray(new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) }.Select(e => (JsonNode)J(("Id", $"Deployments-{r.Id}-{e.Item1}"), ("ReleaseId", r.Id), ("EnvironmentId", e.Item1), ("TaskId", $"{r.Id}|{e.Item1}"), ("Created", r.At.AddSeconds(e.Item2).ToString("o")))).ToArray()))));
         }
         if ((pm = Regex.Match(path, @"^api/Spaces-355/tasks/(ServerTasks-P?\d+)$")).Success && octoDeps.FirstOrDefault(x => x.TaskId == pm.Groups[1].Value) is { } od)
-            return (200, J(("Id", od.TaskId), ("State", od.State), ("IsCompleted", od.State is "Success" or "Failed" or "Canceled" or "TimedOut"), ("CompletedTime", od.Done?.ToString("o"))));
+            // as Octopus: a deployment paused at its manual intervention (the Sign-off step) is State Queued with a StartTime and HasPendingInterruptions, not Executing
+            return (200, J(("Id", od.TaskId), ("State", od.Pending && od.State == "Executing" ? "Queued" : od.State), ("StartTime", od.Pending && od.State == "Executing" ? od.Created.ToString("o") : null), ("HasPendingInterruptions", od.Pending), ("IsCompleted", od.State is "Success" or "Failed" or "Canceled" or "TimedOut"), ("CompletedTime", od.Done?.ToString("o"))));
         if (Regex.IsMatch(path, @"^api/Spaces-355/projects/(cmdemo1-ui|Projects-1)$")) return (200, J(("Id", "Projects-1"), ("Name", "cmdemo1-ui")));
         var made = releases.Where(r => r.At <= DateTime.UtcNow).ToList();   // a release appears once the workflow that makes it has run
         if (path == "api/Spaces-355/projects/Projects-1/releases")

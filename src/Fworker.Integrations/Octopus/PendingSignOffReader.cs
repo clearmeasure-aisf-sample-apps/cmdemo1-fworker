@@ -25,7 +25,8 @@ public sealed class PendingSignOffReader(IOctopusReader reader, string space, st
             var depId = $"{d?["Id"]}"; var taskId = $"{d?["TaskId"]}";
             if (depId == "" || taskId == "") continue;
             var task = await reader.Get($"api/{space}/tasks/{taskId}", ct);
-            if ($"{task?["State"]}" != "Executing") continue;   // (a Sign-off is pending only while the deployment executes)
+            var taskState = $"{task?["State"]}";
+            if (taskState != "Executing" && !(taskState == "Queued" && task?["HasPendingInterruptions"]?.GetValue<bool>() == true)) continue;   // (a Sign-off is pending while the deployment executes; a deployment paused at it is reported as Queued with HasPendingInterruptions)
             var interruptions = (await reader.Get($"api/{space}/interruptions?regarding={taskId}&pendingOnly=true&take=20", ct))?["Items"] as JsonArray ?? [];
             var pending = interruptions.Where(i => i?["IsPending"]?.GetValue<bool>() != false && $"{i?["Id"]}" is { Length: > 0 }).ToList();
             if (pending.Count == 0) continue;
