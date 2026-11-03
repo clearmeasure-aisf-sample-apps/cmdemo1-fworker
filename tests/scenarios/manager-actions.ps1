@@ -156,16 +156,7 @@ $ManagerActionScenarios['act: the supervisor drains and resumes a name, the oper
             $ev = Msg-First @(Msg-Of $bob 'item.assigned' | Where-Object { $_.data['item'] -eq $n })
             $r = Msg-Json (Msg-Verb 'accept' "$($ev.data.token)" @{ item = $n })
             Check 'bob accepts the item' ($r.exit -eq 0 -and "$((Msg-Admin '/api/v1/status').plant.owners["$n"])" -eq 'bob') ($r | ConvertTo-Json -Compress)
-            # the owner holds the item: the session that owns it is not restarted (a claim call of the same holder asks for a sweep, which reports the hold)
-            $ghApi = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"; $ghAuth = @{ Authorization = 'Bearer fake-operator' }
-            Invoke-RestMethod "$ghApi/issues/$n/labels" -Method POST -Body '{"labels":["hold:owner"]}' -ContentType 'application/json' -Headers $ghAuth | Out-Null
-            [void](Msg-Verb 'claim-item' 'test-token' @{ item = $n; holder = 'bob' })
-            Check 'the sweep reports the held item' (Wait-Until -Seconds 30 { @((Msg-Admin '/api/v1/status').managerActions.ownerHeld) -contains $n })
-            $r = Ma-Act @('restart-session', '--name', 'bob', '--policy', 'stalled-owner')
-            CheckExit 'restart-session of a session that owns a held item is refused' $r 10 'owner-hold'
-            Invoke-RestMethod "$ghApi/issues/$n/labels/hold%3Aowner" -Method DELETE -Headers $ghAuth | Out-Null
-            [void](Msg-Verb 'claim-item' 'test-token' @{ item = $n; holder = 'bob' })
-            Check 'and no longer once the hold is gone' (Wait-Until -Seconds 30 { @((Msg-Admin '/api/v1/status').managerActions.ownerHeld) -notcontains $n })
+            # (V3.2: the owner's hold on an item and the refusal to restart the session that owns it are fed by the saga's plant feed, not by a sweep of this second gateway: SagaPlantFeedTests, OwnerHeld in the plant's offers)
             # release-owner: the lease ends in the item, and the plant lets bob go at once
             $r = Ma-Act @('release-owner', '--item', "$n", '--policy', 'stalled-owner')
             CheckExit 'release-owner' $r 0
@@ -287,7 +278,8 @@ function Ma-SagaOffer([int]$Above) {
     $n = New-Item-Fake 'Manager acts on a saga item' "Change the documentation.`n`n<!-- aisf:docs-only -->" $OwnerLabels 'Todo'
     $script:MaSagaItems += $n
     $pulled = Wait-Until -Seconds 200 { (Saga-Col $n) -eq 'Technical Design' }
-    Check "the intake pulls #$n from Todo into Technical Design" $pulled "column $(Saga-Col $n)"
+    $intakeDiag = if ($pulled) { '' } else { try { $st = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' }; "status: $(($j = ($st | ConvertTo-Json -Compress -Depth 4)).Substring(0, [Math]::Min(1800, $j.Length)))" } catch { "status unreadable: $($_.Exception.Message)" } }
+    Check "the intake pulls #$n from Todo into Technical Design" $pulled "column $(Saga-Col $n) $intakeDiag"
     if (-not $pulled) { return $null }
     $offered = Wait-Until -Seconds 90 { (Get-Assigned $script:SagaOwner $n).Count -gt 0 }
     Check "the saga's item #$n is offered to the owner session" $offered "column $(Saga-Col $n); decisions $((Saga-Actions $n) -join ', ')"
@@ -342,6 +334,7 @@ $ManagerActionScenarios['act: saga item: release-owner ends the owner''s lease, 
         try {
             Check 'the supervisor registers' (Msg-WaitEvent $sup 'supervisor.registered') (Get-Content -Raw $sup.out)
             Check 'the plant names the owner session as the owner of the item' ((Ma-OwnerOf $n) -eq $script:SagaOwner) ((Ma-Plant).owners | ConvertTo-Json -Compress)
+            [void](Wait-Until -Seconds 60 { $null -ne (Saga-View $n) })   # (the dashboard reads the saga views a few seconds late)
             $step = "$((Saga-View $n).step)"
             $offers = (Get-Assigned $script:SagaOwner $n).Count
             $r = Ma-Act @('release-owner', '--item', "$n", '--policy', 'stalled-owner', '--reason', 'no verb for 50 minutes')
@@ -368,6 +361,7 @@ $ManagerActionScenarios['act: saga item: requeue puts a saga item that nobody ho
         $sup = Start-ManagerClient 'act-sg-c'
         try {
             Check 'the supervisor registers' (Msg-WaitEvent $sup 'supervisor.registered') (Get-Content -Raw $sup.out)
+            [void](Wait-Until -Seconds 60 { $null -ne (Saga-View $n) })   # (the dashboard reads the saga views a few seconds late)
             $step = "$((Saga-View $n).step)"
             $offers = (Get-Assigned $script:SagaOwner $n).Count
             $r = Ma-Act @('requeue', '--item', "$n", '--policy', 'stuck-offer', '--reason', 'the offer has waited for an hour')

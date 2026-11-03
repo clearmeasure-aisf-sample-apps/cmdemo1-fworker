@@ -585,21 +585,28 @@ function Wait-SweepGap([double]$Fresh = 0) {
         Start-Sleep -Milliseconds 100
     }
 }
+# Empties the tables that hold per-item state of the engine (the sagas, their history, the merge and delivery records, the idempotency records, the board memory) in the suite's database. Test isolation only: a scenario starts on a board
+# of its own (the fake's reset), and the gateway reads the tables again at its next pass.
+function Reset-SagaState {
+    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) { $bin = Join-Path $script:Root 'gateway/bin/Release/net10.0'; $rt = if ($IsWindows) { 'win' } else { 'unix' }
+        # (the managed assembly of the platform; its dependencies are the gateway's own, resolved from the same folder)
+        [AppDomain]::CurrentDomain.add_AssemblyResolve({ param($sender, $e) $f = Join-Path $bin "$(($e.Name -split ',')[0]).dll"; if (Test-Path $f) { [Reflection.Assembly]::LoadFrom($f) } })
+        Add-Type -Path (Join-Path $bin "runtimes/$rt/lib/net9.0/Microsoft.Data.SqlClient.dll") }
+    $tables = 'WorkItems', 'OpenInstances', 'ItemHistory', 'ProjectionVersions', 'MergeTrains', 'MergedItems', 'DeliveredTo', 'Correlations', 'IngressDedup', 'BoardSeen', 'QcEnvironments', 'IdempotencyClaims', 'IdempotencyLedger', 'CopilotReservations'
+    $sql = ($tables | ForEach-Object { "IF OBJECT_ID(N'factory.$_') IS NOT NULL DELETE FROM factory.$_;" }) -join "`n"
+    $c = [Microsoft.Data.SqlClient.SqlConnection]::new($script:V2Connection)
+    try { $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = 60; [void]$cmd.ExecuteNonQuery() } finally { $c.Dispose() }
+}
+
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $script:Current = $Name; Write-Host "  $Name"
     $tmStart = [Diagnostics.Stopwatch]::StartNew(); $tmChecks = $script:Checks; $tmFailed = $script:Failures.Count
     $goldenMode = Get-GoldenMode
     try {
         try { Wait-SweepGap } catch { }
-        # V3.2: every open card has a saga, and a saga outlives the fake's reset (the reconciler never sees a card vanish): an item left open by the scenario before would be offered to this scenario's sessions.
-        # So the scenario before ends them the way GitHub does: its open issues are closed, and the board reconciler publishes the closed cards (its pass is seconds in the tests) before the reset.
-        try {
-            $ghBase = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
-            $openIssues = @(Invoke-RestMethod "$ghBase/issues?state=open&per_page=100" -Headers @{ Authorization = 'Bearer fake-operator' } -TimeoutSec 5 | Where-Object { $_ -and -not $_.pull_request })
-            foreach ($oi in $openIssues) { try { [void](Invoke-RestMethod "$ghBase/issues/$($oi.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body '{"state":"closed"}' -TimeoutSec 5) } catch { } }
-            if ($openIssues.Count -gt 0) { Start-Sleep -Seconds 4 }
-        } catch { }
         Fake 'reset' @{} | Out-Null
+        # V3.2: every open card has a saga in the suite's database, keyed by the issue number; the fake's reset restarts the numbers, so the sagas of the scenario before would meet the issues of this one
+        if ($script:V2Connection) { try { Reset-SagaState } catch { Check 'the scenario starts with no saga of an earlier one' $false $_.Exception.Message } }
         # a suite whose gateway keeps state in a database across the scenarios (the delivery train of -Engine v2) starts each scenario on a gateway of its own state: $script:BeforeScenario, after the reset of the fake
         if ($script:BeforeScenario) { try { & $script:BeforeScenario } catch { Check 'the scenario starts on a fresh gateway' $false $_.Exception.Message } }
         # the record of this scenario's writes starts after the reset (tests/scenarios/golden/README.md)

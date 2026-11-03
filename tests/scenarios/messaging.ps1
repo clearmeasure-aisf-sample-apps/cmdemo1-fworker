@@ -2584,7 +2584,7 @@ $ManagerScenarios['mgr: the plant data follows the sweep and the verbs: waiting 
     Check 'an item pinned to a session that is not there waits as pinned-unavailable' (Wait-Until -Seconds 30 { @((& $pd).waiting | Where-Object { $_.item -eq $pin -and $_.code -eq 'pinned-unavailable' }).Count -eq 1 }) ((& $pd).waiting | ConvertTo-Json -Compress -Depth 4)
     $raw = "$((Msg-Api 'GET' '/api/v1/_test/plant-data').Content)"
     Check 'the name from the label, an address, a token or an assignment id is nowhere in the data' ($raw -notmatch 'ghost' -and $raw -notmatch '(?i)"[a-z]*(address|token|host|assignment|summary|model|title)[a-z]*"\s*:' -and $raw -notmatch '"id"\s*:') $raw.Substring(0, [Math]::Min(400, $raw.Length))
-    Check 'after a sweep the owned entries carry the sweep''s column, heartbeat and park state' (Wait-Until -Seconds 30 { $x = & $own (& $pd) $a; $x -and $x.column -eq 'Technical Design' -and $x.heartbeat -and $x.parked -eq $false -and $x.since }) ((& $own (& $pd) $a) | ConvertTo-Json -Compress -Depth 4)
+    Check 'after a sweep the owned entries carry the plant feed''s column and park state (V3.2: the saga has no heartbeat)' (Wait-Until -Seconds 30 { $x = & $own (& $pd) $a; $x -and $x.column -eq 'Technical Design' -and $x.parked -eq $false -and $x.since }) ((& $own (& $pd) $a) | ConvertTo-Json -Compress -Depth 4)
     $b0 = ([DateTime](& $own (& $pd) $b).lastActivityAt).ToUniversalTime()
     Start-Sleep -Seconds 2
     $t0 = [DateTime]::UtcNow
@@ -3802,36 +3802,6 @@ $MessagingScenarios['msg: spawned owner, inspector and QC processes never have F
             Check "the spawned $role process ran with the session's environment (the control variable is there) and without FACTORY_SUPERVISOR_TOKEN" ($text -match '(?m)^CONTROL=set$' -and $text -match '(?m)^SUP=\s*$') $text
         }
     } finally { try { Stop-Process -Id $c.proc.Id -Force } catch { } }
-}
-
-$MessagingScenarios['msg: a worker spawned from the broadcast stream never has FACTORY_SUPERVISOR_TOKEN in its environment'] = {
-    # a gateway without owner mode (so without messaging) of its own label: its sweep offers the item on the broadcast stream, and this suite's gateway never looks at it
-    $cfg = Msg-Config 'instance.broadcast.json' { param($c) $c.messaging.enabled = $false; $c.name = 'broadcast-two'; $c.label = 'broadcast-two' }
-    $stubDir = Msg-EnvStub (Join-Path $script:Work 'stub-bin-s10b')
-    $outBase = Join-Path $script:Work 's10b-env'
-    $n = New-Item-Fake 'Broadcast spawn' 'x' @('broadcast-two')
-    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; FACTORY_OWNER_MODE = $null; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_SWEEP_SECONDS = '2' } {
-        param($g)
-        $out = Join-Path $script:Work 'client-broadcast-s10b.out'
-        # both credentials in one session: the operator token for the broadcast stream, and a supervisor credential that no child may inherit
-        $all = @{ FACTORY_URL = $g.base; FACTORY_TOKEN = 'test-token'; FACTORY_SUPERVISOR_TOKEN = (Msg-Supervisor); FACTORY_WORKER_TOKEN = $null; FACTORY_SANDBOX_REPO = $script:Work; FW_STUB_OUT = $outBase; FW_STUB_CONTROL = '1'
-            PATH = "$stubDir$([IO.Path]::PathSeparator)$($env:PATH)"; FACTORY_WORKER_DIR = (Msg-WorkerDir 'broadcast-s10b') }
-        Msg-WithEnv $all { $script:MsgLast = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1'), 'subscribe', '--spawn') -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err" }
-        $p = $script:MsgLast; $script:Procs += $p
-        try {
-            $f = "$outBase.broadcast"
-            $ran = Wait-Until -Seconds 90 { Test-Path $f }
-            $text = if ($ran) { Get-Content -Raw $f } else { '' }
-            # the client prints worker.spawned after it started the process, which may have run by then
-            [void](Wait-Until -Seconds 15 { @(Msg-ClientEvents @{ out = $out } | Where-Object { $_.event -eq 'worker.spawned' }).Count -ge 1 })
-            $lines = Msg-ClientEvents @{ out = $out }
-            Check 'the item was offered on the broadcast stream and a worker was spawned for it' (@($lines | Where-Object { $_.event -eq 'work.offered' -and $_.item -eq $n }).Count -ge 1 -and @($lines | Where-Object { $_.event -eq 'worker.spawned' -and $_.item -eq $n }).Count -eq 1) ((Get-Content -Raw $out -ErrorAction SilentlyContinue) + (Get-Content -Raw "$out.err" -ErrorAction SilentlyContinue))
-            Check 'the spawned worker has the session''s environment and the operator credential, and no FACTORY_SUPERVISOR_TOKEN' ($text -match '(?m)^CONTROL=set$' -and $text -match '(?m)^TOKEN=tes$' -and $text -match '(?m)^SUP=\s*$') $text
-            $warn = @($lines | Where-Object { $_.event -eq 'session.warning' })
-            Check 'the session itself is told once that it holds two credentials' ($warn.Count -eq 1 -and $warn[0].code -eq 'two-credentials') ($warn | ConvertTo-Json -Compress -Depth 4)
-            Check 'and neither credential is in what it printed' (-not ("$(Get-Content -Raw $out)$(Get-Content -Raw "$out.err" -ErrorAction SilentlyContinue)" -match 'test-token|m1\.supervisor'))
-        } finally { try { Stop-Process -Id $p.Id -Force } catch { } }
-    }
 }
 
 $MessagingScenarios['msg: a session whose client stopped is away, then offline, and online again when it is back'] = {

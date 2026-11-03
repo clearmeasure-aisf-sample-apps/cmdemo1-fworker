@@ -105,7 +105,9 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         foreach (var (item, column) in OffersOf(s))
             if (!hasOwner(item) && (only is null || only.Contains(item)) && OwnerHeld?.Invoke(item) != true)
             {
-                var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
+                // V3.2: a step whose session was lost before (the lease ran out and the saga began it again) is a relaunch: the session resumes the work of the one before it (the plant reads mode "resume" from the reason)
+                var relaunch = s.States.Any(st => ItemId.TryParse(st.Item, out var sid) && sid.Number == item && sid.Repository == home && (st.FailuresOf(st.Step) > 0 || st.LaunchesOf(st.Step) > 0));
+                var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = relaunch ? "relaunch" : "handoff", ["v2"] = true };
                 // V1.3: a worker: label pins the item to that worker, as the sweep's pins do for v1's items (Plant.Plan reads it from the offers of an offer made outside a sweep, see PlanSagaOffers)
                 if (PinOf?.Invoke(item) is { Length: > 0 } pin) node["pin"] = pin;
                 // W9.10j: the slot the scheduler granted: the plant starts the session on its runtime, under the saga's arm, and the manager keeps the execution apart from its own counts

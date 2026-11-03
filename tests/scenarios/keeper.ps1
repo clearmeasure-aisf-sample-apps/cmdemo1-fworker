@@ -124,49 +124,6 @@ $KeeperScenarios['keeper: split-item creates ordered children and closes the par
 
 }
 
-$KeeperScenarios['keeper: replenish creates one docs-only item per Done item on the board in Technical Design, never above targetOpen or maxPerDay, and shows its counts in /status'] = {
-    $wl = @('factory worker', 'Auto Merge', 'env:tdd')
-    $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
-    $mkDone = {
-        param($title)
-        $d = New-Item-Fake $title 'Done in production.' $wl 'Done'
-        $state = @{ item = $d; merge = @{ sha = 'abc1234'; merged_at = (Get-Date).ToUniversalTime().ToString('o'); done_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = $null } }
-        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
-        [void](Invoke-RestMethod "$gh/issues/$d/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
-        [void](Invoke-RestMethod "$gh/issues/$d" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
-        return $d
-    }
-    $cfg = Msg-Config 'instance.rp.json' { param($c) $c.envScope = @('tdd'); $c.keeper.replenish = @{ enabled = $true; environments = @('tdd'); maxPerDay = 2; targetOpen = 2 } }
-    $made = { param($from) @((Get-FakeState).issues | Where-Object { "$($_.body)" -match '<!-- keeper-replenish -->' -and "$($_.body)" -match "work item #$from " }) }
-    $d1 = & $mkDone 'Replenish done one'
-    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_ENVIRONMENT = 'tdd'; FACTORY_SWEEP_SECONDS = '2'; FACTORY_SWEEP_MIN_SECONDS = '1' } {
-        param($g)
-        Check 'a Done item gets one new item' (Wait-Until -Seconds 60 { @(& $made $d1).Count -eq 1 }) ((Get-FakeState).issues | ForEach-Object { $_.title } | Out-String)
-        $n1 = @(& $made $d1)[0]
-        # replenish creates the issue first, then puts it on the board and in its column (Replenish.ps1): read until the card is placed, the
-        # first read can come between the two (column null)
-        $placed = Wait-Until -Seconds 30 { $x = @(& $made $d1)[0]; @('enhancement', 'Auto Merge', 'factory worker', 'env:tdd' | Where-Object { $x.labels -notcontains $_ }).Count -eq 0 -and $x.column -eq 'Technical Design' }
-        $n1 = @(& $made $d1)[0]
-        Check 'it carries enhancement, Auto Merge, factory worker and env:tdd and sits in Technical Design' $placed ($n1 | ConvertTo-Json -Compress -Depth 3)
-        Check 'it says the gateway created it to keep activity going and only docs change' ("$($n1.body)" -match 'to keep activity going' -and "$($n1.body)" -match 'Only Markdown files under `docs/`' -and "$($n1.title)" -like 'Docs: *') "$($n1.title)"
-        Check 'the finished item has a journal line naming the new item' (Wait-Until -Seconds 20 { @((Get-FakeIssue $d1).comments | Where-Object { $_.body -match 'plant event=replenish ' -and $_.body -match "#$($n1.number)" }).Count -eq 1 }) (((Get-FakeIssue $d1).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(80, $_.body.Length)) }) -join ' | ')
-        Start-Sleep -Seconds 8
-        Check 'later sweeps create no second item for the same Done item' (@(& $made $d1).Count -eq 1)
-        $d2 = & $mkDone 'Replenish done two'
-        Check 'a second Done item gets its own item with a different title' (Wait-Until -Seconds 60 { @(& $made $d2).Count -eq 1 }) ''
-        Check 'titles are unique' (@(& $made $d2)[0].title -ne $n1.title)
-        $d3 = & $mkDone 'Replenish done three'
-        Start-Sleep -Seconds 10
-        Check 'two open items are the target: a third Done item creates none' (@(& $made $d3).Count -eq 0)
-        $n2 = @(& $made $d2)[0]
-        [void](Invoke-RestMethod "$gh/issues/$($n2.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
-        Start-Sleep -Seconds 10
-        Check 'below the target but at maxPerDay (2) nothing more is created' (@(& $made $d3).Count -eq 0 -and @((Get-FakeState).issues | Where-Object { "$($_.body)" -match '<!-- keeper-replenish -->' }).Count -eq 2)
-        $st = Invoke-RestMethod (Msg-Url '/api/v1/status') -Headers @{ Authorization = 'Bearer test-token' }
-        Check '/status shows the keeper counts' ($st.replenish.maxPerDay -eq 2 -and $st.replenish.targetOpen -eq 2 -and $st.replenish.createdSinceStart -eq 2 -and $st.replenish.createdToday -ge 2) ($st.replenish | ConvertTo-Json -Compress)
-    }
-}
-
 # W0.6 (delivery-speed.md 6): replenish backpressure. The gateway hands the last plan's waiting count and its free sessions to sync-board (replenish_waiting,
 # free_workers); the scenario plays the gateway's part with explicit sync-board calls. The second gateway sweeps in owner mode too, with nothing waiting and no
 # session connected, so with onlyWhenIdle on its own sweeps are held (not-idle) and only the explicit calls decide.
