@@ -80,6 +80,7 @@ it is said again only when the reasons change). The other items of the release a
   the reads window decide the creation only; they are not asked at the Sign-off. A deployment someone else created is never answered.
 - A deployment that ended `Failed` (or aborted) is explained once and not deployed again by the gateway: the operator deploys again, or the
   item goes back to Development. The prod deployment's success is what settle already watches: it moves the items to Done ("Delivered to Prod").
+- One bounded exception (2026-11-03): a deployment the train asked for and then aborted itself at the Sign-off (note "Aborted by the factory worker gateway", e.g. the wait limit with unreadable gates) is judged once more like any open release and, if it qualifies, asked for again with a new request number (key `PromoteRelease|...|<n+1>`); `Retried` ("version|environment") is kept in the train state so a restart or replay cannot make it twice. A step that failed, a person's abort and a second failure hold the release as above. A failed own deployment also clears its entry in `Requested`/`FirstRequested`.
 
 ## Refusals
 

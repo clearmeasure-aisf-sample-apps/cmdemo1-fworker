@@ -235,6 +235,73 @@ public class DeliveryTrainTests
         Assert.DoesNotContain(f.Of<PromoteRelease>(), c => c.Version == "1.0.2");
     }
 
+    static readonly ItemMergedGates HoldGates = new(true, "hold:owner", true, false, false, ["#7 carries the 'hold:owner' label"]);
+    static readonly ItemMergedGates OkGates = new(true, "", true, false, false, []);
+
+    /// <summary>The train asks for 1.0.2, its deployment waits at the Sign-off, the gateway aborts it (an item got a hold), and the deployment ends Failed.</summary>
+    static async Task GatewayAbortedDeployment(TrainFixture f, string id)
+    {
+        await f.Send(new TrainGatesChanged(f.Key, "acme/orders#7", HoldGates));
+        await f.Deploy("1.0.2", "Uat", "Started", id);
+        await f.Send(new TrainSignOffAsked(f.Key, "I-" + id, id, "T-" + id, "Releases-1.0.2", "1.0.2", "Uat", null, f.Now));
+        Assert.StartsWith("Aborted by the factory worker gateway", Assert.Single(f.Of<AnswerSignOff>(), a => a.InterruptionId == "I-" + id).Notes);
+        await f.Deploy("1.0.2", "Uat", "Failed", id);
+    }
+
+    static Task GatesAreFine(TrainFixture f) => f.Send(new TrainGatesChanged(f.Key, "acme/orders#7", OkGates));
+
+    [Fact]
+    public async Task ADeploymentTheGatewayAbortedItself_IsAskedForOnce_AndASecondFailureHoldsTheRelease()
+    {
+        var f = await OneRelease(); await f.Mature();
+        Assert.Equal("PromoteRelease|orders|1.0.2|uat|1", Assert.Single(f.Of<PromoteRelease>()).IdempotencyKey);
+        await GatewayAbortedDeployment(f, "D-first");
+        Assert.Empty(f.State.Requested);   // the bookkeeping clear still holds
+        await GatesAreFine(f);
+        await f.After(TimeSpan.FromSeconds(30));
+        Assert.Equal(["PromoteRelease|orders|1.0.2|uat|1", "PromoteRelease|orders|1.0.2|uat|2"], f.Of<PromoteRelease>().Select(c => c.IdempotencyKey).ToList());
+        Assert.Contains("1.0.2", f.State.Requested.Keys);
+        Assert.Contains("1.0.2|uat", f.State.Retried);
+        // the retry's deployment is the train's own: a second abort of it is answered, and its failure holds the release for a person
+        await GatewayAbortedDeployment(f, "D-second");
+        Assert.Empty(f.State.Requested);
+        await GatesAreFine(f);
+        Assert.Equal("waiting", f.LastDecision!.Action);
+        Assert.Equal(["its deployment to Uat ended Failed (D-second); the operator deploys it again, or the item goes back to Development"], f.LastDecision.Reasons);
+        f.All.Clear();
+        await f.After(TimeSpan.FromMinutes(10)); await f.After(TimeSpan.FromMinutes(10));
+        Assert.Empty(f.Of<PromoteRelease>());
+    }
+
+    [Fact]
+    public async Task AStepThatFailed_OrAPersonsAbort_IsNotRetried()
+    {
+        var f = await OneRelease(); await f.Mature();
+        await f.Deploy("1.0.2", "Uat", "Started", "D-step");
+        await f.Send(new TrainSignOffAsked(f.Key, "I-1", "D-step", "T-1", "Releases-1.0.2", "1.0.2", "Uat", null, f.Now));   // (a person aborts it before the gateway answers: the deployment ends Failed with no answer of ours)
+        await f.Deploy("1.0.2", "Uat", "Failed", "D-step");
+        Assert.Contains("ended Failed (D-step)", f.LastDecision!.Reasons[0]);
+        f.All.Clear();
+        await f.After(TimeSpan.FromMinutes(10)); await f.After(TimeSpan.FromMinutes(10));
+        Assert.Empty(f.Of<PromoteRelease>());
+        Assert.Empty(f.State.Retried);
+    }
+
+    [Fact]
+    public async Task TheRetry_IsNotMadeAgain_ByAReplayOrARestart()
+    {
+        var f = await OneRelease(); await f.Mature();
+        await GatewayAbortedDeployment(f, "D-first"); await GatesAreFine(f);
+        await f.After(TimeSpan.FromSeconds(30));
+        Assert.Contains(f.Of<PromoteRelease>(), c => c.IdempotencyKey.EndsWith("|2"));
+        // the events of the first deployment come again (a replay), then the retry's own deployment fails with the gateway's abort once more
+        await f.Deploy("1.0.2", "Uat", "Started", "D-first"); await f.Deploy("1.0.2", "Uat", "Failed", "D-first");
+        f.All.Clear();
+        await f.After(TimeSpan.FromMinutes(10)); await f.After(TimeSpan.FromMinutes(10));
+        Assert.DoesNotContain(f.Of<PromoteRelease>(), c => c.IdempotencyKey.EndsWith("|3"));
+        Assert.Single(f.State.Retried);
+    }
+
     [Fact]
     public async Task AReleaseThatWaitsForThePreviousEnvironment_NamesTheItemsOfItsCommit_SoTheirJournalsCanSayWhy()
     {
