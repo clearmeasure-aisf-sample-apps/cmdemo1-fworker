@@ -166,6 +166,8 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 }
                 if (d.Phase != "Started" && !have.Completed) { have.Phase = d.Phase; have.FinishedAt = d.At; }
                 if (have.TaskId.Length == 0) have.TaskId = d.TaskId;
+                // read from Octopus (the interruption's resolved note), so a deployment the gateway aborted before this state knew the flag (another process) is told too
+                if (d.GatewayAborted == true && key == p.Environment && have.Completed) have.GatewayAborted = true;
                 if (key == p.Environment && have.Completed) s.SignOffs.RemoveAll(x => x.Version == d.Version);   // the Sign-off ended with the deployment
                 // the train's request ended without success: it is settled (the release stays blocked by the failed deployment itself, the skip of failedHere); RequestNumbers stays, so a fresh request gets a new key
                 if (key == p.Environment && have.Completed && have.Phase != "Succeeded") { s.Requested.Remove(d.Version); s.FirstRequested.Remove(d.Version); }

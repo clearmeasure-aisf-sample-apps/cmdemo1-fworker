@@ -274,6 +274,24 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task AFailureSeenFirstAsAlreadyFailed_WithTheGatewayAbortedFlag_GetsExactlyOneRetry()
+    {
+        // the previous process aborted the Sign-off and the train's state has no flag; Octopus tells it with the Failed event
+        var f = await OneRelease(); await f.Mature();
+        await f.Deploy("1.0.2", "Uat", "Started", "D-old");
+        await f.Deploy("1.0.2", "Uat", "Failed", "D-old");
+        Assert.Empty(f.State.Requested);
+        await f.Send(new TrainDeploymentSeen(f.Key, "D-old", "T-D-old", "Releases-1.0.2", "1.0.2", "Uat", "Failed", null, f.Now, true));
+        await f.After(TimeSpan.FromSeconds(30));
+        Assert.Equal(["PromoteRelease|orders|1.0.2|uat|1", "PromoteRelease|orders|1.0.2|uat|2"], f.Of<PromoteRelease>().Select(c => c.IdempotencyKey).ToList());
+        // the same fact again (a replay) does not ask a third time
+        await f.Send(new TrainDeploymentSeen(f.Key, "D-old", "T-D-old", "Releases-1.0.2", "1.0.2", "Uat", "Failed", null, f.Now, true));
+        await f.After(TimeSpan.FromMinutes(10));
+        Assert.DoesNotContain(f.Of<PromoteRelease>(), c => c.IdempotencyKey.EndsWith("|3"));
+        Assert.Single(f.State.Retried);
+    }
+
+    [Fact]
     public async Task AStepThatFailed_OrAPersonsAbort_IsNotRetried()
     {
         var f = await OneRelease(); await f.Mature();

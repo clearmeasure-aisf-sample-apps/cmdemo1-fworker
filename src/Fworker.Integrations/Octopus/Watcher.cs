@@ -108,6 +108,21 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
         return releases[id] = new Rel(id, $"{r?["Version"]}", ReleaseCommit(r));
     }
 
+    /// <summary>The note the gateway answers an aborted Sign-off with starts with this (the train's AnswerNow).</summary>
+    public const string GatewayAbortNote = "Aborted by the factory worker gateway";
+
+    /// <summary>Whether a resolved interruption of the task carries the gateway's own abort note (not pending; the note is in the interruption or in the values of its form). A person's abort has another note.</summary>
+    async Task<bool> GatewayAbortedSignOff(string space, string taskId, CancellationToken ct)
+    {
+        foreach (var i in (await Read($"api/{space}/interruptions?regarding={taskId}&take=20", ct))?["Items"] as JsonArray ?? [])
+        {
+            if (i?["IsPending"]?.GetValue<bool>() == true) continue;
+            IEnumerable<JsonNode?> candidates = [i?["Notes"], i?["Resolution"], .. (i?["Form"]?["Values"] as JsonObject)?.Select(kv => kv.Value) ?? []];
+            if (candidates.Any(v => v is JsonValue j && j.TryGetValue<string>(out var s) && s.StartsWith(GatewayAbortNote, StringComparison.Ordinal))) return true;
+        }
+        return false;
+    }
+
     /// <summary>One read of Octopus. False when the poll ended early on its call budget; an Octopus failure throws <see cref="OctopusReadException"/> after the events already published.</summary>
     public async Task<bool> Poll(CancellationToken ct = default)
     {
@@ -160,7 +175,17 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
                 var state = $"{task["State"]}"; if (PhaseOf(state) is not { } phase) continue;
                 var owner = $"D:{depId}";
                 var startedKey = $"octopus:deployment:{depId}:{OctopusDeploymentPhase.Started}";
-                if (phase != OctopusDeploymentPhase.Started && !Has(owner, startedKey) && Old(d)) { finished.Add(depId); continue; }   // ended before the watcher began
+                if (phase != OctopusDeploymentPhase.Started && !Has(owner, startedKey) && Old(d))
+                {
+                    // ended before the watcher began: not replayed, unless it is a failure the gateway itself caused by aborting its Sign-off (a train that never knew it, another process's abort, is told once, so it can ask once more)
+                    if (phase == OctopusDeploymentPhase.Failed && await GatewayAbortedSignOff(sp, taskId, ct))
+                    {
+                        var env0 = envs.GetValueOrDefault($"{d?["EnvironmentId"]}", $"{d?["EnvironmentId"]}");
+                        var rel0 = releases.TryGetValue($"{d?["ReleaseId"]}", out var k0) ? k0 : Known(await Read($"api/{sp}/releases/{d?["ReleaseId"]}", ct));
+                        if (rel0 != null) Emit(owner, $"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel0.Id, rel0.Version, env0, phase, rel0.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"]), true));
+                    }
+                    finished.Add(depId); continue;
+                }
                 var relId = $"{d?["ReleaseId"]}";
                 if (!releases.TryGetValue(relId, out var rel)) rel = Known(await Read($"api/{sp}/releases/{relId}", ct));
                 else if (rel.Commit == null && windowReleases?.Contains(relId) != true && refreshed.Add(relId))
@@ -175,7 +200,8 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
                 Emit(owner, startedKey, new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, OctopusDeploymentPhase.Started, rel.Commit, startedAt));
                 if (phase != OctopusDeploymentPhase.Started)
                 {
-                    Emit(owner, $"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"])));
+                    bool? aborted = phase == OctopusDeploymentPhase.Failed && await GatewayAbortedSignOff(sp, taskId, ct) ? true : null;   // (one read per failed deployment, when its failure is published)
+                    Emit(owner, $"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"]), aborted));
                     finished.Add(depId);
                 }
                 else if (state == "Executing" || task["HasPendingInterruptions"]?.GetValue<bool>() == true)   // a deployment paused at its Sign-off step is reported as Queued (with HasPendingInterruptions), not Executing
