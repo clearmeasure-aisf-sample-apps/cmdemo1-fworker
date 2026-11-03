@@ -389,6 +389,27 @@ public sealed class OctopusWatcherTests
     }
 
     [Fact]
+    public async Task ADeploymentPausedAtItsSignOffIsQueuedWithPendingInterruptions_AndStillAsksForTheSignOff()
+    {
+        var o = Server("Queued"); o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Queued","StartTime":"2026-10-28T11:59:30Z","HasPendingInterruptions":true}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Equal(OctopusDeploymentPhase.Started, Assert.Single(got.OfType<OctopusDeploymentChanged>()).Phase);
+        var so = Assert.Single(got.OfType<SignOffRequested>());
+        Assert.Equal(("Interruptions-3", "ServerTasks-9", "octopus:signoff:Interruptions-3"), (so.InterruptionId, so.TaskId, so.Key));
+    }
+
+    [Fact]
+    public async Task AQueuedDeploymentWithoutPendingInterruptions_ReadsNoInterruptions()
+    {
+        var o = Server("Queued"); o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Queued","HasPendingInterruptions":false}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Empty(got.OfType<SignOffRequested>());
+        Assert.DoesNotContain(o.Paths, p => p.Contains("interruptions"));
+    }
+
+    [Fact]
     public async Task AReleaseWithoutAnAssembledTimeHasNoTime_AndTheTrainStampsItItself()
     {
         var o = Server(); o.Set($"{Sp}/projects/Projects-1/releases?take=30", $$"""{"Items":[{"Id":"Releases-5","Version":"1.0.5","ReleaseNotes":"built {{Sha}}"}]}""");

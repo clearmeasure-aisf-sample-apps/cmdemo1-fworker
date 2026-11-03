@@ -178,7 +178,7 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
                     Emit(owner, $"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"])));
                     finished.Add(depId);
                 }
-                else if (state == "Executing")
+                else if (state == "Executing" || task["HasPendingInterruptions"]?.GetValue<bool>() == true)   // a deployment paused at its Sign-off step is reported as Queued (with HasPendingInterruptions), not Executing
                 {
                     foreach (var i in (await Read($"api/{sp}/interruptions?regarding={taskId}&pendingOnly=true&take=20", ct))?["Items"] as JsonArray ?? [])
                         if (i?["IsPending"]?.GetValue<bool>() != false && $"{i?["Id"]}" is { Length: > 0 } iid)

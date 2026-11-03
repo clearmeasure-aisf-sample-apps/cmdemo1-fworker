@@ -125,6 +125,14 @@ public class AdoptionReadsTests
     }
 
     [Fact]
+    public async Task TheSignOffOfADeploymentPausedAsQueued_IsRead_ButAPlainQueuedDeploymentIsNot()
+    {
+        var paused = Server(state: "Queued"); paused.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Queued","HasPendingInterruptions":true}""");
+        Assert.Equal("Interruptions-3", Assert.Single(await new PendingSignOffReader(paused, "Spaces-1", "ui").Read()).InterruptionId);
+        Assert.Empty(await new PendingSignOffReader(Server(state: "Queued"), "Spaces-1", "ui").Read());
+    }
+
+    [Fact]
     public async Task ADeploymentThatIsNotExecuting_OrHasNoPendingInterruption_ShowsNoSignOff_AndNothingButGetsAreMade()
     {
         Assert.Empty(await new PendingSignOffReader(Server(state: "Success"), "Spaces-1", "ui").Read());
