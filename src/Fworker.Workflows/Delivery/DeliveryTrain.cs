@@ -479,7 +479,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             var j = await TryJudge(release, ct, null);
             if (j is null) { if (UnreadGatesWait(so) is { } why) AnswerNow(so, false, [], [why]); continue; }
             // under an incident's hold only the release that carries the hotfix is answered; the others wait where they are (the hold ends with the incident)
-            if (!PassesHold(j.Items)) { Decide("held", so.Version, j.Items, [HoldText()]); continue; }
+            if (!PassesHold(j.Items)) { so.UnreadSince = null; Decide("held", so.Version, j.Items, [HoldText()]); continue; }
             // The Sign-off asks again only what can get worse while it waits, and aborts only for a hard failure (Invoke-AutoPromoteInner): an item gate, a commit of the release that is no
             // factory work item's, the release superseded in the target, the previous environment's app not Healthy now. A waiting reason leaves it pending.
             var hard = j.ItemGaps.Concat(j.Content.Hard).ToList();
@@ -489,12 +489,14 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             if (prev is null) common.Add($"it has no deployment to {p.NameOf(Previous!)}");
             else if (!prev.Succeeded) common.Add($"its deployment to {p.NameOf(Previous!)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})");
             var soft = common.Where(g => !hard.Contains(g)).ToList();
+            if (hard.Count > 0 || soft.Count > 0) so.UnreadSince = null;   // a judgment that found a reason has read the gates; only the Proceed path below still needs its fresh read
             if (hard.Count == 0 && soft.Count == 0)
             {
                 // About to answer Proceed: the answer is made on gates read at or after the start of this look (or of the chain of looks the read cap cut short; v1's pass reads them every time), so a Hold put since then is seen.
                 // The reads of the judgment just made count (they are that new); the others are read again, and a read that is refused makes the Sign-off wait (signoffWaitHours still applies), the answers read so far being kept for the next look.
                 var again = await TryJudge(release, ct, freshSince > so.Since ? freshSince : so.Since);
                 if (again is null) { if (UnreadGatesWait(so) is { } why) AnswerNow(so, false, j.Items, [why]); continue; }
+                so.UnreadSince = null;
                 j = again;
                 hard = j.ItemGaps.Concat(j.Content.Hard).ToList();
                 if (j.Content.Skip) hard.Add($"a release at least as new already runs in {TargetName}");
@@ -541,9 +543,12 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     /// <summary>The Sign-off cannot be judged now because a read was refused: it waits and the train looks again shortly. After signoffWaitHours it is aborted, as any waiting Sign-off is; the reason is returned then, null while it waits.</summary>
     string? UnreadGatesWait(TrainSignOff so)
     {
-        var waitedH = (now - so.Since).TotalHours;
+        // The wait is counted from the train's own first refused look (UnreadSince), not from Since: a Sign-off adopted after it had waited longer than the limit (Since is the Octopus interruption's time) was
+        // aborted on the first refused read after adoption or a restart (cmdemo1-ui 2.4.1298 to uat, Interruptions-7241), though the train had never had the chance to read its gates.
+        so.UnreadSince ??= now;
+        var waitedH = (now - so.UnreadSince.Value).TotalHours;
         if (waitedH >= p.SignoffWaitHours) return $"waited {Math.Round(waitedH, 1).ToString("R", CultureInfo.InvariantCulture)} h at the Sign-off (limit {p.SignoffWaitHours.ToString("R", CultureInfo.InvariantCulture)} h): the gates of its items could not be read";
-        wakes.Add(so.Since.AddHours(p.SignoffWaitHours)); wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
+        wakes.Add(so.UnreadSince.Value.AddHours(p.SignoffWaitHours)); wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
         Decide("signoff-waiting", so.Version, [], [$"the Sign-off of task {so.TaskId} waits: the gates of its items could not be read now; they are read again shortly"]);
         return null;
     }

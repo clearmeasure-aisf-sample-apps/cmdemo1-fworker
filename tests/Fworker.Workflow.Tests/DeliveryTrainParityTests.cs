@@ -90,6 +90,50 @@ public class DeliveryTrainParityTests
     }
 
     [Fact]
+    public async Task ASignOff_AdoptedAfterItWaitedLongerThanTheLimit_IsNotAbortedByARefusedRead_AndIsJudgedOnceTheReadsSucceed()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a'); await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a');
+        await f.Mature();
+        Assert.Single(f.Of<PromoteRelease>());
+        await f.Deploy("1.0.2", "Uat", "Started");
+        f.Reads.Fail = new HttpRequestException("the shadow run's reads of this minute are spent");
+        await f.SignOff("1.0.2", "Uat");
+        await f.AgeSignOff(TimeSpan.FromHours(32.2));   // as adoption does: Since is the interruption's Created time
+        await f.Wake();
+        Assert.Empty(f.Of<AnswerSignOff>());
+        Assert.Equal("signoff-waiting", f.LastDecision!.Action);
+        Assert.NotNull(f.State.SignOffs.Single().UnreadSince);
+        f.Now += TimeSpan.FromMinutes(5); await f.Wake();
+        Assert.Empty(f.Of<AnswerSignOff>());   // five minutes of refusals are not two hours of them
+        f.Reads.Fail = null;
+        f.Now += TimeSpan.FromMinutes(5); await f.Wake();
+        var a = Assert.Single(f.Of<AnswerSignOff>());
+        Assert.True(a.Proceed, a.Notes);
+        Assert.Null(f.State.SignOffs.Single().UnreadSince);
+    }
+
+    [Fact]
+    public async Task ASignOff_WhoseGatesHaveBeenUnreadableForTheLimitSinceTheTrainsFirstLook_IsAborted()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a'); await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a');
+        await f.Mature();
+        await f.Deploy("1.0.2", "Uat", "Started");
+        f.Reads.Fail = new HttpRequestException("the shadow run's reads of this minute are spent");
+        await f.SignOff("1.0.2", "Uat");
+        await f.AgeSignOff(TimeSpan.FromHours(32.2));
+        var looks = await Drive(f, () => f.Of<AnswerSignOff>().Any(), TimeSpan.FromMinutes(10), 20);
+        Assert.True(looks >= 0, "an unreadable Sign-off must reach its limit");
+        Assert.True(looks >= 12, $"aborted after {looks} looks of 10 minutes: before two hours of refusals");
+        var a = Assert.Single(f.Of<AnswerSignOff>());
+        Assert.False(a.Proceed);
+        Assert.Contains("the gates of its items could not be read", a.Notes);
+    }
+
+    [Fact]
     public async Task AHealthReadThatGetsNoAnswer_IsOneTryPerLook_AndOnlyTheThirdInARowIsABadRead()
     {
         var f = new TrainFixture(); await f.Baseline();
