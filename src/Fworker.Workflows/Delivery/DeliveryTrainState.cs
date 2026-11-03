@@ -65,6 +65,8 @@ public sealed class TrainSignOff
     public string TaskId { get; set; } = "";
     public string Version { get; set; } = "";
     public DateTimeOffset Since { get; set; }
+    /// <summary>The train's first look that could not read the gates of this Sign-off's items, while no look has read them since; null otherwise. The limit on an unreadable Sign-off counts from here, not from <see cref="Since"/>.</summary>
+    public DateTimeOffset? UnreadSince { get; set; }
     public bool Answered { get; set; }
     /// <summary>When the answer went out, and what it was: the train sends it again if the deployment does not move on.</summary>
     public DateTimeOffset? AnsweredAt { get; set; }

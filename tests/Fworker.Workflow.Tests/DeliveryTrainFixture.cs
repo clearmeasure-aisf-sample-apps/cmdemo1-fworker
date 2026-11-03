@@ -137,6 +137,14 @@ sealed class TrainFixture
     public TrainDecided? LastDecision => All.OfType<TrainDecided>().LastOrDefault();
     public TrainState State => Store.States[Key];
 
+    /// <summary>The Sign-off waited this long already when the train saw it (adoption sets Since to the Octopus interruption's time).</summary>
+    public async Task AgeSignOff(TimeSpan by)
+    {
+        var rec = (await Store.Load(Key, default))!;
+        foreach (var so in rec.State.SignOffs) so.Since = Now - by;
+        if (!await Store.Save(Key, rec.State, rec.Revision, default)) throw new InvalidOperationException("the train row moved");
+    }
+
     public ItemMerged Merged(int n, char commit, string[]? gaps = null, string hold = "", string[]? dependencies = null)
         => new(new ItemId(Repo, n), Sha(commit), 100 + n, new ItemMergedGates(gaps is null, hold, gaps is null, false, false, gaps ?? []), (dependencies ?? []).Select(ItemId.Parse).ToList(), "webhook");
 
