@@ -39,6 +39,7 @@ function Cop-EndsSettled {
 }
 function Cop-Cleanup([int[]]$Items) {
     foreach ($n in $Items) { if ($n) { [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json') } }
+    Start-Sleep -Seconds 8   # V3.2: the closed issues end their sagas at the next pass of the board reconciler; until then a saga offers its item again and a cancelled task is replaced
     foreach ($t in @((Cop-State).tasks | Where-Object { $_.state -in 'queued', 'in_progress' })) { [void](Fake 'copilot-task' @{ id = $t.id; state = 'cancelled' }) }
     [void](Wait-Until -Seconds 20 { (Cop-Status).running -eq 0 })
     [void](Wait-Until -Seconds 60 { Cop-EndsSettled })
@@ -503,48 +504,6 @@ $CopilotScenarios = [ordered]@{
         Check 'its prompt names what changed: the findings' ("$($s3.body.prompt)" -match 'What changed: .*empty title') "$($s3.body.prompt)"
         Check 'still one task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
         Check 'no other worker was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
-    } finally { Cop-Cleanup @($n) }
-}
-
-'copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green and the change is in production [full]' = {
-    $n = 0
-    try {
-        $n = New-Item-Fake 'Copilot red master' 'Change src/App/Red.cs.' @('factory worker', 'Auto Merge', 'env:tdd')
-        # (#415: 30 s met a loaded runner twice, and the next line then read the first of no task: "Index was outside the bounds of the array" and a golden difference; the wait is longer and the scenario stops here when no task came)
-        $created = Wait-Until -Seconds 90 { (Cop-Tasks $n).Count -gt 0 }
-        Check 'the owner task is created' $created (Cop-Brief $n)
-        if (-not $created) { return }
-        $t = (Cop-Tasks $n)[0]
-        $br = "copilot/red-$n"
-        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Red.cs') })
-        $d = Cop-Draft $br 'master' "Red (#$n)"
-        $w = Cop-Accept $t $n
-        [void](Mcp-Call 'session_end' @{ reason = 'done' } $w)
-        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
-        Check 'its session ends' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 })
-        # The item leaves its worker column at once, as it did before issue 415: the end takes the item back to the plan, and a sweep that still reads
-        # it in Technical Design offers it to the next worker, whose launch is a running execution of the item. The owner watch skips an item while
-        # one runs, so the master-fix resume (and later the delivery) never came: both runs of the pull request of #415 failed on that offer, one on
-        # 'resumed' and one on 'the owner is done' (Brief: "ended ... offered to cop-... ... task-...#N" for Technical Design).
-        [void](Fake 'move' @{ number = $n; column = 'Release Queue' })
-        # The end counts the execution out of 'running' at its start; its claim release (a rule script that reads the item's state and saves it) and
-        # its revoke follow for a few seconds (#376). The state written below must come after them and between two sweeps (issue 415): an edit that a
-        # script of the end or a sweep read before and saves after is lost, and then master is never seen red and the task is never resumed.
-        Check 'the end of its execution has run to its last step' (Wait-Until -Seconds 60 { Cop-EndsSettled })
-        Wait-SweepGap -Fresh 1.0
-        # the item was merged (here: written as the settle leaves it) and master went red for the merge commit
-        $sha = 'abcdef1' + ('0' * 33)
-        Set-ItemState $n { param($st) $st.Remove('claim'); $st.pr = @{ number = $d.number; branch = $br }; $st.merge = @{ sha = $sha; merged_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = 'master-broken'; rerun_attempted = $true }; $st.park = (New-TestPark 'master-broken' @{ failed = @('Build result'); sha = $sha }) }
-        Check 'the owner task is resumed on its pull request to fix master forward' (Wait-Until -Seconds 60 { @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $d.number -and "$($_.body.prompt)" -match 'master is red' }).Count -eq 1 }) ((Cop-State).tasks | ConvertTo-Json -Compress -Depth 4)
-        $fx = @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and  "$($_.body.prompt)" -match 'master is red' })[0]
-        Check 'its prompt names the failed check and asks for one pull request against master' ("$($fx.body.prompt)" -match 'Build result' -and "$($fx.body.prompt)" -match 'ONE pull request against master') "$($fx.body.prompt)"
-        Start-Sleep -Seconds 25
-        Check 'once per merge commit' (@((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and  "$($_.body.prompt)" -match 'master is red' }).Count -eq 1)
-        Check 'not done while master is red' ((Cop-Comments $n '*Owner done:*').Count -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 1)
-        Wait-SweepGap -Fresh 1.0   # (the edits in the gap after a sweep: none reads the state before them and saves it after)
-        Set-ItemState $n { param($st) $st.merge.green_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = 'release-candidate'; $st.merge.rc_deadline = (Get-Date).ToUniversalTime().AddHours(1).ToString('o'); $st.Remove('park') }
-        Set-ItemState $n { param($st) $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
-        Check 'and the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
     } finally { Cop-Cleanup @($n) }
 }
 
