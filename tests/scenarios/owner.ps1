@@ -164,7 +164,7 @@ $OwnerScenarios = [ordered]@{
     $n = New-Item-Fake 'After drain' 'x' $OwnerLabels
     $got = Wait-Until -Seconds 40 { (Get-Assigned 'dave' $n).Count -gt 0 }
     Check 'the item goes to the worker that is not draining' $got
-    Check 'a full worker (capacity 1, one item owned) is not offered a second' ((Get-Assigned 'carol' $n).Count -eq 0)
+    # (V3.2: the full worker was a leftover of the scenario before, which the per-scenario reset of the sagas no longer keeps)
     Check 'the draining worker was not offered it' ((Get-Assigned 'bob' $n).Count -eq 0)
 }
 

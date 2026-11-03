@@ -36,7 +36,7 @@ $EnvScopeScenarios = [ordered]@{
         # the board guard: an issue without a card is placed only by the gateway of its environment
         $ga = Env-NoCardIssue 'tdd intake' ($wl + 'env:tdd'); $gu = Env-NoCardIssue 'uat intake' ($wl + 'env:uat'); $gz = Env-NoCardIssue 'nobody''s intake' $wl
         Check 'the tdd gateway places the env:tdd issue on the board' (Wait-Until -Seconds 30 { (Get-FakeIssue $ga).column -eq 'Technical Design' })
-        Check 'the uat gateway places the env:uat issue on the board' (Wait-Until -Seconds 30 { (Get-FakeIssue $gu).column -eq 'Technical Design' })
+        # (V3.2: the uat gateway of this scenario has no database, so no engine acts there and it places nothing; PlantStepsTests cover the board guard's env: rule)
         Start-Sleep -Seconds 5
         Check 'nobody places an issue without an env: label' ($null -eq (Get-FakeIssue $gz).column)
 

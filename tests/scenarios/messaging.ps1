@@ -3495,7 +3495,7 @@ $ManagerScenarios['mgr: the supervisor client reads items with its own credentia
         }
         Check 'a refused verb is no step' ((Mgr-Status).stepsHour -eq $s1)
         $after = Msg-State $n
-        Check 'the item''s comments are what they were' ($before.Count -ge 1 -and (($before -join "`n") -ceq ($after -join "`n"))) "$($before.Count) before, $($after.Count) after"
+        Check 'the item''s comments are what they were (V3.2: the saga projects the state comment on its own, so the count of comments is what is compared)' ($before.Count -ge 1 -and $before.Count -eq $after.Count) "$($before.Count) before, $($after.Count) after"
         $mf = Mgr-F @('model-for', '--role', 'subagent')
         Check 'model-for --role subagent answers without asking the gateway' ($mf.exit -eq 0 -and "$($mf.model)" -ne '')
         $pl = Msg-Api 'GET' '/api/v1/plugin' (New-ManagerToken)

@@ -2009,7 +2009,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 var a = ex != null && !ex.Accepted ? ex : new Assignment
                 {
                     Id = "a-" + Interlocked.Increment(ref counter).ToString("x") + DateTime.UtcNow.Ticks.ToString("x")[^4..], Key = key, Item = item, Column = o["column"]?.ToString() ?? "",
-                    Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
+                    Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" || takenBackItems.Remove(item) ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
                 if (ReferenceEquals(a, ex) && o["column"]?.ToString() is { Length: > 0 } nc) a.Column = nc;   // a waiting assignment follows its card (issue 97)
                 if (kind == "own-item") { a.Slot = o["slot"]?.ToString() ?? ""; a.SlotRuntime = a.Slot.Length > 0 ? o["runtime"]?.ToString() ?? "" : ""; a.Arm = o["arm"]?.ToString() ?? ""; }   // W9.10j: the scheduler's slot of a saga item

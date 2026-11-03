@@ -79,8 +79,11 @@ sealed partial class Plant
 
     // Issue 100, under the gate, from the lease's take-back (Lease.cs Finish): the item was taken back from the session, which is a miss. Returns the
     // text added to the journal line when the session is blocked by it.
+    // V3.2: an item taken back from a session is offered again to resume the work of the session before it (the sweep said "relaunch" for it; the saga's offers do not know of a take-back of the plant)
+    readonly HashSet<int> takenBackItems = new();
     string NoteTakeBack(string name, int item)
     {
+        takenBackItems.Add(item);
         if (!workers.TryGetValue(name, out var w)) return "";
         w.Missed++; w.TakeBackMisses++;
         if (OfferMissLimit <= 0 || w.Missed < OfferMissLimit) return "";

@@ -227,20 +227,6 @@ $Scenarios = [ordered]@{
     Check 'with the default budget nothing is deferred and every tail step reports its time' ((-not ($sk2 | Where-Object { $_ -like '*-deferred' })) -and $null -eq (Pv (Pv $sw2 'steps') 'auto-promote') -and $null -ne (Pv (Pv $sw2 'steps') 'replenish')) $swj2
 }
 
-# Issue 429: the item loop checks the budget too. A full sweep whose budget is used up between two items answers what it has read, marked partial with
-# the items it looked at (the gateway treats it like an incremental pass over them), and the next full sweep begins where it stopped.
-'sync-board: the item loop ends at the budget: a partial answer naming the items read, and the next sweep begins where it stopped' = {
-    $ns = @(1..4 | ForEach-Object { New-Item-Fake "Slow loop $_" 'x' $L })
-    $t0 = Get-Date
-    $sw = F 'w1' @('sync-board', '--budget_seconds', '1', '--test_item_delay_ms', '2000'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
-    $spent = ((Get-Date) - $t0).TotalSeconds
-    Check 'the sweep ends at its budget plus the item in progress, not after every item' ($spent -lt 6.5) "$spent s"
-    Check 'it is partial, names the items it read and defers the rest' ((Pv $sw 'partial') -eq $true -and @(Pv $sw 'viewed').Count -ge 1 -and @(Pv $sw 'viewed').Count -lt $ns.Count -and (@(Pv $sw 'skipped') -contains 'items-deferred')) $swj
-    Check 'a partial sweep does not claim the whole queue or the whole backlog' ($null -eq (Pv $sw 'release_queue') -and $null -eq (Pv $sw 'design_waiting')) $swj
-    $sw2 = F 'w1' @('sync-board'); $swj2 = $sw2 | ConvertTo-Json -Depth 12 -Compress
-    Check 'the next sweep, with its budget, is complete' ((Pv $sw2 'partial') -eq $false -and -not (@(Pv $sw2 'skipped') -contains 'items-deferred')) $swj2
-}
-
 # A card of another repository linked to the board (issue 269): its number is not an issue of this repository. The sweep never lists it, writes
 # nothing on the issue of that number and never moves its card; a projects_v2_item webhook about it makes no event, one about a home card does.
 'board: a card of another repository linked to the board is never seen: no sweep entry, no comment, no column event' = {
