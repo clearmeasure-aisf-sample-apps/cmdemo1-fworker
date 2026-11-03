@@ -427,6 +427,54 @@ public class DeliveryShadowTests
     }
 
     [Fact]
+    public async Task AV2OnlyRow_OfALaterEnvironment_ForAReleaseV1JudgesInAnEarlierOne_IsDeclared_ByRule()
+    {
+        // tdd, 2026-11-01: v1 judges a release in the first environment it has not reached (uat) and says nothing of prod; the prod train says "it has no deployment to uat". Six such rows were "unexplained".
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" })
+        {
+            var why = "its deployment to Tdd ended Failed (Deployments-9)";
+            r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", v, [], [why], r.Now));
+            r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = v, environment = "Uat", reasons = new[] { why } }));
+            r.Shadow.ObserveV2(new TrainDecided("orders/prod", "waiting", v, [], ["it has no deployment to uat"], r.Now));
+        }
+        var gate = await Gate(r);
+        Assert.Equal(3, (int)gate["comparedReleases"]!);
+        Assert.Equal(3, (int)gate["liveV2Only"]!);
+        Assert.Equal(0, (int)gate["unexplainedLive"]!);
+        Assert.True((bool)gate["met"]!);
+        Assert.Equal(["1.0.2", "1.0.3", "1.0.4"], ((JsonArray)Declared(gate, "chain-position")["releases"]!).Select(x => (string)x!));
+        Assert.Empty((JsonArray)Declared(gate, "queue-only-v1")["releases"]!);
+    }
+
+    [Fact]
+    public async Task AV2OnlyRow_OfALaterEnvironment_ThatPromotes_IsNotDeclaredAsChainPosition()
+    {
+        // only a v2 WAIT on the previous environment is v1's chain order seen from the later train; a v2-only promotion in prod while v1 judged the release in uat is a real difference
+        var r = new Rig();
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.7", environment = "Uat", reasons = new[] { "its deployment to Tdd ended Failed (Deployments-9)" } }));
+        r.Shadow.ObserveV2(new TrainDecided("orders/prod", "promote", "1.0.7", [], [], r.Now));
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.8", environment = "Uat", reasons = new[] { "its deployment to Tdd ended Failed (Deployments-9)" } }));
+        r.Shadow.ObserveV2(new TrainDecided("orders/prod", "waiting", "1.0.8", [], ["the prod gate"], r.Now));   // a wait of another kind (the release's own gates) is no wait on the previous environment either
+        var gate = await Gate(r);
+        Assert.Empty((JsonArray)Declared(gate, "chain-position")["releases"]!);
+        Assert.Equal(2, (int)gate["liveV2Only"]!);
+        Assert.Equal(4, (int)gate["unexplainedLive"]!);   // the two v2-only rows of prod and the two v1-only rows of uat
+    }
+
+    [Fact]
+    public async Task AV2OnlyRow_OfAnEarlierEnvironment_ForAReleaseV1JudgesInALaterOne_IsNotDeclared()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) BothPromote(r, v);
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.8", environment = "Prod", reasons = new[] { "the prod gate" } }));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.8", [], ["x"], r.Now));
+        var gate = await Gate(r);
+        Assert.Equal(2, (int)gate["unexplainedLive"]!);   // the v1-only row of prod and the v2-only row of uat
+        Assert.Empty((JsonArray)Declared(gate, "chain-position")["releases"]!);
+    }
+
+    [Fact]
     public async Task AV1Row_ForAnOlderRelease_ANewerV2DecisionSupersedes_IsDeclared()
     {
         var r = new Rig();

@@ -6,9 +6,8 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W0.1, fencing (docs/design/delivery-speed.md 18.1.1): the lease epoch goes into the rule scripts that act on the board, and a superseded gateway
-/// waits for them at most 45 s and then ends them. The rule scripts' own refusal of a write once the lease is lost is covered by the Tier 1 scenarios
-/// of the owner suite (tests/scenarios/leader.ps1); these tests pin what the gateway sends and does.
+/// W0.1, fencing (docs/design/delivery-speed.md 18.1.1): the Runner puts a lease into the rule scripts that act on the board when it is given one (the gateway gives none since V3.2: the GitHub ref the scripts checked
+/// is gone, and the SQL lock is checked by the gateway itself, GatewayLeader.MayAct, which refuses the routes of a fenced verb), and a superseded gateway waits for the running ones at most 45 s and then ends them.
 /// </summary>
 public sealed class FencingTests
 {
@@ -64,15 +63,6 @@ public sealed class FencingTests
         Assert.Equal("not json", NewRunner(() => (1, "h")).InjectLease("sync-board", "not json"));
     }
 
-    [Fact]
-    public void FenceLease_IsNullWhileTheLeaseIsOffOrNotTaken_AndKeepsTheEpochAfterSupersession()
-    {
-        var off = new GatewayLeader(NewRunner(null), new LeaderSettings { On = false }, "0.0.0");
-        Assert.Null(off.FenceLease);
-        var on = new GatewayLeader(NewRunner(null), new LeaderSettings { On = true }, "0.0.0");
-        Assert.Null(on.FenceLease);   // no epoch before the first acquire
-    }
-
     // a stand-in `pwsh` that runs for 30 s whatever it is asked (the rule script that is still running when the lease is lost)
     static GatewayEnvironment SlowPwsh()
     {
@@ -112,6 +102,93 @@ public sealed class FencingTests
         Assert.Equal(0, r.FencedInFlight);
     }
 
+    // V3.2: the rule scripts carry no lease, so a standby that retakes a lost lock within seconds must not find one still writing: the hand-over ends them before anything else of it
+    sealed class SlowStore : Fworker.Workflows.PlantState.IPlantStateStore
+    {
+        public Func<Task>? BeforeSave; public bool Saved;
+        public Task<bool> Save(System.Text.Json.Nodes.JsonObject snapshot, long epoch, string holder, CancellationToken ct = default) => SaveAsync();
+        async Task<bool> SaveAsync() { if (BeforeSave != null) await BeforeSave(); Saved = true; return true; }
+        public Task<Fworker.Workflows.PlantState.PlantStateRead?> Load(CancellationToken ct = default) => Task.FromResult<Fworker.Workflows.PlantState.PlantStateRead?>(null);
+    }
+
+    sealed class NoRevocations : IRevocationService
+    {
+        public Task Loaded => Task.CompletedTask; public bool IsLoaded => true; public int FailedAttempts => 0; public DateTime Since => DateTime.UtcNow; public bool Off => true; public string SkipReason => "";
+        public System.Text.Json.Nodes.JsonObject Status() => new();
+        public Task<(bool Ok, int Generation, bool Closed)> RevokeAsync(string name, string by) => Task.FromResult((false, 0, false));
+    }
+
+    sealed class FakeLifetime : Microsoft.Extensions.Hosting.IHostApplicationLifetime
+    {
+        public CancellationToken ApplicationStarted => CancellationToken.None; public CancellationToken ApplicationStopping => CancellationToken.None; public CancellationToken ApplicationStopped => CancellationToken.None;
+        public void StopApplication() { }
+    }
+
+    [Fact]
+    public async Task OnSuperseded_EndsTheRunningFencedScripts_BeforeTheFirstWriteOfThePlant()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = SlowPwsh();
+        var runner = NewRunner(null);
+        var call = runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(120));
+        var sw = Stopwatch.StartNew();
+        while (runner.FencedInFlight == 0 && sw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(20);
+        Assert.Equal(1, runner.FencedInFlight);
+        await Task.Delay(300);   // the process has started
+        var leader = new GatewayLeader(new LeaderSettings { On = true });
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
+        var scriptStillRunningAtTheFirstWrite = true;
+        var store = new SlowStore { BeforeSave = async () => { await Task.Delay(500); scriptStillRunningAtTheFirstWrite = !call.IsCompleted; } };
+        var snapshots = new SnapshotCoordinator(true, leader, store, plant, new SweepGap());
+        await snapshots.RestoreAsync("start");
+        var svc = new LeadershipService(leader, snapshots, new NoRevocations(), plant, new FakeLifetime(), runner);
+        await leader.OnSuperseded!(new System.Text.Json.Nodes.JsonObject { ["holder"] = "the-newer" });
+        Assert.True(store.Saved);
+        Assert.False(scriptStillRunningAtTheFirstWrite);   // the script was ended before the plant was written, not after
+        await call.WaitAsync(TimeSpan.FromSeconds(10));
+        _ = svc;
+    }
+
+    [Fact]
+    public async Task AFencedVerbOnTheScriptPath_IsRefusedOnceTheLockIsLost_AndNoScriptStarts()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = SlowPwsh();
+        var r = NewRunner(null);
+        r.MayAct = () => false;
+        var (code, output) = await r.RunScriptAsync("sync-board", "{}", TimeSpan.FromSeconds(30));
+        Assert.Equal(20, code); Assert.Contains("lease-lost", output);
+        Assert.Equal(0, r.FencedInFlight);
+    }
+
+    [Fact]
+    public async Task AFencedCallWaitingForARunnerSlot_WhileTheDrainRuns_NeverStartsAScript()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = SlowPwsh();
+        var old = Environment.GetEnvironmentVariable("FACTORY_RUNNER_MAX");
+        Environment.SetEnvironmentVariable("FACTORY_RUNNER_MAX", "1");
+        try
+        {
+            var r = NewRunner(null);
+            var holding = true;
+            r.MayAct = () => holding;
+            var slot = r.RunAsync("get-item", "{}", TimeSpan.FromSeconds(3));          // takes the only slot for three seconds (a script that runs 30 s, ended by its timeout)
+            await Task.Delay(500);
+            var waiting = r.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(120));   // a fenced call: it waits for the slot
+            var sw = Stopwatch.StartNew();
+            while (r.FencedInFlight == 0 && sw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(20);
+            holding = false;                                                           // the lock is lost ...
+            var (_, killed) = await r.DrainFencedAsync(TimeSpan.Zero);                // ... and the drain finds nothing to end: the call has not started
+            Assert.Equal(0, killed);
+            await slot.WaitAsync(TimeSpan.FromSeconds(20));                            // the slot comes free
+            var (code, output) = await waiting.WaitAsync(TimeSpan.FromSeconds(20));    // ... and the waiting call is refused, it does not run for 30 s
+            Assert.Equal(20, code); Assert.Contains("lease-lost", output);
+            Assert.Equal(0, r.FencedInFlight);
+        }
+        finally { Environment.SetEnvironmentVariable("FACTORY_RUNNER_MAX", old); }
+    }
+
     [Fact]
     public async Task Drain_AScriptThatFinishesInTime_IsNotEnded()
     {
@@ -123,100 +200,6 @@ public sealed class FencingTests
         Assert.Equal(0, code);
         var (_, killed) = await r.DrainFencedAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(0, killed);
-    }
-
-    // the stub of LeadershipGatewayTests, trimmed: logs verb, action and the whole input
-    const string Stub = """
-        #!/bin/sh
-        verb="$6"
-        input=$(cat)
-        action=$(printf '%s' "$input" | grep -o '"action":"[^"]*"' | head -n 1 | sed 's/^"action":"//; s/"$//')
-        printf '%s\t%s\t%s\n' "$verb" "$action" "$input" >> "$FWTEST_DIR/fence.log"
-        if [ "$verb" = leader-lease ] && [ "$action" = check ] && [ -e "$FWTEST_DIR/supersede" ]; then
-          echo '{"ok":true,"leader":false,"sha":"s2","current":{"epoch":2,"holder":"newer","until":"2099-01-01T00:00:00Z"}}'; exit 0
-        fi
-        if [ "$verb" = sync-board ] && [ -e "$FWTEST_DIR/slow" ]; then exec sleep 60; fi
-        case "$verb" in
-          revocations) echo '{"ok":true,"revoked":{}}' ;;
-          leader-lease)
-            if [ "$action" = "acquire" ]; then echo '{"ok":true,"epoch":7,"leader":true,"sha":"s7"}'; else echo '{"ok":true,"leader":true}'; fi ;;
-          plant-snapshot-load|plant-snapshot-await) echo '{"ok":true,"found":false}' ;;
-          plant-snapshot-save) echo '{"ok":true,"tree":"t1"}' ;;
-          sync-board) echo '{"ok":true,"offers":[],"actions":[],"errors":[],"owners":{},"triggers":[]}' ;;
-          *) echo '{"ok":true}' ;;
-        esac
-        exit 0
-        """;
-
-    [Fact]
-    public async Task ActingGateway_RunsSyncBoardUnderItsEpoch_AndTheLeaseAndSnapshotVerbsWithout()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
-        env.Set("FACTORY_LEADER_LEASE", null);
-        env.Set("FACTORY_PLANT_SNAPSHOT", null);
-        env.Set("GH_TOKEN", "fake");
-        env.Set("FACTORY_TRANSCRIPTS", "0");
-        env.Set("FACTORY_TIMING_leaderCheckSeconds", "3600");
-        env.Set("FACTORY_TIMING_plantSnapshotDebounceSeconds", "1");
-        env.Apply();
-        File.WriteAllText(Path.Combine(env.Dir, "bin", "pwsh"), Stub.Replace("\r\n", "\n") + "\n");
-        await using var host = new GatewayHost();
-        _ = host.Server;
-        var log = Path.Combine(env.Dir, "fence.log");
-        List<string[]> Lines() => !File.Exists(log) ? new() : File.ReadAllLines(log).Select(l => l.Split('\t', 3)).Where(p => p.Length == 3).ToList();
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromSeconds(40) && !Lines().Any(p => p[0] == "sync-board")) await Task.Delay(100);
-        var calls = Lines();
-        var sync = calls.FirstOrDefault(p => p[0] == "sync-board");
-        Assert.NotNull(sync);
-        var status = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json;
-        var input = JsonNode.Parse(sync![2])!.AsObject();
-        Assert.Equal(7L, (long?)input["_lease"]?["epoch"]);
-        Assert.Equal((string?)status?["leader"]?["holder"], (string?)input["_lease"]?["holder"]);
-        // the lease's own verb and the snapshot's carry none: a superseded gateway must still be able to write its final snapshot
-        foreach (var p in calls.Where(p => p[0] is "leader-lease" or "plant-snapshot-save" or "plant-snapshot-load" or "revocations"))
-            Assert.DoesNotContain("_lease", p[2]);
-    }
-
-    [Fact]
-    public async Task SupersededWhileAFencedScriptRuns_FinalSnapshotAndHandOverComeFirst_AndTheStopIsNotHeldUp()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
-        env.Set("FACTORY_LEADER_LEASE", null);
-        env.Set("FACTORY_PLANT_SNAPSHOT", null);
-        env.Set("GH_TOKEN", "fake");
-        env.Set("FACTORY_TRANSCRIPTS", "0");
-        env.Set("FACTORY_TIMING_leaderCheckSeconds", "1");
-        env.Set("FACTORY_TIMING_plantSnapshotDebounceSeconds", "1");
-        env.Apply();
-        File.WriteAllText(Path.Combine(env.Dir, "bin", "pwsh"), Stub.Replace("\r\n", "\n") + "\n");
-        File.WriteAllText(Path.Combine(env.Dir, "slow"), "");   // the first sync-board runs for 60 s
-        var host = new GatewayHost();
-        var disposed = false;
-        try
-        {
-            _ = host.Server;
-            var log = Path.Combine(env.Dir, "fence.log");
-            List<string[]> Lines() => !File.Exists(log) ? new() : File.ReadAllLines(log).Select(l => l.Split('\t', 3)).Where(p => p.Length == 3).ToList();
-            var sw = Stopwatch.StartNew();
-            while (sw.Elapsed < TimeSpan.FromSeconds(40) && !Lines().Any(p => p[0] == "sync-board")) await Task.Delay(100);
-            Assert.Contains(Lines(), p => p[0] == "sync-board");   // in flight now
-            File.WriteAllText(Path.Combine(env.Dir, "supersede"), "");
-            sw.Restart();
-            while (sw.Elapsed < TimeSpan.FromSeconds(15) && !Lines().Any(p => p[0] == "plant-snapshot-save" && p[2].Contains("\"final\":true"))) await Task.Delay(100);
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(15), "the final snapshot waited for the running script");
-            var s = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json;
-            Assert.Equal("superseded", (string?)s?["leader"]?["role"]);
-            var stop = Stopwatch.StartNew();
-            await host.DisposeAsync();
-            disposed = true;
-            Assert.True(stop.Elapsed < TimeSpan.FromSeconds(30), $"the stop took {stop.Elapsed.TotalSeconds:0.0} s");
-        }
-        finally { if (!disposed) await host.DisposeAsync(); }
     }
 
     [Fact]
@@ -290,7 +273,7 @@ public sealed class FencingTests
     }
 
     [Fact]
-    public async Task WhereTheEngineDoesNotAct_ThereAreNoRoutes_AndNothingIsAskedOfTheLeaseHere()
+    public async Task WhereTheEngineDoesNotAct_ThereAreNoRoutes_AndTheScriptPathAsksTheLockAndRefusesAFencedVerbWithoutIt()
     {
         var asked = 0;
         var r = NewRunner(() => (7, "gw"));
@@ -298,9 +281,9 @@ public sealed class FencingTests
         Assert.Null(r.Routes);
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
-        env.Apply();   // the ordinary stub answers {"ok":true}: the script path is v1's, fenced by the lease in its input
-        Assert.Equal(0, (await r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30))).Code);
-        Assert.Equal(0, asked);
+        env.Apply();
+        Assert.Equal(20, (await r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30))).Code);   // the script path asks the lock now (the scripts carry no lease): a fenced verb is refused without it
+        Assert.Equal(1, asked);
     }
 
     [Fact]

@@ -34,7 +34,7 @@ public sealed record AdoptionColumns(string Design, string Develop, string Valid
 
 /// <summary>What the mapping needs of the configuration: the saga's policy (leases, the settle window, the sweep's times, the budgets, the plans it carries), the columns, the docs-only rules and the gates of the merged-items row.</summary>
 /// <param name="SlotRuntime">The runtime of a live owner's session when the ledger and the snapshot name none (<c>scheduler.runtime</c>).</param>
-public sealed record AdoptionSettings(WorkItemPolicy Policy, AdoptionColumns Columns, DocsOnlySettings DocsOnly, ItemGateConfig Gates, string SlotRuntime = "")
+public sealed record AdoptionSettings(WorkItemPolicy Policy, AdoptionColumns Columns, DocsOnlySettings DocsOnly, ItemGateConfig Gates, string SlotRuntime = "", string HotfixLabel = "hotfix")
 {
     public SweepRules Sweep => Policy.Sweep ?? SweepRules.Default;
 }

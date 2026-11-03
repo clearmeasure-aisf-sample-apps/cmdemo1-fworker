@@ -8,7 +8,7 @@ static class DeliveryRoutes
 
     public static readonly IReadOnlyList<string> Verbs = ["settle", "publish-demo", "ci-release", "copilot-settle", "copilot-owner", "private-build"];
 
-    /// <summary>The verbs this group answers on v2 (auto-promote is the executor's, not a route).</summary>
+    /// <summary>The verbs this group answers on v2.</summary>
     public static readonly IReadOnlyList<string> Routed = ["settle", "publish-demo", "ci-release", "copilot-settle", "copilot-owner", "private-build"];
 
     /// <summary>

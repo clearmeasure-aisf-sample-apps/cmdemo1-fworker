@@ -29,7 +29,7 @@ public sealed class ConfigurationTests : IDisposable
     {
         var t = TimingOptions.From(c);
         return string.Join("; ", $"legacyKinds={c.LegacyKinds}", $"ownerSessions={c.OwnerSessions}", $"intake={c.IntakeColumn}", $"oneItemPerSession={c.OneItemPerSession}",
-            $"ack={t.AckSeconds}", $"snapshotMaxAge={t.PlantSnapshotMaxAgeMinutes}", $"passUnmergedDigest={t.PassUnmergedDigestMinutes}", $"offerMissLimit={t.OfferMissLimit}",
+            $"ack={t.AckSeconds}", $"snapshotMaxAge={t.PlantSnapshotMaxAgeMinutes}", $"offerMissLimit={t.OfferMissLimit}",
             $"offerCoolDown={t.OfferCoolDownMinutes}", $"sessionEndGrace={t.SessionEndGraceSeconds}", $"pinFallback={t.PinFallbackMinutes}", $"sessionRestart={t.SessionRestartMinutes}",
             $"repeatQuestionLimit={t.SessionRepeatQuestionLimit}", $"sweepMin={t.SweepMinSeconds}", $"mcpIdle={t.McpIdleMinutes}");
     }
@@ -44,7 +44,6 @@ public sealed class ConfigurationTests : IDisposable
         Assert.True(c.OneItemPerSession);
         Assert.Equal(120, t.AckSeconds);
         Assert.Equal(30, t.PlantSnapshotMaxAgeMinutes);
-        Assert.Equal(5, t.PassUnmergedDigestMinutes);
         Assert.Equal(2, t.OfferMissLimit);
         Assert.Equal(5, t.OfferCoolDownMinutes);
         Assert.Equal(90, t.SessionEndGraceSeconds);
@@ -198,7 +197,6 @@ public sealed class ConfigurationTests : IDisposable
         Assert.True(c.OneItemPerSession);
         Assert.Equal(120, t.AckSeconds);
         Assert.Equal(30, t.PlantSnapshotMaxAgeMinutes);
-        Assert.Equal(5, t.PassUnmergedDigestMinutes);
         Assert.Equal(2, t.OfferMissLimit);
         Assert.Equal(5, t.OfferCoolDownMinutes);
         Assert.Equal(90, t.SessionEndGraceSeconds);

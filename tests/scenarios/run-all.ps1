@@ -59,7 +59,9 @@ $ProfiledSuites = @{
         @{ only = '^saga: sweep step: a PASS whose'; profile = 'saga-feature' }
         @{ only = '^saga: sweep step: a merge by a person'; profile = 'saga-feature' }
         @{ only = '^saga: slots: '; profile = 'saga-feature' }                  # the scheduler on (the scenario turns scheduler.featureSlots and the fake Octopus runtime on itself)
-        @{ only = '^saga: adoption: a start'; profile = 'saga-feature' }
+        @{ only = '^saga: intake: a Todo item'; profile = 'saga-feature' }      # V1.2 and V1.3: the intake on the Octopus runtime's capacity, runtime: labels, the hotfix label
+        @{ only = '^saga: intake: a worker: pin'; profile = 'saga-feature' }    # a worker: pin is honoured on the saga's offer
+        @{ only = '^saga: (adoption: a start|admission:)'; profile = 'saga-feature' }   # the adoption at a start with items in flight, and the admission (V1.1)
     )
 }
 foreach ($spec in $(if ($Suites.Count) { $Suites } else { $names })) {

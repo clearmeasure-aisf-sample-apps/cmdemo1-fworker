@@ -21,6 +21,7 @@ public static class WorkItemHandlers
     public static Task<OutgoingMessages> Handle(BudgetSpent m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(LeaseRenewed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(PullRequestChanged m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(DevelopmentSettled m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(MergeFactsRead m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(MergeSeen m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(DeliverySeen m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);

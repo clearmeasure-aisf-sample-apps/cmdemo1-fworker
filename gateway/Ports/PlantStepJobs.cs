@@ -12,7 +12,7 @@ using Fworker.Workflows.Reconcilers;
 //   backlog-low     the count of the keeper's column, and the keeper's backlog-low job;  PlantSteps.DesignWaiting, Plant.KeeperBacklog
 // The first pull request of the row made the jobs a call of the rule script (sync-board plant_steps); the second one is the C# port (src/Fworker.Workflows/Reconcilers/PlantSteps.cs), so no job runs a script any more. The script keeps
 // the same steps for the gateway that does not act (tdd while it only shadows) until W9.11b.
-// The gap renewal (issue 94) is not a job: it must run in the first full sweep after the restore, before that sweep can offer a claim that ran out in the gap as a relaunch, and only the sweep can promise that order (Sweeper.cs takes the gap).
+// The gap renewal (issue 94) of the saga's items is the job gap-renew of SweepLeftoverJobs (V1.4), which waits for the adoption of the term; the sweep keeps the gap for the items that have no saga.
 // A job does nothing while this process may not act, before the plant is restored, while the saga table has not been read once (the steps leave the saga's items alone), or while the GitHub budget is below its reserve (the steps are
 // the ones the sweep skipped on a low budget). A pass the lease ended is dropped: the steps stop before their next write and what they read is not applied.
 

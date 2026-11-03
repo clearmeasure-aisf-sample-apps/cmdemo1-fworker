@@ -23,10 +23,11 @@ public interface IKeyedInput { string Key { get; } }
 
 /// <summary>
 /// Starts the item's saga: the first generation, or, for an item whose last instance completed, the next. A start for an item that is open does nothing (the answer says so). <paramref name="Plan"/> names
-/// the plan (the docs plan for an item the intake knows to be docs-only); without one the hotfix flag chooses between the hotfix and the feature plan.
+/// the plan (the docs plan for an item the intake knows to be docs-only); without one the hotfix flag chooses between the hotfix and the feature plan. V1.1: <paramref name="Step"/> is the step the item
+/// begins at, for a card that stands in the column of a step already (a person moved it there, or the replenish placed it): the plan's first step when null or when the plan has no such step.
 /// </summary>
 [MessageIdentity("workitem.start")]
-public sealed record StartWorkItem(ItemId Item, string Source, string? Plan = null, bool Hotfix = false) : WorkItemInput(Item);
+public sealed record StartWorkItem(ItemId Item, string Source, string? Plan = null, bool Hotfix = false, StepKind? Step = null) : WorkItemInput(Item);
 
 /// <summary>A closed item was reopened (a person moved it back, or a delivered item was rolled back): a completed saga starts the next generation on the plan it had; an open one ignores it.</summary>
 [MessageIdentity("workitem.reopen")]
@@ -70,6 +71,12 @@ public sealed record LeaseRenewed(ItemId Item, int Generation, string ArmId, str
 /// <summary>The item's pull request has these changed files at this head. On the docs plan a file that is not documentation switches the item to the feature plan.</summary>
 [MessageIdentity("workitem.pr-changed")]
 public sealed record PullRequestChanged(ItemId Item, int Generation, string Key, int PullRequest, string Head, IReadOnlyList<string> Files) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
+/// <summary>
+/// The gateway settles Development for a coding agent whose task ended (copilot-settle, action awaiting): the task's branch has the change, the item's pull request is that branch's, and the checks decide from here. Whatever the agent
+/// reported (even a failure that parked the item) and with no review of the session (the agent had none), the Develop step is done and the next step waits for the checks.
+/// </summary>
+public sealed record DevelopmentSettled(ItemId Item, int Generation, string Key, int PullRequest, string Head, IReadOnlyList<string> Files) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
 /// <summary>A check run of the merge commit's own Build: its name, status and conclusion (null while it has none).</summary>
 public sealed record BuildCheck(string Name, string? Status, string? Conclusion);

@@ -113,7 +113,7 @@ public sealed class WolverineHostServiceTests
     }
 
     /// <summary>A leader that is not acting yet: the lease is on and has not been taken (W9.10a: the node does not start).</summary>
-    static GatewayLeader WaitingLeader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
+    static GatewayLeader WaitingLeader() => new(new LeaderSettings { On = true });
 
     /// <summary>The holder: the lease is taken and the predecessor's snapshot seen, as LeadershipService reports with StartActing.</summary>
     static GatewayLeader Leader() { var l = WaitingLeader(); l.StartActing(); return l; }
@@ -335,7 +335,7 @@ public sealed class WolverineHostServiceTests
     [Fact]
     public async Task WithTheLeaseOff_TheNodeStartsAtTheStartOfTheHost_AsItDid()
     {
-        var leader = new GatewayLeader(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = false }, "0.0.0");
+        var leader = new GatewayLeader(new LeaderSettings { On = false });
         var svc = Service(leader, (_, _) => new FakeHost());
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);

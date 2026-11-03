@@ -69,16 +69,15 @@ public sealed class EngineOptionsTests : IDisposable
         var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")), File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
         string[] Strings(System.Text.Json.Nodes.JsonNode? n) => n!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
         Assert.True(merged["intake"]!["enabled"]!.GetValue<bool>());
-        Assert.Equal(new[] { "docs", "feature" }, Strings(merged["intake"]!["v2Plans"]));
+        Assert.Equal(new[] { "docs", "feature", "hotfix", "redeliver" }, Strings(merged["intake"]!["v2Plans"]));   // (V1.3: a person's hotfix label starts the hotfix plan, and a delivery undone starts redeliver)
         Assert.Equal("tdd", merged["delivery"]!["finalEnvironment"]!.GetValue<string>());
         Assert.Equal("octopus", merged["scheduler"]!["runtime"]!.GetValue<string>());
         // #437 option A: the Copilot and Cursor runtimes are off for the measured batch
         Assert.False(merged["api"]!["cursor"]!["enabled"]!.GetValue<bool>());
         Assert.False(merged["api"]!["copilot"]!["environments"]!["tdd"]!["enabled"]!.GetValue<bool>());
-        // uat and prod stay with v1's promoter; the merge strategy is the default's
+        // V2.3: v1's promoter is gone, so the train promotes uat and prod with no switch; the merge strategy is the default's
         var overrides = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")))!;
-        Assert.Null(overrides["delivery"]?["autoPromote"]?["trainActs"]);
-        Assert.NotEqual(true, merged["delivery"]!["autoPromote"]!["trainActs"]?.GetValue<bool>());
+        Assert.Null(overrides["delivery"]!["autoPromote"]!["trainActs"]);
         Assert.Null(overrides["mergeStrategy"]);
     }
 

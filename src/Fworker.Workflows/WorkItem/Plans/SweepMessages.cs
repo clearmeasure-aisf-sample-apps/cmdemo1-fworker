@@ -80,11 +80,19 @@ public sealed record OwnerReleaseAsked(ItemId Item, int Generation, string Key, 
 public sealed record RequeueWorkItem(ItemId Item, int Generation, string Key, string Reason) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
 /// <summary>The owner session of the item gives it up (published as <see cref="OwnerReleaseRequested"/>): the claim and its ref go, the next trigger assigns the item again.</summary>
-public sealed record ReleaseOwner(string Key, string Reason) : StateCommand(Key);
+/// <remarks>Kind: "" for the idle release of an owner that waits on a held PASS; <see cref="OwnerReleaseKinds.Merged"/> when the item's pull request was merged; <see cref="OwnerReleaseKinds.Completed"/> when the item completed (V3.2: v1's sweep did both).</remarks>
+public sealed record ReleaseOwner(string Key, string Reason, string Kind = "") : StateCommand(Key);
+
+/// <summary>Why the saga asks the gateway to release the item's owner (<see cref="ReleaseOwner.Kind"/>).</summary>
+public static class OwnerReleaseKinds
+{
+    public const string Merged = "merged";
+    public const string Completed = "completed";
+}
 
 /// <summary>The gateway releases the owner of the item (the claim in its state comment and the claim ref). Idempotent: an item with no claim is released already.</summary>
 [MessageIdentity("workitem.release-owner")]
-public sealed record OwnerReleaseRequested(ItemId Item, string Key, string Reason, int Generation = 0) : ItemCommand(Item);
+public sealed record OwnerReleaseRequested(ItemId Item, string Key, string Reason, int Generation = 0, string Kind = "") : ItemCommand(Item);
 
 /// <summary>The words of the park reasons the sweep's steps use (the codes of the state comment's park, as v1 writes them).</summary>
 public static class SweepParks

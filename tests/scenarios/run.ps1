@@ -85,7 +85,7 @@ $SuiteDefs = @(
     # auto and merge-queue test the session's own merge verb, so the gateway's merge after a PASS is off there (owner.ps1 tests that one)
     @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
     @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
-    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600; continueMinutes = 0 } }
+    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; recurringJobs = @{ baseWatchSeconds = 5 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600; continueMinutes = 0 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate-idle'; Policy = 'auto'; Set = $QcGateIdleScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcIdleMinutes = 0.1 } }
@@ -323,7 +323,8 @@ if ($env:FACTORY_TEST_SQL) {
 # A suite's own Extra is applied first, the profile over it.
 $script:V2Profiles = @{
     # 'plain' leaves the host's timers at their defaults: with the recurring jobs at their floor the octopus scenario 'journal order' (accept while the offered and launched lines are in flight) fails on v2 (seen after #572); the plain profile is as master's run
-    'plain'        = @{ mergeStrategy = 'direct' }
+    # V3.2a: every profile carries the plans of the deployed image (config/deploy.overrides.json intake.v2Plans), so that the engine owns every item (V1.1 admission) and v1's sweep has nothing of its own, as on tdd
+    'plain'        = @{ mergeStrategy = 'direct'; scheduler = @{ featureSlots = $false }; recurringJobs = @{ boardReconcilerSeconds = 3 }; intake = @{ v2Plans = @('docs', 'feature', 'hotfix', 'redeliver') } }
     'saga-docs'    = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs') }; scheduler = @{ featureSlots = $false } }
     'saga-feature' = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs', 'feature') }; scheduler = @{ featureSlots = $false } }
 }
@@ -407,6 +408,8 @@ function Invoke-SuiteDef($Def) {
     $script:V2EnvName = $(if ($envs.ContainsKey('FACTORY_ENVIRONMENT') -and "$($envs['FACTORY_ENVIRONMENT'])".Trim()) { "$($envs['FACTORY_ENVIRONMENT'])".Trim() } elseif ($V2DefaultEnvSuites -contains $Def.Name) { 'tdd' } else { 'v2ci' })
     if ($V2DefaultEnvSuites -notcontains $Def.Name -or $envs.ContainsKey('FACTORY_ENVIRONMENT')) { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName }
     $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1'
+    # V3.2a: every card gets its saga from the admission after a pass of the board reconciler; the scenarios wait seconds, not minutes (test knobs: the reconciler's floor and the age a card must have)
+    $envs['FACTORY_TEST_FAST_RECONCILER'] = '1'; $envs['FACTORY_TEST_HOOKS'] = '1'; $envs['FACTORY_ADMISSION_MIN_AGE_SECONDS'] = '2'
     # a saga profile: the intake is the config's (intake.enabled), not an environment switch that the rule script and the engine would both read
     if ($script:IsSagaProfile) { $envs.Remove('FACTORY_INTAKE') }
     $script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }

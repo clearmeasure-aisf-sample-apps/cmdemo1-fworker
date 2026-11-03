@@ -155,7 +155,6 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | item-pr-lookup | `gateway/Runtimes/ItemPrLookup.cs` | 1 | item-pr | router | W9.2 | - | The pull request of an item for the runtime adapters (the owner-task case is a fallback below). |
 | owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | by argument | router | W9.4 | - | OwnerCiReleaseService runs ci-release. |
 | owner-ci-journal | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | journal | router | W9.8 | - | Its journal lines. |
-| sweep-board | `gateway/Sweeper.cs` | 1 | sync-board | router | W9.8 | - | The sweep: sync-board through the Runner; where the engine acts the route is the script's pass plus one pass of the board reconciler (the sweep stays v1's until W9.11). |
 
 ### The fallbacks of verbs that have a v2 owner
 
@@ -171,3 +170,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.
 - **merge-peer-approved** (until W9.11b): The peer-approved merge policy is dropped (decision 4 of 2026-10-30), not ported; its suites go with v1 (W9.11a). Every environment runs mergePolicy auto.
 - **merge-hybrid-script** (until W9.11b): The adoption (W9.9b) gives the saga every open item, and W9.11b deletes the branch with the router of v1.
+
+## Labels that no verb reads
+
+`agent:<name>` (for example `agent:cursor`) is not a label of the factory: no verb of v1 or v2 reads it. The agent of a runtime is runtime configuration (`runtimes...octopus.agent`, `runtimes...caeJob.agent`); the label of an item that names a runtime is `runtime:<kind>` (V1.3 of the v2-only plan reads it in the slot request, `SlotRequestSettings.RuntimeFor`).

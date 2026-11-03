@@ -102,6 +102,13 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   release waits in the Release Queue and each item is told why, once per reason. `delivery.autoPromote` (off in the source defaults, on for
   the tdd gateway in `config/deploy.overrides.json`); design `docs/design/auto-promote.md`. Needs the Octopus permissions listed there granted
   to the gateway's Octopus account (owner action). When it is live, cmdemo1-system's `ui-auto-promote.yml` stops promoting ui.
+- **V2.2 (2026-11-01, owner: v2 takes uat/prod):** `config/deploy.overrides.json` sets `delivery.autoPromote.trainActs` true; `AutoPromoter.Runs` is then false where the engine acts, so only the train promotes uat and prod. Reverting the PR brings the loop back (until V2.3).
+- **V2.3 (2026-11-01):** `gateway/AutoPromoter.cs`, its registration, `AutoPromoteHere`-gated shadow ticks, `InstanceConfig.TrainActs`, `delivery.autoPromote.trainActs` and `timing.promoteSeconds` are gone; no stop switch (rollback = redeploy the previous image). The train promotes uat and prod wherever the engine acts. The `promote` suite runs on the v2 engine only (on v1 it reports one 'v2 only' check). V3.3 (first part) deleted the rule script verb `auto-promote` (`Verbs.Promote.ps1`). Still to remove in a follow-up: the dead shadow machinery of W9.10p (`ObserveV1`, `DeliveryPolicy.Shadow`). Live events: `docs/design/fworker-wolverine-implementation.md` section 3.
+- **V3.2 prerequisite, the owner at the merge and at the completion (2026-11-02):** v1's sweep released an item's owner from its triggers `item.merged` (`Plant.Merged`) and `item.complete` (`Plant.Complete`); a saga item has no such trigger (`SweepV2Filter` drops them), so before this the owner of a saga item whose
+  pull request a person merged (or whose issue closed) was dropped only when two sweeps stopped naming it. Now the saga sends `ReleaseOwner` (published as `OwnerReleaseRequested`, `Kind` `merged` or `completed`) where it decides `Merged` (the merge step's `MergeSeen`, the docs plan's merge answer)
+  and in `Complete`. The gateway's `OwnerRelease` calls `Plant.Merged` / `Plant.Complete` (open assignments done, owner dropped, the session told `session.end`) whatever the claim says, then gives the claim up through the `release` verb as the idle release does. Idempotent; a plant fault does not stop the claim release.
+  The merge verb's own `Plant.Merged` (the verb pipeline) stays for the moment a merge is answered; V3 may drop the sweep's triggers (`Sweeper`: `item.merged`/`item.complete`, `Plant.Complete` call) once this is live. **Decision on the plant ports `held` and `pass_unmerged`:** not ported (the plan's guidance, section 3 "Plant fields": the saga merges
+  its own PASS and the intake holds dependencies, `DocsIntakeJob.DependenciesMet`). V3.2 deletes `Plant.SetHeld`, `SetPassUnmerged` and their `/status` (`held`, `passUnmerged`), digest (`pass-unmerged`) and release-queue (`held`) uses with the sweep; nothing feeds them for a saga item today. Done in V3.2: all of them are deleted, and the sweep's `RequestSweep` for held items at a merge went with them (design "V3.2 as built").
 - **When a v2 item is Done relative to uat and prod** (W9.10p, the cutover to `delivery.finalEnvironment` tdd): v2 delivers at tdd and the app's uat and prod promotions stay with v1's `AutoPromoter`, which
   takes its items from the Release Queue (`merge.awaiting` release-queue, written by the state projection only while the saga is Settling). So the 24 hour settle window (`WorkItemPolicy.Settle`) does not complete
   an item whose release is not in prod: at the end of the window the saga decides `settle-held` and keeps the item Settling, in the Release Queue, and the item is Done when the prod train publishes
@@ -382,7 +389,7 @@ t. **Done (2026-10-14): SSE keepalive** (enhancement 11). Every event stream (wo
    writes a `: ping` comment every 25 s, busy or idle (`FACTORY_SSE_PING_SECONDS`); before, a ping came only after 15 s without an event.
    The stream clients (`Client.Subscribe.ps1`, `Client.Own.ps1`) ignore comment lines and print `stream.error` only from the third failed
    attempt in a row (after a drop by error: the drop and 2 failed reconnects; after a clean end of the stream: 3 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
-u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, `gateway/PlantSnapshot.cs`, `plugin/scripts/lib/PlantSnapshot.ps1`).
+u. **Done (2026-10-14): the plant survives a graceful restart** (**V3.2, 2026-11-01: the snapshot ref and its rule scripts are gone; the plant is kept in the database only, restored from it by the process that takes the SQL lock, `restore.how` sql; the text below is the history**) (enhancement 5, `gateway/PlantSnapshot.cs`, `plugin/scripts/lib/PlantSnapshot.ps1`).
    At SIGTERM the gateway writes its offers, assignments (not QC environments), owners and leases as the message of a parentless commit held by
    `refs/factory/<instance>/plant-snapshot`; the next start reads it back before its first sweep and restores it (an unanswered offer gets a fresh
    window and is pushed again when its worker reconnects, or at once to a worker already reconnected). The start removes the ref after reading it,
@@ -390,10 +397,10 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, 
    outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. (W9.10k: where the
    engine acts, the same hand-over is kept in the database, `factory.PlantAssignments`, `PlantHolders`, `PlantDrains` and `PlantState`, written on every
    change and at the stop, read first at start (`restore.how` `sql`; the ref only when the database holds nothing yet) and corrected from `WorkItems` and the
-   claims before the first sweep (`restore.corrected`). The ref snapshot is still written beside it until the ref lease goes (V3.2, not finished).) Messages,
+   claims before the first sweep (`restore.corrected`). The ref snapshot is still written beside it until it is removed (section 6d, still to do).) Messages,
    questions and presence are still in memory only. That was the behaviour without the leader lease (`FACTORY_LEADER_LEASE=0`); with it,
    entry x.
-x. **Done (2026-10-14, issue 94): one acting gateway across releases** (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
+x. **Done (2026-10-14, issue 94): one acting gateway across releases** (**V3.2, 2026-11-01: the ref lease is gone; the SQL application lock `fworker:leader` is the only lease. `/api/v1/status` `leader` keeps `role`, `holder`, `epoch` (now the SQL term), `supersededBy` and `sql` (`held`, `epoch`, `lost`, `yielded`, ...); `predecessor`, `renewedAt`, `until`, `renewals`, `checks` and the lease seconds are removed; `timing.leaderLeaseSeconds`, `leaderRenewSeconds`, `leaderCheckSeconds` and `leaderHandoverSeconds` are removed; the text below is the history**) (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
    mode the new revision starts before the old one stops: before, both swept, the new one restored nothing (the old one's snapshot came at its
    SIGTERM, later) and sessions kept their stream on the old process while their calls reached the new one (#68).
    - The leader lease is the ref `refs/factory/<instance>/gateway-leader`: a commit whose message is the record (epoch, holder, version,
@@ -837,13 +844,13 @@ owner sets (`docs/design/operator-session.md` section 5):
 ## 6b. v2 cutover (W9.9c)
 
 The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover (v2 acts on tdd)" (`config/deploy.overrides.json`):
-`engine.v2Environments` is `["tdd"]` (the shadow list is gone since V3.2); `intake.enabled` true with `intake.v2Plans` `["docs","feature"]`;
-`scheduler.runtime` `octopus`; `delivery.finalEnvironment` `tdd` (uat and prod: v1's `AutoPromoter` is gone since V3.2 and the delivery train promotes them). The Copilot and Cursor runtimes are off on tdd
+`engine.v2Environments` is `["tdd"]` and `engine.shadowEnvironments` is empty; `intake.enabled` true with `intake.v2Plans` `["docs","feature"]`;
+`scheduler.runtime` `octopus`; `delivery.finalEnvironment` `tdd` (uat and prod: since V2.2 the delivery train promotes them, `delivery.autoPromote.trainActs` true in the overrides, and the v1 `AutoPromoter` is removed since V2.3, the switch with it). The Copilot and Cursor runtimes are off on tdd
 for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
 Copilot on-demand manager of tdd, which needs the Copilot runtime.
 
-- **No kill switch.** `FACTORY_V2_OFF` and the shadow run were removed in V3.2 of the v2-only plan (decision D1 of 2026-11-01: v2 replaces v1, no stop switch). Once V3.2 is deployed the `FACTORY_V2_OFF` entry of cmdemo1-system `system.json` (tdd fworker settings) is deleted, a step of the cmdemo1 session.
-- **Rollback.** Redeploy the previous fworker release (about 4 minutes to tdd), or revert the pull request.
+- **No kill switch.** `FACTORY_V2_OFF` is not read any more (the owner's decision D1 of 2026-11-01); its entry in cmdemo1-system `system.json` is deleted by the cmdemo1 session after the deploy of the pull request that removed it (#631). A revision that still carries it behaves as if it were not there.
+- **Rollback.** A redeploy of the previous fworker release (about 4 minutes to tdd), or a revert of the pull request in question.
 - **Before the deploy.** Confirm that no item is owned by a running Copilot task or Cursor agent (those runtimes are switched off by this change). Deploy with the
   plant quiet: no running sessions and no PASS waiting to merge.
 - **After the deploy.** Check the start-up line `runtime: octopus, enabled`, `/ready` 200 and `/_build` as in the release rule of CLAUDE.md.
@@ -871,10 +878,11 @@ Three rules the gateway keeps around the switch to v2 (tests: `tests/Gateway.Tes
 The owner decided on 2026-11-01 that v2 replaces v1 and the two do not run in parallel: no gate before the removal, no measured batch, no coexistence work, no stop switch (the rollback is a redeploy of the previous release), and v1's AutoPromoter goes because the delivery train takes uat and prod over.
 State of the removal (docs/design/fworker-wolverine-implementation.md, "Revision 2026-11-01 (v2 only)", rows V3.1 to V3.4):
 
-- **V3.1 (merged when #623 is):** Tier 1 runs on the v2 engine only; `v2-claims.txt`, `V2_BLOCKING` and `-Engine` are gone; the suites `peer-approved`, `qc-gate` (the merge gate) and the scenarios that tested v1's inline merge, the runner gate and the runner pool timeout are deleted.
-- **V3.2 (draft, #626):** `FACTORY_V2_OFF`, the shadow run and `engine.shadowEnvironments`, and (a separate commit) the AutoPromoter and the Tier 1 suite `promote`. The hybrid rule-script fallbacks of the merge, ingest-event and journal verbs stay until V1.1 gives every card a saga (the Tier 1 suites start none for most items).
-- **V3.3 (draft, #627):** `Verbs.Promote.ps1`.
-- **Still to do before v1 is gone** (what blocks V3.2): the sweep's v1 path (`sync-board`; the plant must be fed from the saga's state alone: V1.1 to V1.4), the Runner and its pool (the ledger of what still reaches a script is `docs/design/verb-inventory.json`), the GitHub-ref lease and ref snapshot (rewrite `GatewayLeader` on the SQL lease and the SQL plant store), the adoption's break detection, the `peer-approved` merge policy code, `intake.v2Plans`/`intake.v2Label`, the DeliveryShadow classes, and the server scripts that follow. The release check with `leader.sql` and `restore.how` waits for the ref lease to go.
+- **V3.1 (merged, #623):** Tier 1 runs on the v2 engine only; `v2-claims.txt`, `V2_BLOCKING` and `-Engine` are gone; the suites `peer-approved`, `qc-gate` (the merge gate) and the scenarios that tested v1's inline merge, the runner gate and the runner pool timeout are deleted.
+- **V3.2 (merged, #626, first part):** `FACTORY_V2_OFF`, the shadow run and `engine.shadowEnvironments`, the GitHub-ref lease (the SQL lock `fworker:leader` is the only lease), the hybrid rule-script fallbacks of the merge, ingest-event and journal verbs, v1's `AutoPromoter` and the Tier 1 suite `promote`.
+- **V3.3 (merged, #627, first part):** `Verbs.Promote.ps1`.
+- **V3.4 (this document and CLAUDE.md):** the release check reads `leader.sql.held`, `leader.epoch` and `plantSnapshot.restore.how`; the rollback is a redeploy of the previous release; the operator skill reads `waitingFor` with no kill switch.
+- **Still to do before v1 is gone** (follow-ups, not part of V3.4): the sweep's v1 path (`Sweeper`, `sync-board`; the plant fed from the saga's state alone: V1.1 to V1.4), the Runner and its pool (`gateway/Runner.cs`, `RunnerPool.cs`; the ledger of what still reaches a script is `docs/design/verb-inventory.json`), the server scripts of `plugin/scripts/lib` that follow (V3.3 second part), the ref snapshot of the plant, the adoption's break detection, the `peer-approved` merge policy code (`QcConfig`, `QcGate`, `MergeVerbRules`), `intake.v2Plans`/`intake.v2Label`, and the dead shadow machinery (`DeliveryShadow`, `ShadowComparison`, `ShadowGate`, `ShadowStore`, `DeliveryShadowPort`, `AdminDeliveryShadow`, `ObserveV1` and `DeliveryPolicy.Shadow` in `DeliveryExecutorPort`/`DeliveryTrain`; V2.3 of the plan). Removing the shadow classes changes handlers: regenerate the Wolverine code then.
 - **After V3.2 is deployed:** the cmdemo1 session deletes the `FACTORY_V2_OFF` entry of cmdemo1-system.
 
 ## 7. History in one paragraph

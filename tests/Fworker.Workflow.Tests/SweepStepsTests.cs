@@ -438,6 +438,44 @@ public class SweepStepsTests
         Assert.Equal(WorkItemOutcome.Refused, (await other.Send(new ApprovalSeen(Item, 0, "approval|3", 11, Head, "a-person"))).Decision.Outcome);
     }
 
+    // ---- the owner at the merge and at the completion (V3.2: v1's item.merged and item.complete triggers) -----------------------------------------------------------
+
+    [Fact]
+    public async Task TheMerge_ReleasesTheOwner_OnceWithTheKindMerged_WhoeverMerged()
+    {
+        var fx = await At(StepKind.Merge);
+        var r = await fx.Merged(Commit);   // (a merge by a person or the queue reaches the saga as MergeSeen)
+        var release = Assert.Single(r.Sent.OfType<OwnerReleaseRequested>());
+        Assert.Equal((Item, OwnerReleaseKinds.Merged), (release.Item, release.Kind));
+        Assert.Contains("merged", release.Reason);
+        // the same merge again is no second release
+        var again = await fx.Merged(Commit);
+        Assert.NotEqual(WorkItemOutcome.Applied, again.Decision.Outcome);
+    }
+
+    [Fact]
+    public async Task TheCompletionOfAnItem_ReleasesTheOwner_WithTheKindCompleted()
+    {
+        var fx = await At(StepKind.Develop);
+        var r = await fx.Send(new ItemClosed(Item, "closed|1", "test"));
+        Assert.Equal(WorkItemStatus.Completed, fx.State.Status);
+        var release = Assert.Single(r.Sent.OfType<OwnerReleaseRequested>());
+        Assert.Equal(OwnerReleaseKinds.Completed, release.Kind);
+    }
+
+    [Fact]
+    public async Task AnItemThatMergedAndThenCompletes_ReleasesTheOwnerAtBoth()
+    {
+        var fx = new SagaFixture(Policy());
+        await fx.Start(); await fx.Review(); await fx.Done(); await fx.PullRequest(Head, 11, "src/a.cs"); await fx.Review(); await fx.Done(); await fx.Verdict(true, Head);
+        var merged = await fx.Merged(Commit);
+        Assert.Equal(OwnerReleaseKinds.Merged, Assert.Single(merged.Sent.OfType<OwnerReleaseRequested>()).Kind);
+        await fx.Delivered("prod");
+        var done = await fx.Send(new SettleWindowElapsed(Item, 1, fx.Arm));
+        Assert.Equal(WorkItemStatus.Completed, fx.State.Status);
+        Assert.Equal(OwnerReleaseKinds.Completed, Assert.Single(done.Sent.OfType<OwnerReleaseRequested>()).Kind);
+    }
+
     // ---- the idle owner (owner-released-idle) -------------------------------------------------------------------------------------------------------------------------
 
     [Fact]

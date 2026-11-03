@@ -2,7 +2,7 @@
 
 The acting gateway promotes a release of `octopus.project` (cmdemo1-ui) from tdd to uat, then to prod, by itself: "gated by checks", no AI
 session and no person in the loop. Code: `plugin/scripts/lib/Verbs.Promote.ps1` (the verb `auto-promote`, `Invoke-AutoPromote`), run by the
-gateway's own loop (`gateway/AutoPromoter.cs`, registered in `AddGatewayBackground` after the sweeper) every `timing.promoteSeconds` (60) with
+gateway's own loop (`gateway/AutoPromoter.cs`; REMOVED in V2.3, 2026-11-01: the delivery train now promotes and this text describes the v1 design the train reproduces) every `timing.promoteSeconds` (60) with
 its own call timeout (240 s) and its own leader gate (`MayAct`); it runs only where `delivery.autoPromote` names the gateway's environment. It
 is not a step of `sync-board` (issue 429): a slow promotion never delays the board sweep and a slow sweep never delays a promotion. The pass reads
 the Release Queue itself (the board list, then the state of each card in the hold column). Suite: `tests/scenarios/promote.ps1` (`promote`).
