@@ -9,7 +9,7 @@ Get-ChildItem (Join-Path $root 'plugin/scripts') -Recurse -Filter *.ps1 | ForEac
     Check $_.Name ($errs.Count -eq 0); $errs | ForEach-Object { "       $($_.Message) line $($_.Extent.StartLineNumber)" }
 }
 $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json'
-foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Promote', 'Verbs.Sweep', 'Models', 'Journal', 'Owner') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
 "rules"
 Check 'docs-only: docs and md only' (Test-DocsOnlyFiles @(@{filename='docs/a.md'}, @{filename='README.md'}))
 Check 'docs-only: src file is code' (-not (Test-DocsOnlyFiles @(@{filename='docs/a.md'}, @{filename='src/X.cs'})))
@@ -64,7 +64,6 @@ $script:LeaseFence.lost = @{ current_epoch = 5; current_holder = 'gw:2:b'; relea
 Check 'fence: a lease found lost stays lost' (-not (Test-LeaseHeld))
 try { Assert-LeaseHeld 'PUT repos/a/b/pulls/3/merge'; Check 'fence: a lost lease refuses the step' $false } catch { Check 'fence: a lost lease refuses the step, naming both epochs and the step' ($_.Exception.Code -eq 'lease-lost' -and $_.Exception.Exit -eq 20 -and $_.Exception.Extra.epoch -eq 4 -and $_.Exception.Extra.current_epoch -eq 5 -and $_.Exception.Extra.step -eq 'PUT repos/a/b/pulls/3/merge') }
 try { Invoke-GhRaw -Method PATCH -Path 'repos/a/b/issues/comments/9' -Body @{ body = 'x' }; Check 'fence: a GitHub write of a superseded gateway is refused' $false } catch { Check 'fence: a GitHub write of a superseded gateway is refused before any request' ($_.Exception.Code -eq 'lease-lost') }
-try { Invoke-OctoPost 'api/Spaces-1/interruptions/x/submit' @{ Result = 'Proceed' }; Check 'fence: an Octopus write of a superseded gateway is refused' $false } catch { Check 'fence: an Octopus write (a deployment, a Sign-off answer) of a superseded gateway is refused' ($_.Exception.Code -eq 'lease-lost') }
 $script:LeaseFence = $null
 $d = '{"a":"2026-10-10T21:09:32.250Z"}' | ConvertFrom-Json -AsHashtable -DateKind String
 Check 'state dates stay strings through the JSON round trip (milliseconds kept)' ((ConvertTo-Iso (ConvertFrom-Iso $d.a)) -eq '2026-10-10T21:09:32.250Z')

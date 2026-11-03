@@ -87,7 +87,6 @@ public sealed class ItemVerbsPortTests : IDisposable
             Assert.True(Task.Run(() => host.Server).Wait(TimeSpan.FromSeconds(60)), "the gateway of an acting v2 environment did not finish starting");
             var routes = host.Services.GetRequiredService<V2VerbRoutes>();
             Assert.All(ItemRoutes.Verbs, v => Assert.True(routes.TryGet(v, out _), v));
-            Assert.False(routes.TryGet("auto-promote", out _));   // another group's verb is not registered by this one
             Assert.Same(routes, host.Services.GetRequiredService<Runner>().Routes);   // W9.9a: the gateway's own calls ask the same table, from the start (the host built it before any of them)
             Assert.IsType<V2VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
         }

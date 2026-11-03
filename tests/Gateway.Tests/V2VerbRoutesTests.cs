@@ -92,9 +92,8 @@ public sealed class V2VerbRoutesTests : IDisposable
         Assert.Equal(routes.Count, routes.Verbs.Distinct().Count());
         // W9.3 (#355): the five merge train verbs are registered
         Assert.All(MergeRoutes.Verbs, v => Assert.Contains(v, routes.Verbs));
-        // W9.4: the delivery train's verbs; auto-promote is in the group but is the train's own executor, not a route
+        // W9.4: the delivery train's verbs
         Assert.Equal(["ci-release", "copilot-owner", "copilot-settle", "private-build", "publish-demo", "settle"], DeliveryRoutes.Verbs.Where(routes.Verbs.Contains).Order().ToArray());
-        Assert.DoesNotContain("auto-promote", routes.Verbs);
     }
 
     [Fact]
@@ -149,7 +148,7 @@ public sealed class V2VerbRoutesTests : IDisposable
         Assert.Equal((0, "v2:{\"item\":3}"), await runner.RunAsync("claim-item", "{\"item\":3}", TimeSpan.FromSeconds(5)));
         Assert.Equal((0, "v2:journal"), await runner.RunAsync("journal", "{}", TimeSpan.FromSeconds(5)));   // BaseUpdate and PlantTicker (#477)
         // no route: the rule script, which this test does not have; a failed start is not a v2 answer
-        Assert.NotEqual(0, (await runner.RunAsync("auto-promote", "{}", TimeSpan.FromSeconds(5))).Code);
+        Assert.NotEqual(0, (await runner.RunAsync("get-delivery", "{}", TimeSpan.FromSeconds(5))).Code);
         Assert.Null(new Runner(Path.Combine(dir, "no-such-factory.ps1")).Routes);   // where the engine does not act the table is never set
     }
 

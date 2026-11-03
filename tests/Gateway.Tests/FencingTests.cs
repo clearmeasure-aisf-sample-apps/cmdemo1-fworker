@@ -26,7 +26,6 @@ public sealed class FencingTests
 
     [Theory]
     [InlineData("sync-board")]
-    [InlineData("auto-promote")]
     [InlineData("merge")]
     [InlineData("settle")]
     [InlineData("resettle-item")]

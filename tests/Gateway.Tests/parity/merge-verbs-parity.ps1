@@ -7,7 +7,7 @@ param([Parameter(Mandatory)][string]$Cases, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json'
-foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Promote', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
 
 $script:Case = $null
 $script:Calls = @()
