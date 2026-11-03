@@ -145,7 +145,7 @@ Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 ho
 6. The merge is the release to tdd: Build of `master` (image only), then `release.yml` pushes that image to the registry and creates the
    Octopus release of project `cmdemo1-fworker`, whose lifecycle deploys it to tdd. About 4 minutes from merge to live.
    **A release is done only when both are true**: `curl -s <tdd url>/_build` shows the new version (`1.0.<Build run number>`,
-   `pluginHash`) AND `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready` answers 200 (it also means the database schema is good; `/api/v1/status` `schema` lists the scripts this start applied and `differences` is empty). `/health` 200 is not enough: on 2026-10-13 a
+   `pluginHash`) AND `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready` answers 200 (it also means the database schema is good; `/api/v1/status` `schema` lists the scripts this start applied and `differences` is empty; `leader.sql.held` is true and `leader.epoch` the term of this process). `/health` 200 is not enough: on 2026-10-13 a
    release was live and never ready for 49 minutes. A 503 of `/ready` says what the start waits for
    (`{"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."}`; `"database"` for a v2 environment with no usable `FACTORY_DB_CONNECTION`, for good; `"adoption"` only after 10 minutes of the sweep waiting for the first adoption of the term: before that the start is simply not done yet, `/api/v1/status` `v2.adoption` says where it is); if it has not turned 200 a few minutes after the
    deployment, treat it as an outage: find the cause or roll back.
@@ -154,7 +154,7 @@ Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 ho
 A gateway restart drops the in-memory state (below) except the plant: the process that holds the SQL lock (`gateway/Leader.cs`, `gateway/Leadership/`) keeps it
 in the database (`factory.PlantState` and the rows beside it) on every change and at its stop, and the next process restores it from there before its first
 sweep (and renews the owners' claims that ran out while no gateway was up). Deploy to tdd only when the plant is quiet, say so beforehand, and check
-afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `leader.sql.held` true, `leader.epoch` the term, `plantSnapshot.restore.how` sql). Roll back by reverting the pull request.
+afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `leader.sql.held` true, `leader.epoch` the term, `plantSnapshot.restore.how` sql). Roll back by redeploying the previous fworker release (there is no switch back to v1: `FACTORY_V2_OFF` and the shadow run are gone), or by reverting the pull request.
 
 ## Rules
 

@@ -300,7 +300,7 @@ beyond `next_event` and item tool calls.
 Built 2026-10-29: **the database schema by DbUp** (owner: "just like cmdemo1-workorders does it ... when the gateway starts, we should know the schema is good"; design
 `docs/design/fworker-database.md`, section "Database" of `CLAUDE.md`). `src/Fworker.Database` holds 11 idempotent scripts (001 to 008 are the EF migrations, 009 and 010 the
 tables the stores created on first use, 011 Wolverine's message store generated from WolverineFx 6.56.0 / Weasel 9.47.0). The gateway applies them at start under an application lock,
-then compares the catalog with `schema-manifest.json`; `/ready` answers 503 `waitingFor: schema` until that passes (where `FACTORY_DB_CONNECTION` is set and v2 acts; in shadow, W9.10o, the schema shows in `/api/v1/status` `schema` and `/ready` does not wait), and Wolverine builds and diffs nothing (`AutoCreate.None`), so its start no longer reads the schema for about 80 s and the 300 s command timeout of #533 is gone.
+then compares the catalog with `schema-manifest.json`; `/ready` answers 503 `waitingFor: schema` until that passes (where `FACTORY_DB_CONNECTION` is set and v2 acts), and Wolverine builds and diffs nothing (`AutoCreate.None`), so its start no longer reads the schema for about 80 s and the 300 s command timeout of #533 is gone.
 Cutover of tdd (first release of this change): nothing to do by hand. The scripts run as no-ops on the existing tables, create `IdempotencyLedger`, `CopilotReservations` and `IngressDedup` if
 they are missing, rewrite Wolverine's 5 procedures in place, journal all 11 names. Check after the release: `/ready` 200, `/api/v1/status` `schema.state` `good`, `schema.differences` empty,
 `schema.applied` the scripts of this start, `wolverine.state` `running` within seconds. If `schema.differences` names objects, the guards did not match what EF or Weasel built there: read the names,
@@ -397,7 +397,7 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (**V3.2, 2026-11
    outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. (W9.10k: where the
    engine acts, the same hand-over is kept in the database, `factory.PlantAssignments`, `PlantHolders`, `PlantDrains` and `PlantState`, written on every
    change and at the stop, read first at start (`restore.how` `sql`; the ref only when the database holds nothing yet) and corrected from `WorkItems` and the
-   claims before the first sweep (`restore.corrected`). tdd, in the shadow run, keeps the ref.) Messages,
+   claims before the first sweep (`restore.corrected`). The ref snapshot is still written beside it until it is removed (section 6d, still to do).) Messages,
    questions and presence are still in memory only. That was the behaviour without the leader lease (`FACTORY_LEADER_LEASE=0`); with it,
    entry x.
 x. **Done (2026-10-14, issue 94): one acting gateway across releases** (**V3.2, 2026-11-01: the ref lease is gone; the SQL application lock `fworker:leader` is the only lease. `/api/v1/status` `leader` keeps `role`, `holder`, `epoch` (now the SQL term), `supersededBy` and `sql` (`held`, `epoch`, `lost`, `yielded`, ...); `predecessor`, `renewedAt`, `until`, `renewals`, `checks` and the lease seconds are removed; `timing.leaderLeaseSeconds`, `leaderRenewSeconds`, `leaderCheckSeconds` and `leaderHandoverSeconds` are removed; the text below is the history**) (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
@@ -863,15 +863,27 @@ Copilot on-demand manager of tdd, which needs the Copilot runtime.
 Three rules the gateway keeps around the switch to v2 (tests: `tests/Gateway.Tests/CutoverSafetyTests.cs`, job "Image starts without a database"):
 
 - **v1's intake is off wherever the engine does not act on `intake.v2Plans`.** The image has `intake.enabled` true for the engine's intake; v1's intake leaves a Todo item alone only because the sweep hands it the plans of the engine
-  (`Sweeper.AddV2Arguments`). So where `intake.v2Plans` names plans and v2 does not act (the kill switch `FACTORY_V2_OFF`, uat and prod, a v2 environment with no database) the sweep sends no `intake` block at all
+  (`Sweeper.AddV2Arguments`). So where `intake.v2Plans` names plans and v2 does not act (uat and prod, a v2 environment with no database) the sweep sends no `intake` block at all
   (`Sweeper.IntakeOff`): v1 takes no item, as before the cutover. `FACTORY_INTAKE=1` cannot bring it back, the script has no block to act on. With `v2Plans` empty (the source defaults, the Tier 1 suites) nothing changes.
 - **v2 configured and no usable database (`FACTORY_DB_CONNECTION` missing or malformed): inert, not crashed, not v1.** `EngineOptions.NoDatabase`: `V2Acts` is false, no v2 service is registered, the sweeper holds an ownership that
   is never loaded (`V2Ownership.NeverLoaded`) and sweeps nothing, `/ready` answers 503 `{"waitingFor":"database"}`, `/health` stays 200, `/api/v1/status` `engine` says `inert`. The AutoPromoter (uat and prod), the dashboard and
-  the status keep running. v1 is not the fallback on purpose: with no database no `v1-ran` marker can be written, and a later adoption would not know that v1 had acted. The way out is the variable, or `FACTORY_V2_OFF=1`.
+  the status keep running. v1 is not the fallback on purpose: with no database no `v1-ran` marker can be written, and a later adoption would not know that v1 had acted. The way out is the variable.
 - **No v1 sweep pass before the term's adoption.** Where v2 acts the sweep waits until the adoption of this process's term in the lease is over (`AdoptionJob.IsDone`, `AdoptionGate`), then reads the saga's table again before its
   first pass. The sweep begins once a run of the term has finished: done, or partial with no break outstanding (items the run could not read stay v1's, as before); after a break only a done run counts (the fencing). A run that cannot finish is retried by its job and the sweep keeps waiting, so v1's steps (the PASS merge, settling, card moves) do not run beside an adoption or on items a break left unfenced. The wait is shown, not cut short: after 10 minutes
   `/api/v1/status` `v2.adoption.sweep` says `overdue: true` and, until the first adoption of the process has finished, `/ready` answers 503 `{"waitingFor":"adoption"}` (a release is then an outage: find the cause in
-  `v2.adoption`, or set `FACTORY_V2_OFF=1`). A later term (lease lost and taken again) waits again and shows the wait, but `/ready` does not flip back.
+  `v2.adoption`, or redeploy the previous release). A later term (lease lost and taken again) waits again and shows the wait, but `/ready` does not flip back.
+
+## 6d. v2 only (plan of 2026-11-01, pull request #622)
+
+The owner decided on 2026-11-01 that v2 replaces v1 and the two do not run in parallel: no gate before the removal, no measured batch, no coexistence work, no stop switch (the rollback is a redeploy of the previous release), and v1's AutoPromoter goes because the delivery train takes uat and prod over.
+State of the removal (docs/design/fworker-wolverine-implementation.md, "Revision 2026-11-01 (v2 only)", rows V3.1 to V3.4):
+
+- **V3.1 (merged, #623):** Tier 1 runs on the v2 engine only; `v2-claims.txt`, `V2_BLOCKING` and `-Engine` are gone; the suites `peer-approved`, `qc-gate` (the merge gate) and the scenarios that tested v1's inline merge, the runner gate and the runner pool timeout are deleted.
+- **V3.2 (merged, #626, first part):** `FACTORY_V2_OFF`, the shadow run and `engine.shadowEnvironments`, the GitHub-ref lease (the SQL lock `fworker:leader` is the only lease), the hybrid rule-script fallbacks of the merge, ingest-event and journal verbs, v1's `AutoPromoter` and the Tier 1 suite `promote`.
+- **V3.3 (merged, #627, first part):** `Verbs.Promote.ps1`.
+- **V3.4 (this document and CLAUDE.md):** the release check reads `leader.sql.held`, `leader.epoch` and `plantSnapshot.restore.how`; the rollback is a redeploy of the previous release; the operator skill reads `waitingFor` with no kill switch.
+- **Still to do before v1 is gone** (follow-ups, not part of V3.4): the sweep's v1 path (`Sweeper`, `sync-board`; the plant fed from the saga's state alone: V1.1 to V1.4), the Runner and its pool (`gateway/Runner.cs`, `RunnerPool.cs`; the ledger of what still reaches a script is `docs/design/verb-inventory.json`), the server scripts of `plugin/scripts/lib` that follow (V3.3 second part), the ref snapshot of the plant, the adoption's break detection, the `peer-approved` merge policy code (`QcConfig`, `QcGate`, `MergeVerbRules`), `intake.v2Plans`/`intake.v2Label`, and the dead shadow machinery (`DeliveryShadow`, `ShadowComparison`, `ShadowGate`, `ShadowStore`, `DeliveryShadowPort`, `AdminDeliveryShadow`, `ObserveV1` and `DeliveryPolicy.Shadow` in `DeliveryExecutorPort`/`DeliveryTrain`; V2.3 of the plan). Removing the shadow classes changes handlers: regenerate the Wolverine code then.
+- **After V3.2 is deployed:** the cmdemo1 session deletes the `FACTORY_V2_OFF` entry of cmdemo1-system.
 
 ## 7. History in one paragraph
 
