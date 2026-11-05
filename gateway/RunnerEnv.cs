@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-// The environment of every pwsh process the gateway starts (a rule-script call of Runner, a worker of RunnerPool).
+// The environment of every pwsh process the gateway starts (a rule-script call of Runner).
 // The pwsh processes of the gateway share no .NET startup profile ($HOME/.cache/powershell/StartupProfileData-*): concurrent or killed writers
 // corrupt it, and every later pwsh that reads it dies with SIGSEGV, exit 139 (issue 375). Multicore JIT is off for them: no read, no write.
 

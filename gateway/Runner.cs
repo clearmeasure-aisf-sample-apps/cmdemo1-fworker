@@ -5,44 +5,25 @@ using System.Text.Json.Nodes;
 
 sealed class Runner(string entry)
 {
-    // runner.pool > 0: long-lived pwsh workers take the calls (RunnerPool.cs); null (the default): one process per call, as below.
-    readonly RunnerPool? pool = RunnerPool.Create(entry);
-    // at most runner.maxProcesses calls at once, pooled and spawned together, started by priority (RunnerGate.cs, issue 89)
+    // one pwsh process per call. At most runner.maxProcesses calls at once, started by priority (RunnerGate.cs, issue 89)
     readonly RunnerGate limiter = RunnerGate.Create(entry);
-    // the processes of calls that run now (not the pool's workers), for the process count and memory of /status
+    // the processes of calls that run now, for the process count and memory of /status
     readonly ConcurrentDictionary<long, Process> live = new();
     readonly ConcurrentDictionary<long, string> liveVerb = new();
     long liveKey;
-    // Fencing (W0.1, docs/design/delivery-speed.md 18.1.1). The rule scripts that act on the board get the lease epoch this gateway holds as "_lease"
-    // ({ epoch, holder }); while it is set they check the lease ref before every write (plugin/scripts/lib/Leader.ps1 Assert-LeaseHeld) and refuse it
-    // once a newer process holds it. Null (lease off): nothing is added. The verbs are those whose writes the board, the merge queue or a deployment
-    // depend on; a verb that is only read, and the lease's and the snapshot's own, are not fenced (the final snapshot of a superseded gateway must land).
-    public Func<(long Epoch, string Holder)?>? Lease { get; set; }
+    // The verbs whose writes the board, the merge queue or a deployment depend on: a process that no longer holds the leader lock refuses them (MayAct), and a superseded gateway waits for those
+    // that run and then ends them (DrainFencedAsync). The GitHub-ref lease the scripts once checked themselves ("_lease") is gone (V3.2): the SQL lock is the only fence.
     public static readonly IReadOnlySet<string> FencedVerbs = new HashSet<string>(StringComparer.Ordinal)
     { "sync-board", "merge", "settle", "resettle-item", "copilot-settle", "base-update-branch", "base-watch", "qc-sync", "ci-release" };
     int fencedInFlight;
     public int FencedInFlight => Volatile.Read(ref fencedInFlight);
 
-    static string StripLease(string stdin)
+    /// <summary>The rule script's stdin without a "_lease": one in the input came from a caller, never from the gateway, and it is taken out, as "_cause" is, so no client can fence or unfence a script.</summary>
+    public static string StripLease(string stdin)
     {
         if (!stdin.Contains("\"_lease\"", StringComparison.Ordinal)) return stdin;
         try { if (JsonNode.Parse(stdin) is JsonObject o && o.Remove("_lease")) return o.ToJsonString(); } catch (JsonException) { }
         return stdin;
-    }
-
-    /// <summary>The rule script's stdin with "_lease" added for a fenced verb while the lease is on; anything else is returned unchanged.</summary>
-    public string InjectLease(string verb, string stdin)
-    {
-        // a "_lease" in the input came from a caller, never from the gateway: it is taken out, as "_cause" is, so no client can fence or unfence a script
-        if (!FencedVerbs.Contains(verb) || Lease?.Invoke() is not { } l) return StripLease(stdin);
-        try
-        {
-            var o = string.IsNullOrWhiteSpace(stdin) ? new JsonObject() : JsonNode.Parse(stdin) as JsonObject;
-            if (o is null) return stdin;
-            o["_lease"] = new JsonObject { ["epoch"] = l.Epoch, ["holder"] = l.Holder };
-            return o.ToJsonString();
-        }
-        catch (JsonException) { return stdin; }
     }
 
     /// <summary>
@@ -57,7 +38,6 @@ sealed class Runner(string entry)
         if (FencedInFlight > 0)
         {
             foreach (var kv in liveVerb.ToList()) if (FencedVerbs.Contains(kv.Value) && live.TryGetValue(kv.Key, out var p)) { try { p.Kill(true); killed++; } catch { } }
-            killed += pool?.KillBusy(v => FencedVerbs.Contains(v)) ?? 0;
             var grace = Stopwatch.StartNew();
             while (FencedInFlight > 0 && grace.Elapsed < TimeSpan.FromSeconds(3)) await Task.Delay(50);
         }
@@ -93,7 +73,7 @@ sealed class Runner(string entry)
         return await RunScriptAsync(verb, stdin, timeout);
     }
 
-    /// <summary>Whether this process may act now (the leader lease, and the SQL lock where the engine acts: <c>GatewayLeader.MayAct</c>); null (the default) is always. Set with <see cref="Lease"/>; only a routed fenced verb asks it here, the script path has the lease in its input.</summary>
+    /// <summary>Whether this process may act now (the SQL lock: <c>GatewayLeader.MayAct</c>); null (the default) is always. A fenced verb asks it before it starts, on the route and on the script path.</summary>
     public Func<bool>? MayAct { get; set; }
 
     /// <summary>Cutover review: true while the gateway is inert for want of a database; set by the composition (EngineOptions.NoDatabase). See <see cref="InertVerbs"/>.</summary>
@@ -112,7 +92,7 @@ sealed class Runner(string entry)
         }
         var fenced = FencedVerbs.Contains(verb);
         // (counted first, then the check: a drain that ran between the two finds the call and waits for it. The check is made again where the call really starts - after the wait for a runner slot, once the process or
-        // the pool worker is registered where DrainFencedAsync finds it - because a call can wait for a slot longer than the drain does)
+        // the process is registered where DrainFencedAsync finds it - because a call can wait for a slot longer than the drain does)
         if (fenced) Interlocked.Increment(ref fencedInFlight);
         if (fenced && MayAct?.Invoke() == false)
         {
@@ -122,7 +102,7 @@ sealed class Runner(string entry)
             return lost;
         }
         int code; string output;
-        try { (code, output) = await RunProcessAsync(verb, InjectLease(verb, stdin), timeout, fenced); }
+        try { (code, output) = await RunProcessAsync(verb, StripLease(stdin), timeout, fenced); }
         finally { if (fenced) Interlocked.Decrement(ref fencedInFlight); }
         if (fenced) NoteFenced(verb, code, output);
         return (code, Budget?.Take(output) ?? output);
@@ -133,7 +113,7 @@ sealed class Runner(string entry)
     void NoteFenced(string verb, int code, string output)
     {
         if (!output.Contains("\"lease-lost\"", StringComparison.Ordinal) && !output.Contains("\"fenced\":{", StringComparison.Ordinal)) return;
-        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced", ["verb"] = verb, ["epoch"] = Lease?.Invoke() is { } l ? l.Epoch : null, ["exit"] = code }.ToJsonString());
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced", ["verb"] = verb, ["exit"] = code }.ToJsonString());
     }
 
     bool MayStart(bool fenced) => !fenced || MayAct?.Invoke() != false;
@@ -155,8 +135,6 @@ sealed class Runner(string entry)
         var waited = DateTime.UtcNow - queuedAt;
         if (waited > TimeSpan.Zero) timeout = timeout - waited > timeout / 4 ? timeout - waited : timeout / 4;
         if (!MayStart(fenced)) return LeaseLost(verb);
-        if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout, () => MayStart(fenced)) is { } pooled) return pooled;
-        if (!MayStart(fenced)) return LeaseLost(verb);
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", entry, "--server", verb }) psi.ArgumentList.Add(a);
         RunnerEnv.Apply(psi);
@@ -177,12 +155,11 @@ sealed class Runner(string entry)
         finally { live.TryRemove(key, out _); liveVerb.TryRemove(key, out _); }
     }
 
-    // /status: the gate (limit, running and waiting by class, peaks, the last starts), the pool's size, and the processes and memory now
+    // /status: the gate (limit, running and waiting by class, peaks, the last starts), and the processes and memory now
     public JsonObject Status()
     {
         var o = limiter.Status();
-        o["pool"] = pool?.Size ?? 0;
-        o["memory"] = RunnerMemory.Read(live.Values.Concat(pool?.Processes() ?? Enumerable.Empty<Process>()).ToList());
+        o["memory"] = RunnerMemory.Read(live.Values.ToList());
         return o;
     }
 }

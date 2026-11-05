@@ -1,5 +1,5 @@
 // W9.8 (#360): the board and the history: ingest-event (the webhook's translation, into the ingress), journal (the ledger, recorded in the item history), the transcripts (in the database, factory.Transcripts, script 013)
-// and sync-board (the sweep stays v1's until W9.11; one pass of the board reconciler rides along). The verbs are answered by BoardVerbs (gateway/Verbs/BoardVerbs.cs) from the parts BoardWiring registers.
+// and sync-board (one pass of the board reconciler; V3.2: v1's sweep is not run). The verbs are answered by BoardVerbs (gateway/Verbs/BoardVerbs.cs) from the parts BoardWiring registers.
 // Registered to the v2 path only where the engine acts (V2VerbRoutes.Build); v1 routing is unchanged. Without the parts (no home repository in the instance file) nothing is registered and v1 answers.
 static class BoardRoutes
 {

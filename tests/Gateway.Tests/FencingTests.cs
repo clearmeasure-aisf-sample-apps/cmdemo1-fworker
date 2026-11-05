@@ -6,23 +6,12 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W0.1, fencing (docs/design/delivery-speed.md 18.1.1): the Runner puts a lease into the rule scripts that act on the board when it is given one (the gateway gives none since V3.2: the GitHub ref the scripts checked
-/// is gone, and the SQL lock is checked by the gateway itself, GatewayLeader.MayAct, which refuses the routes of a fenced verb), and a superseded gateway waits for the running ones at most 45 s and then ends them.
+/// W0.1, fencing (docs/design/delivery-speed.md 18.1.1): a superseded gateway waits for the running rule scripts that act on the board at most 45 s and then ends them, and a process that no longer holds the SQL lock
+/// refuses a fenced verb (GatewayLeader.MayAct). The scripts get no lease of their own since V3.2 (the GitHub ref they checked is gone): a "_lease" in a caller's input is taken out.
 /// </summary>
 public sealed class FencingTests
 {
-    static Runner NewRunner(Func<(long Epoch, string Holder)?>? lease) => new(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")) { Lease = lease };
-
-    [Fact]
-    public void InjectLease_FencedVerb_AddsEpochAndHolder_KeepsTheRestOfTheInput()
-    {
-        var r = NewRunner(() => (7, "gw:1:abc"));
-        var o = JsonNode.Parse(r.InjectLease("sync-board", """{"items":[3,4],"low":true}"""))!.AsObject();
-        Assert.Equal(7L, (long?)o["_lease"]?["epoch"]);
-        Assert.Equal("gw:1:abc", (string?)o["_lease"]?["holder"]);
-        Assert.Equal(2, o["items"]!.AsArray().Count);
-        Assert.Equal(true, (bool?)o["low"]);
-    }
+    static Runner NewRunner() => new(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1"));
 
     [Theory]
     [InlineData("sync-board")]
@@ -32,13 +21,7 @@ public sealed class FencingTests
     [InlineData("copilot-settle")]
     [InlineData("base-update-branch")]
     [InlineData("qc-sync")]
-    public void InjectLease_EveryFencedVerb_Gets_TheLease_EvenOnEmptyInput(string verb)
-    {
-        var r = NewRunner(() => (3, "h"));
-        Assert.Contains(verb, Runner.FencedVerbs);
-        var o = JsonNode.Parse(r.InjectLease(verb, ""))!.AsObject();
-        Assert.Equal(3L, (long?)o["_lease"]?["epoch"]);
-    }
+    public void TheVerbsThatActOnTheBoard_AreFenced(string verb) => Assert.Contains(verb, Runner.FencedVerbs);
 
     [Theory]
     [InlineData("leader-lease")]
@@ -46,21 +29,18 @@ public sealed class FencingTests
     [InlineData("plant-snapshot-load")]
     [InlineData("revocations")]
     [InlineData("get-item")]
-    public void InjectLease_UnfencedVerbs_AreLeftAlone(string verb)
-    {
-        // the lease's own verb and the snapshot's must work after a hand-over (the final snapshot of a superseded gateway), and reads need no fence
-        var r = NewRunner(() => (3, "h"));
-        Assert.DoesNotContain(verb, Runner.FencedVerbs);
-        Assert.Equal("""{"a":1}""", r.InjectLease(verb, """{"a":1}"""));
-    }
+    public void TheReadsAndTheSnapshotsOwnVerbs_AreNotFenced(string verb) => Assert.DoesNotContain(verb, Runner.FencedVerbs);
 
     [Fact]
-    public void InjectLease_LeaseOff_OrInputNotAnObject_ChangesNothing()
+    public void AClientsOwnLease_IsTakenOut_AndTheRestOfTheInputIsKept()
     {
-        Assert.Equal("""{"a":1}""", NewRunner(null).InjectLease("sync-board", """{"a":1}"""));
-        Assert.Equal("""{"a":1}""", NewRunner(() => null).InjectLease("sync-board", """{"a":1}"""));
-        Assert.Equal("[1,2]", NewRunner(() => (1, "h")).InjectLease("sync-board", "[1,2]"));
-        Assert.Equal("not json", NewRunner(() => (1, "h")).InjectLease("sync-board", "not json"));
+        var forged = """{"item":3,"_lease":{"epoch":999,"holder":"x"}}""";
+        var o = JsonNode.Parse(Runner.StripLease(forged))!.AsObject();
+        Assert.Null(o["_lease"]);
+        Assert.Equal(3, (int?)o["item"]);
+        Assert.Equal("""{"a":1}""", Runner.StripLease("""{"a":1}"""));
+        Assert.Equal("[1,2]", Runner.StripLease("[1,2]"));
+        Assert.Equal("not json", Runner.StripLease("not json"));
     }
 
     // a stand-in `pwsh` that runs for 30 s whatever it is asked (the rule script that is still running when the lease is lost)
@@ -75,7 +55,7 @@ public sealed class FencingTests
     [Fact]
     public async Task Drain_NothingRunning_ReturnsAtOnce()
     {
-        var r = NewRunner(() => (1, "h"));
+        var r = NewRunner();
         var sw = Stopwatch.StartNew();
         var (waited, killed) = await r.DrainFencedAsync(TimeSpan.FromSeconds(45));
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2));
@@ -88,7 +68,7 @@ public sealed class FencingTests
     {
         if (!StubPwsh.Supported) return;
         using var env = SlowPwsh();
-        var r = NewRunner(() => (1, "h"));
+        var r = NewRunner();
         var call = r.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(120));
         var sw = Stopwatch.StartNew();
         while (r.FencedInFlight == 0 && sw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(20);
@@ -129,7 +109,7 @@ public sealed class FencingTests
     {
         if (!StubPwsh.Supported) return;
         using var env = SlowPwsh();
-        var runner = NewRunner(null);
+        var runner = NewRunner();
         var call = runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(120));
         var sw = Stopwatch.StartNew();
         while (runner.FencedInFlight == 0 && sw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(20);
@@ -154,7 +134,7 @@ public sealed class FencingTests
     {
         if (!StubPwsh.Supported) return;
         using var env = SlowPwsh();
-        var r = NewRunner(null);
+        var r = NewRunner();
         r.MayAct = () => false;
         var (code, output) = await r.RunScriptAsync("sync-board", "{}", TimeSpan.FromSeconds(30));
         Assert.Equal(20, code); Assert.Contains("lease-lost", output);
@@ -170,7 +150,7 @@ public sealed class FencingTests
         Environment.SetEnvironmentVariable("FACTORY_RUNNER_MAX", "1");
         try
         {
-            var r = NewRunner(null);
+            var r = NewRunner();
             var holding = true;
             r.MayAct = () => holding;
             var slot = r.RunAsync("get-item", "{}", TimeSpan.FromSeconds(3));          // takes the only slot for three seconds (a script that runs 30 s, ended by its timeout)
@@ -195,22 +175,11 @@ public sealed class FencingTests
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
         env.Apply();   // the ordinary stub answers {"ok":true} at once
-        var r = NewRunner(() => (1, "h"));
+        var r = NewRunner();
         var (code, _) = await r.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(30));
         Assert.Equal(0, code);
         var (_, killed) = await r.DrainFencedAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(0, killed);
-    }
-
-    [Fact]
-    public void InjectLease_AClientsOwnLease_IsTakenOut_WhateverTheVerbAndTheLease()
-    {
-        var on = NewRunner(() => (7, "gw"));
-        var forged = """{"item":3,"_lease":{"epoch":999,"holder":"x"}}""";
-        Assert.Null(JsonNode.Parse(on.InjectLease("comment", forged))!["_lease"]);   // not a fenced verb
-        Assert.Equal(7L, (long?)JsonNode.Parse(on.InjectLease("merge", forged))!["_lease"]?["epoch"]);   // a fenced verb: the gateway's, not the client's
-        Assert.Null(JsonNode.Parse(NewRunner(null).InjectLease("merge", forged))!["_lease"]);   // the lease is off
-        Assert.Equal(3, (int?)JsonNode.Parse(on.InjectLease("comment", forged))!["item"]);
     }
 
     // ---- W9.9a: the routes of a fenced verb are fenced like the script ----
@@ -221,7 +190,7 @@ public sealed class FencingTests
         var routes = new V2VerbRoutes();
         routes.Add(ItemRoutes.Verbs, "resettle-item", (stdin, _) => { writes.Add("resettle-item " + stdin); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true}")); });
         routes.Add(ItemRoutes.Verbs, "claim-item", (stdin, _) => { writes.Add("claim-item " + stdin); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true}")); });
-        var runner = NewRunner(() => (7, "gw"));
+        var runner = NewRunner();
         runner.Routes = routes; runner.MayAct = mayAct;
         return (runner, routes, writes);
     }
@@ -260,7 +229,7 @@ public sealed class FencingTests
         var gate = new TaskCompletionSource();
         var routes = new V2VerbRoutes();
         routes.Add(ItemRoutes.Verbs, "resettle-item", async (_, _) => { await gate.Task; return new VerbAnswer(0, "{\"ok\":true}"); });
-        var r = NewRunner(() => (7, "gw"));
+        var r = NewRunner();
         r.Routes = routes; r.MayAct = () => true;
         var call = r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30));
         Assert.Equal(1, r.FencedInFlight);
@@ -276,7 +245,7 @@ public sealed class FencingTests
     public async Task WhereTheEngineDoesNotAct_ThereAreNoRoutes_AndTheScriptPathAsksTheLockAndRefusesAFencedVerbWithoutIt()
     {
         var asked = 0;
-        var r = NewRunner(() => (7, "gw"));
+        var r = NewRunner();
         r.MayAct = () => { asked++; return false; };
         Assert.Null(r.Routes);
         if (!StubPwsh.Supported) return;

@@ -51,7 +51,7 @@ function Msg-StartRefused([hashtable]$Env) {
     $dll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     $tag = [guid]::NewGuid().ToString('N').Substring(0, 6)
     $err = Join-Path $script:Work "refused-$tag.err"
-    $base = @{ FACTORY_API_PORT = "$($script:PortBase + 12)"; FACTORY_WEBHOOK_PORT = "$($script:PortBase + 13)"; FACTORY_STATE_DIR = (Join-Path $script:Work "refused-$tag"); FACTORY_RUNNER_POOL = '0' }
+    $base = @{ FACTORY_API_PORT = "$($script:PortBase + 12)"; FACTORY_WEBHOOK_PORT = "$($script:PortBase + 13)"; FACTORY_STATE_DIR = (Join-Path $script:Work "refused-$tag") }
     $all = $base + $Env
     $saved = @{}
     foreach ($k in $all.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $all[$k]) }
@@ -135,12 +135,11 @@ function Msg-ClientEvents($C) { if (-not (Test-Path $C.out)) { return @() }; @(G
 function Msg-WaitEvent($C, [string]$Event, [int]$Seconds = 20) { Wait-Until -Seconds $Seconds { @(Msg-ClientEvents $C | Where-Object { $_.event -eq $Event }).Count -gt 0 } }
 function Msg-Supervisor([string]$Name = 'supervisor') { "m1.$Name.1.$(Msg-Mac "manager:${Name}:1")" }
 # A second gateway on this slot's spare ports, with its own environment, that must serve; its GitHub is a port nothing listens on, so its sweep changes nothing.
-# It runs one process per rule-script call (FACTORY_RUNNER_POOL=0): the pool of the suite's own gateway would start three pwsh for every one of them.
 function Msg-StartGateway([hashtable]$Env, [int]$ReadySeconds = 40) {
     $dll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'; $tag = [guid]::NewGuid().ToString('N').Substring(0, 6)
     $port = $script:PortBase + 12
     # (merged, so a scenario may point a second gateway at the fake GitHub or give it a state directory it knows)
-    $all = Msg-Merge @{ FACTORY_API_PORT = "$port"; FACTORY_WEBHOOK_PORT = "$($script:PortBase + 13)"; FACTORY_STATE_DIR = (Join-Path $script:Work "second-$tag"); GITHUB_API_URL = "http://127.0.0.1:$($script:DeadPort)"; FACTORY_SWEEP_SECONDS = '3600'; FACTORY_RUNNER_POOL = '0'; FACTORY_TEST_SKIP_REVOCATIONS = '1' } $Env
+    $all = Msg-Merge @{ FACTORY_API_PORT = "$port"; FACTORY_WEBHOOK_PORT = "$($script:PortBase + 13)"; FACTORY_STATE_DIR = (Join-Path $script:Work "second-$tag"); GITHUB_API_URL = "http://127.0.0.1:$($script:DeadPort)"; FACTORY_SWEEP_SECONDS = '3600'; FACTORY_TEST_SKIP_REVOCATIONS = '1' } $Env
     $saved = @{}; foreach ($k in $all.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $all[$k]) }
     try { $p = Start-Process dotnet -ArgumentList $dll -PassThru -RedirectStandardOutput (Join-Path $script:Work "second-$tag.out") -RedirectStandardError (Join-Path $script:Work "second-$tag.err") }
     finally { foreach ($k in $all.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }

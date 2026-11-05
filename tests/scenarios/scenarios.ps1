@@ -212,33 +212,11 @@ $Scenarios = [ordered]@{
     $r = F 'w1' @('publish-demo', '--item', $t, '--file', $mp4); CheckExit 'not in Technical Design' $r 10 'wrong-column'
 }
 
-# Issue 426: a sweep answers within its budget. Its plan (the item loop) is made first; the tail steps (claim-ref reap, intake, board guard, replenish)
-# run only while budget remains and are deferred otherwise, and every step reports its milliseconds, so a slow step is named. The automatic promotion
-# is no step of the sweep (issue 429: the verb auto-promote, its own loop).
-'sync-board: with its budget used up the tail steps are deferred, the plan is still answered and each step reports its time' = {
-    $n = New-Item-Fake 'Budgeted' 'x' $L
-    $sw = F 'w1' @('sync-board', '--budget_seconds', '0.001'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
-    Check 'the sweep succeeds and still sees the item' ((Pv $sw 'ok') -eq $true -and (($swj -match "`"item`":$n[,}]") -or (@(Pv $sw 'unconfirmed') -contains $n))) $swj
-    $sk = @(Pv $sw 'skipped')
-    Check 'the claim-ref reap, the replenish and the board guard are deferred' (($sk -contains 'claim-ref-reap-deferred') -and ($sk -contains 'replenish-deferred') -and ($sk -contains 'board-guard-deferred')) $swj
-    Check 'the answer has the milliseconds of the items step and a total' ($null -ne (Pv $sw 'elapsed_ms') -and $null -ne (Pv (Pv $sw 'steps') 'items')) $swj
-    $sw2 = F 'w1' @('sync-board'); $swj2 = $sw2 | ConvertTo-Json -Depth 12 -Compress
-    $sk2 = @(Pv $sw2 'skipped')
-    Check 'with the default budget nothing is deferred and every tail step reports its time' ((-not ($sk2 | Where-Object { $_ -like '*-deferred' })) -and $null -eq (Pv (Pv $sw2 'steps') 'auto-promote') -and $null -ne (Pv (Pv $sw2 'steps') 'replenish')) $swj2
-}
-
-# A card of another repository linked to the board (issue 269): its number is not an issue of this repository. The sweep never lists it, writes
-# nothing on the issue of that number and never moves its card; a projects_v2_item webhook about it makes no event, one about a home card does.
-'board: a card of another repository linked to the board is never seen: no sweep entry, no comment, no column event' = {
+# A card of another repository linked to the board (issue 269): its number is not an issue of this repository. The gateway writes nothing on the
+# issue of that number and never moves its card; a projects_v2_item webhook about it makes no event, one about a home card does.
+'board: a card of another repository linked to the board is never seen: no comment, no column event' = {
     $f = (Fake 'issue' @{ title = 'Foreign'; body = 'x'; labels = @(@($L) + @($script:DefaultEnvLabel | Where-Object { $_ })); column = 'Technical Design'; repo = 'clearmeasure-aisf-sample-apps/other-repo' }).number
     $n = New-Item-Fake 'Home' 'x' $L
-    $sw = F 'w1' @('sync-board'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
-    Check 'the sweep sees the home card' (($swj -match "`"item`":$n[,}]") -or (@(Pv $sw 'unconfirmed') -contains $n)) $swj
-    # the sweep names an item as "item":N in its entries, as a bare number in its lists and as a key of its maps
-    $named = $swj -match "`"item`":$f[,}]"
-    foreach ($k in 'unconfirmed', 'settling', 'holds', 'unparked') { if (@(Pv $sw $k) -contains $f) { $named = $true } }
-    foreach ($k in 'owners', 'pins', 'priorities') { $mp = Pv $sw $k; if ($mp -is [System.Collections.IDictionary] -and $mp.Contains("$f")) { $named = $true } }
-    Check 'the sweep never names the card of the other repository' (-not $named) $swj
     Start-Sleep -Seconds 6
     $fi = Get-FakeIssue $f
     Check 'after several sweeps: no comment on the issue of the other repository' (@($fi.comments | Where-Object { $_ }).Count -eq 0) ($fi.comments | ConvertTo-Json -Compress -Depth 4)

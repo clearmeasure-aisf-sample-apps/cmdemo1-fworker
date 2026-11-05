@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json.Nodes;
 
-// How many rule-script calls run at once (issue 89). Every call of Runner, pooled or a process of its own, holds one slot of this gate while it runs.
+// How many rule-script calls run at once (issue 89). Every call of Runner holds one slot of this gate while it runs.
 // The container ran out of memory with one pwsh per call and no limit (#69: five kills at 1 GiB, about 1.1 GB peaks at 2 GiB): a burst of verbs,
 // webhooks and journal lines was a burst of processes. Config: runner.maxProcesses (default 6, 1 to 32); FACTORY_RUNNER_MAX overrides.
 //

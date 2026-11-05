@@ -50,8 +50,6 @@ $ManagerActionScenarios['act: the supervisor unparks, pins and prioritizes an it
         $r = Ma-Act @('prioritize', '--item', "$n", '--level', 'top', '--policy', 'backlog-order')
         CheckExit 'prioritize' $r 0
         Check 'the item carries priority:top' ((Ma-Labels $n) -contains 'priority:top')
-        $sw = Msg-Json (Msg-Verb 'sync-board' 'test-token' @{ dry = $true })
-        Check 'the sweep reports the priority for the plan' ($sw.ok -eq $true -and "$($sw.priorities["$n"])" -eq 'top') ($sw.priorities | ConvertTo-Json -Compress)
         Check 'three actions are recorded on the item' (@((Ma-State $n).manager_actions).Count -eq 3 -and @((Ma-State $n).manager_actions | Where-Object { $_.by -eq 'supervisor' }).Count -eq 3)
         $r = Ma-Act @('unpin', '--item', "$n", '--policy', 'pinned-worker-absent')
         CheckExit 'the fourth action on one item in a day is refused' $r 10 'item-action-limit'

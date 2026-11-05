@@ -115,7 +115,6 @@ public sealed class GatewayEnvironment : IDisposable
         Set("FACTORY_CONFIG", Path.Combine(Dir, "instance.test.json"));
         Set("FACTORY_API_PORT", ApiPort.ToString());
         Set("FACTORY_WEBHOOK_PORT", HookPort.ToString());
-        Set("FACTORY_RUNNER_POOL", "0");
         Set("FACTORY_ENVIRONMENT", "tdd");
         Set("FWTEST_PWSH_LOG", StubLog);
         Set("FWTEST_DIR", Dir);

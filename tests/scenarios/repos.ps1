@@ -58,17 +58,15 @@ $ReposScenarios['repos: a webhook delivery for another repository is dropped and
     Check 'the same delivery for the home repository (any case) makes its item.labeled event' ($evH.ok -eq $true -and @($evH.events | Where-Object { $_ -and $_.event -eq 'item.labeled' -and $_.item -eq $n }).Count -eq 1) ($evH | ConvertTo-Json -Compress -Depth 6)
 }
 
-$ReposScenarios['repos: a card of another repository on the shared board is ignored by the sweep, the intake and the board guard [full]'] = {
+$ReposScenarios['repos: a card of another repository on the shared board is ignored by the intake and the board guard [full]'] = {
     # the intake: the foreign card is first in Todo, the home card second; one item is pulled, and it is the home one
     $fTodo = Rp-ForeignIssue 'Foreign Todo' 'x' 'Todo'
     $hTodo = New-Item-Fake 'Home Todo' 'x' $L 'Todo'
     $in = Qc-Server 'sync-board' @{ intake = @{ freeSlots = 2 } } @{ FACTORY_INTAKE = '1' }
     Check 'the intake pulls the home card from Todo' (@($in.actions | Where-Object { $_ -and $_.action -eq 'intake-pulled' -and $_.item -eq $hTodo }).Count -eq 1 -and (Get-FakeIssue $hTodo).column -eq 'Technical Design') ($in | ConvertTo-Json -Compress -Depth 6)
     Check 'and never the foreign card' ((Get-FakeIssue $fTodo).column -eq 'Todo' -and -not (Rp-Mentions @{ actions = $in.actions } $fTodo)) ($in.actions | ConvertTo-Json -Compress -Depth 6)
-    # the sweep: a foreign card in an AI column is in no list of the answer
+    # a foreign card in an AI column: nothing of the gateway's touches it (below)
     $fTd = Rp-ForeignIssue 'Foreign Technical Design' 'x' 'Technical Design'
-    $sw = F 'w1' @('sync-board'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
-    Check 'the sweep names neither foreign card' (-not (Rp-Mentions $sw $fTd) -and -not (Rp-Mentions $sw $fTodo)) $swj
     # the board guard: a labelled issue without a card is put on the board; the foreign one without a card is not
     $fNone = Rp-ForeignIssue 'Foreign without a card'
     $hNone = Rp-NoCardIssue 'Home without a card'
@@ -82,20 +80,11 @@ $ReposScenarios['repos: a card of another repository on the shared board is igno
     Check 'the foreign cards stayed in their columns' ((Get-FakeIssue $fTodo).column -eq 'Todo' -and (Get-FakeIssue $fTd).column -eq 'Technical Design')
 }
 
-$ReposScenarios['repos: a home item that depends on other-org/other-repo#N is not held, and the foreign ref stays on it'] = {
+$ReposScenarios['repos: a home item that depends on other-org/other-repo#N keeps the foreign ref'] = {
+    # (that a foreign ref holds nothing is the admission's rule: AdmissionTests.ADependencyOnAnotherRepository_HoldsNothing_ADependencyOnTheSameNumberAtHomeDoes)
     $blocker = New-Item-Fake 'Open home item' 'x' $L
-    # the same number as the open home item, but of another repository: not a home dependency. The control depends on the home item itself.
     $line = "Depends on other-org/other-repo#$blocker"
     $free = New-Item-Fake 'Depends on a foreign ref' "Builds on the work of another repository.`n`n$line`n" $L
-    $ctl = New-Item-Fake 'Depends on the home item' "Builds on the open item.`n`nDepends on #$blocker`n" $L
-    $script:RpSweep = $null
-    Check 'the control is held on the home item (so the sweep offers items and reads their dependencies)' (Wait-Until -Seconds 60 {
-        $script:RpSweep = F 'w1' @('sync-board')
-        @($script:RpSweep.held | Where-Object { $_ -and $_.item -eq $ctl -and $_.code -eq 'depends-on' }).Count -eq 1 }) ($script:RpSweep | ConvertTo-Json -Compress -Depth 6)
-    $sw = $script:RpSweep
-    Check 'the item with the foreign ref is not held' (@($sw.held | Where-Object { $_ -and $_.item -eq $free }).Count -eq 0) ($sw.held | ConvertTo-Json -Compress -Depth 4)
-    Check 'and is offered in the same sweep' (@($sw.offers | Where-Object { $_ -and $_.item -eq $free }).Count -eq 1) ($sw.offers | ConvertTo-Json -Compress -Depth 4)
-    Check 'the control waits for the home item only' (@(@($sw.held | Where-Object { $_ -and $_.item -eq $ctl })[0].on).Count -eq 1 -and @(@($sw.held | Where-Object { $_ -and $_.item -eq $ctl })[0].on)[0] -eq $blocker) ($sw.held | ConvertTo-Json -Compress -Depth 4)
     $gi = Rp-Verb 'get-item' @{ item = $free }
     Check 'the foreign ref is shown: get-item carries the qualified line in the body' ($gi.ok -eq $true -and "$($gi.body)" -match "(?m)^Depends on other-org/other-repo#$blocker\s*$") ($gi | ConvertTo-Json -Compress -Depth 4)
     Check 'and it was not turned into a home ref' ("$($gi.body)" -notmatch "(?m)^Depends on #$blocker")

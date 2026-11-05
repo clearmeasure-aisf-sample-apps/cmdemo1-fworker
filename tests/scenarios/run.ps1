@@ -44,8 +44,6 @@ foreach ($k in $CiRuleOwnerScenarios.Keys) { $OwnerScenarios[$k] = $CiRuleOwnerS
 . (Join-Path $PSScriptRoot 'qc-gate.ps1')     # S4: sweep teardown, the race, the QC record; scenarios named "qc: gate ..."
 foreach ($k in $QcDashScenarios.Keys) { $QcScenarios[$k] = $QcDashScenarios[$k] }   # S2 scenarios run in the main QC suite, after the S1 ones
 foreach ($k in $QcGateAutoScenarios.Keys) { $QcScenarios[$k] = $QcGateAutoScenarios[$k] }   # S4: the auto policy is unchanged
-. (Join-Path $PSScriptRoot 'qc-pool.ps1')     # the rule-script worker pool; scenarios named "qc: runner pool ..."
-foreach ($k in $QcPoolScenarios.Keys) { $QcScenarios[$k] = $QcPoolScenarios[$k] }
 . (Join-Path $PSScriptRoot 'budget.ps1')      # the sweep throttle and the GitHub budget (GitHubBudget.cs): scenarios named "sweep throttle: ..." and "github budget: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'baseupdate.ps1')  # master moved: base.updated and the gateway's update branch; scenarios named "base update: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'runner-gate.ps1') # the gate of the rule scripts (gateway/RunnerGate.cs): scenarios named "runner gate: ..." join the owner suite
@@ -75,10 +73,8 @@ foreach ($barrier0 in $OwnerBarriers) { if (-not $OwnerScenarios.Contains($barri
 $script:OwnerSecret = ('owner-test-secret-' + '0123456789abcdef')   # a fixture, composed so the secret scan does not read it as a credential
 # PR QC environment (owner mode, qc roles): the main gateway has the click rate limit lifted, one has the default limits, one is behind a known proxy.
 $qcBase = @{ allowLoopbackForTests = $true; probeTimeoutSeconds = 2; maxEnvironments = 50 }
-# The qc suite runs its gateway with a pool of rule-script workers (runner.pool, gateway/RunnerPool.cs); the other suites, owner among them, keep one process per call, so both paths stay tested.
-$qcOpen = @{ qc = ($qcBase + @{ rateLimitPerIp = 100000; rateLimitPerPr = 100000 }); runner = @{ pool = $(if ($env:TEST_RUNNER_POOL) { [int]$env:TEST_RUNNER_POOL } else { 3 }) } }
+$qcOpen = @{ qc = ($qcBase + @{ rateLimitPerIp = 100000; rateLimitPerPr = 100000 }) }
 # S4: the teardown timers each need their own short timing.* values (applied by Get-Cfg and the gateway from FACTORY_TIMING_*)
-$msgPool = @{ pool = $(if ($env:TEST_RUNNER_POOL) { [int]$env:TEST_RUNNER_POOL } else { 3 }) }
 $gateQc = @{ qc = ($qcBase + @{ rateLimitPerIp = 100000; rateLimitPerPr = 100000; minFreeMb = 1 }) }
 function New-Gate([hashtable]$Qc = @{}) { @{ qc = ($gateQc.qc + $Qc) } }
 $SuiteDefs = @(
@@ -97,13 +93,12 @@ $SuiteDefs = @(
     @{ Name = 'qc-rate'; Policy = 'auto'; Set = $QcRateScenarios; Extra = @{ qc = ($qcBase + @{ rateLimitPerIp = 10; rateLimitPerPr = 20 }) }; Env = 'qc' }
     @{ Name = 'qc-proxy'; Policy = 'auto'; Set = $QcProxyScenarios; Extra = @{ qc = ($qcBase + @{ rateLimitPerIp = 10; rateLimitPerPr = 20; trustProxy = $true; knownProxies = @('127.0.0.1') }) }; Env = 'qc' }
     @{ Name = 'author'; Policy = 'auto'; Set = $AuthorScenarios; Extra = @{ stateAuthors = @('factory-bot') }; Env = 'author' }
-    # messaging and manager run on the fast path of qc: the suite's gateway has the rule-script pool (the second gateways of the scenarios do not, see
-    # Msg-StartGateway), F runs the client in one long-lived pwsh, and each suite is split over 4 groups. The owner suite keeps one process per call.
+    # messaging and manager run on the fast path of qc: F runs the client in one long-lived pwsh, and each suite is split over 4 groups.
     # the limits of the main gateway are lifted, so one scenario's sends never count against another's; the scenarios that test the limits start a
     # second gateway of their own (Msg-OnGateway). "dave" is on no list: it is the name that is refused.
-    @{ Name = 'messaging'; Policy = 'auto'; Set = $MessagingScenarios; Extra = @{ messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'hank', 'ivan', 'judy', 'kate', 'liam', 'racer', 'poller'); testHooks = $true }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
+    @{ Name = 'messaging'; Policy = 'auto'; Set = $MessagingScenarios; Extra = @{ messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'hank', 'ivan', 'judy', 'kate', 'liam', 'racer', 'poller'); testHooks = $true } }; Env = 'owner'; ClientHost = $true
         Timing = @{ ratePerMinute = 100000; pairPer10Min = 100000; perSenderQueueCap = 1000; recipientQueueCap = 1000; broadcastPer10Min = 100000; staleItemMinutes = 600; continueMinutes = 0 } }
-    @{ Name = 'manager'; Policy = 'auto'; Set = $ManagerScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor', 'supervisor2'); allowedAskers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'ivan', 'judy', 'kate'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
+    @{ Name = 'manager'; Policy = 'auto'; Set = $ManagerScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor', 'supervisor2'); allowedAskers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'ivan', 'judy', 'kate'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 } }; Env = 'owner'; ClientHost = $true
         # the delivery and step budgets are lifted like the other limits (the budget scenarios set their own); an owner the sweep stops listing is dropped after 5 s
         # (an owner that a scenario leaves behind on the suite's gateway is not reported as quiet, and a client that an earlier scenario left running, which
         # reconnects to the next gateway with the cursor of the last one, is not reported as a restart: the scenarios of those conditions set their own times)

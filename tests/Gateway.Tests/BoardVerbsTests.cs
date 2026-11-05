@@ -322,51 +322,50 @@ public sealed class BoardVerbsTests
     }
 
     [Fact]
-    public async Task SyncBoard_IsTheScriptsSweep_WithTheReconcilersPassAdded()
+    public async Task SyncBoard_IsTheReconcilersPass_AndTheRuleScriptIsNeverRun()
     {
         var rig = new Rig(); rig.Reconciler = ReconcilerOver(rig, new BoardCard(Home, 5, "Doing", true, "a"), new BoardCard(Home, 6, "Todo", true, "b"));
         var a = await rig.Verbs().SyncBoard("""{"items":[5]}""", Time);
         Assert.Equal(0, a.Code);
-        Assert.Equal("""{"items":[5]}""", Assert.Single(rig.Sweeps));            // the script got what the caller sent
+        Assert.Empty(rig.Sweeps);   // V3.2: v1's sweep is not run beside the engine
         var o = Parse(a);
-        Assert.Equal((true, 0), ((bool)o["ok"]!, (int)o["exit"]!));
-        Assert.NotNull(o["steps"]); Assert.False((bool)o["incremental"]!);     // and its answer, untouched
+        Assert.Equal((true, 0, "sync-board"), ((bool)o["ok"]!, (int)o["exit"]!, o["verb"]!.ToString()));
         var r = o["reconciler"]!;
         Assert.Equal(("ok", 2, 1, false), (r["outcome"]!.ToString(), (int)r["cards"]!, (int)r["published"]!, (bool)r["dry"]!));
         Assert.Single(rig.Published);
-        // a dry sweep: counted, not published
+        // a dry pass: counted, not published
         var dry = Parse(await rig.Verbs().SyncBoard("""{"dry":true}""", Time))["reconciler"]!;
         Assert.Equal((1, true), ((int)dry["published"]!, (bool)dry["dry"]!));   // card 6 is still news
         Assert.Single(rig.Published);
+        Assert.Empty(rig.Sweeps);
     }
 
     [Fact]
-    public async Task SyncBoard_AFailedSweep_IsReturnedAsItIs_AndNoReconcilerPassFollows()
-    {
-        var rig = new Rig { SweepAnswer = (20, """{"ok":false,"code":"timeout","exit":20}""") };
-        rig.Reconciler = ReconcilerOver(rig, new BoardCard(Home, 5, "Doing", true, "a"));
-        var a = await rig.Verbs().SyncBoard("{}", Time);
-        Assert.Equal((20, """{"ok":false,"code":"timeout","exit":20}"""), (a.Code, a.Output));
-        Assert.Empty(rig.Published);
-    }
-
-    [Fact]
-    public async Task SyncBoard_WithoutAReconciler_ReturnsTheScriptsAnswerUnchanged()
+    public async Task SyncBoard_WithoutAReconciler_IsRefusedConfigMissing_AndRunsNoScript()
     {
         var rig = new Rig();
         var a = await rig.Verbs().SyncBoard("{}", Time);
-        Assert.Equal(rig.SweepAnswer.Output, a.Output);
+        var o = Parse(a);
+        Assert.Equal((30, false, "config-missing"), (a.Code, (bool)o["ok"]!, o["code"]!.ToString()));
+        Assert.Empty(rig.Sweeps);
     }
 
     [Fact]
-    public async Task SyncBoard_AReconcilerThatThrows_NeverChangesTheSweepsAnswer()
+    public async Task SyncBoard_AReconcilerThatThrows_IsAnInternalErrorToTryAgain()
     {
         var rig = new Rig();
         rig.Reconciler = new BoardReconciler(new ThrowingBoard(), () => new CatalogSnapshot(CatalogSource.SystemJson, T0, "acme", Home, new BoardRef("acme", 1), [new RepositoryEntry(Home, [])], []), _ => Task.FromResult(true), () => true);
         var a = await rig.Verbs().SyncBoard("{}", Time);
-        Assert.Equal(0, a.Code);
         var o = Parse(a);
-        Assert.True((bool)o["ok"]!); Assert.True(o.ContainsKey("reconciler")); Assert.Null(o["reconciler"]);
+        Assert.Equal((20, "internal-error"), (a.Code, o["code"]!.ToString()));
+        Assert.Empty(rig.Sweeps);
+    }
+
+    [Fact]
+    public async Task SyncBoard_AnInputThatIsNoObject_IsAUsageError()
+    {
+        var rig = new Rig(); rig.Reconciler = ReconcilerOver(rig);
+        Assert.Equal(2, (await rig.Verbs().SyncBoard("[1", Time)).Code);
     }
 
     sealed class ThrowingBoard : IBoardReader
