@@ -6,9 +6,9 @@ needed to build, test, change and release it is here. Project state, environment
 
 ## What this is
 
-A gateway (ASP.NET Core minimal API, .NET 10) that holds the GitHub and Octopus credentials, runs the PowerShell rule scripts of the
-plugin (`pwsh factory.ps1 --server <verb>`), sweeps the board of `clearmeasure-aisf-sample-apps/cmdemo1-workorders` and hands work items to
-AI sessions (workers) that connect with a prompt from its dashboard. It ships as one container image, deployable `fworker` of the cmdemo1
+A gateway (ASP.NET Core minimal API, .NET 10) that holds the GitHub and Octopus credentials, runs the v2 engine (Wolverine sagas over SQL Server) where
+`engine.v2Environments` names its environment (every other environment is inert), keeps the board of `clearmeasure-aisf-sample-apps/cmdemo1-workorders` and hands work items to
+AI sessions (workers) that connect with a prompt from its dashboard. A few PowerShell rule scripts are left for the fallbacks of the routed verbs and its housekeeping (`pwsh plugin/scripts/server/rule.ps1 --server <verb>`). It ships as one container image, deployable `fworker` of the cmdemo1
 demo system.
 
 ## Layout
@@ -17,7 +17,7 @@ demo system.
 |---|---|
 | `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `Runner.cs` (the verb routes, and the rule script in a `pwsh` of its own where no route answers), `Operator.cs` (the operator session) |
 | `src/Fworker.Database/` | The schema of the gateway's database: plain `.sql` scripts run by DbUp at gateway start (`scripts/Update/NNN_*.sql`, `schema-manifest.json`); see "Database" below |
-| `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot`, `launcher/` (the session loop, `docs/launcher.md`) |
+| `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, the client, and `lib/*`), `skills/`, `agents/`, `tools/shot`, `launcher/` (the session loop, `docs/launcher.md`); `scripts/server/` (`rule.ps1`, `lib/*`) is the gateway's own rule scripts and is left out of the download |
 | `config/instance.json` | The source defaults. The tests run on these: messaging off, supervisor off, `ownerSessions` false |
 | `config/deploy.overrides.json` | The settings of the deployed image, merged over the defaults by `config/apply-overrides.ps1` when the image is built |
 | `tests/scenarios/` | Tier 1: scenario suites against the fake GitHub (`run.ps1`, `run-all.ps1`, one file per area) |
