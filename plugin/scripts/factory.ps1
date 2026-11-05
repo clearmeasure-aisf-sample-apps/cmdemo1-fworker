@@ -32,8 +32,8 @@ $script:FactoryCause = $null
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'backlog', 'amend-criteria', 'split-item', 'create-item', 'set-priority', 'link-dependency', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action', 'git-credential', 'park-item', 'resettle-item', 'plant-snapshot-await', 'leader-lease', 'item-pr', 'ci-release', 'copilot-settle', 'copilot-owner', 'transcript-save', 'transcript-load', 'transcript-prune')
-$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'backlog', 'git-credential', 'plant-snapshot-await', 'leader-lease', 'item-pr', 'ci-release', 'transcript-save', 'transcript-load', 'transcript-prune')
+    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'backlog', 'amend-criteria', 'split-item', 'create-item', 'set-priority', 'link-dependency', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action', 'git-credential', 'park-item', 'resettle-item', 'item-pr', 'ci-release', 'copilot-settle', 'copilot-owner', 'transcript-save', 'transcript-load', 'transcript-prune')
+$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'metrics', 'backlog', 'git-credential', 'item-pr', 'ci-release', 'transcript-save', 'transcript-load', 'transcript-prune')
 
 function Write-Out($obj, [int]$code) {
     $obj.exit = $code
@@ -47,7 +47,7 @@ function Write-Out($obj, [int]$code) {
 function Add-GhReport($o) { try { $g = Get-GhRateReport; if ($g -and $o -is [System.Collections.IDictionary]) { $o['_github'] = $g } } catch { } }
 if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
     $verb = $Rest[1]
-    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager', 'Verbs.Keeper', 'Replenish', 'Leader') { . (Join-Path $here "lib/$f.ps1") }
+    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'Transcripts', 'Metrics', 'Verbs.Manager', 'Verbs.Keeper', 'Replenish') { . (Join-Path $here "lib/$f.ps1") }
     $ErrorActionPreference = 'Stop'
     try {
         if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }
@@ -60,9 +60,6 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
         # call whose request the gateway served when it started this run (gateway/TestCause.cs), sent as X-Fake-Cause with every write
         $script:FactoryCause = $null
         if ($env:FACTORY_TEST_CAUSE_HEADER -eq '1' -and $a -is [System.Collections.IDictionary] -and $a.ContainsKey('_cause')) { $script:FactoryCause = "$($a['_cause'])"; $a.Remove('_cause') }
-        # fencing (W0.1, lib/Leader.ps1): the lease epoch the gateway runs this verb under (gateway/Runner.cs); from here every write first confirms it
-        $script:LeaseFence = $null
-        if ($a -is [System.Collections.IDictionary] -and $a.ContainsKey('_lease')) { $lease = $a['_lease']; $a.Remove('_lease'); if ($verb -ne 'leader-lease') { Set-LeaseFence $lease } }
         $fn = 'Verb_' + ($verb -replace '-', '_')
         $r = if ((Test-Has $a 'item') -and $verb -notin $NoLockVerbs) { Use-ItemLock ([int]$a.item) { & $fn $a } } else { & $fn $a }
         $r.verb = $verb

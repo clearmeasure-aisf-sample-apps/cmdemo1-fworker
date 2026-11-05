@@ -36,8 +36,6 @@ public static class StubPwsh
         done
         case "$verb" in
           revocations) echo '{"ok":true,"revoked":{}}' ;;
-          leader-lease) echo '{"ok":true,"epoch":1,"leader":true}' ;;
-          plant-snapshot-load|plant-snapshot-await) echo '{"ok":true,"found":false}' ;;
           transcript-save)
             if [ -e "$FWTEST_DIR/transcript-ok" ]; then echo '{"ok":true}'; else echo '{"ok":false,"code":"stub-not-yet"}'; exit 1; fi ;;
           item-pr)

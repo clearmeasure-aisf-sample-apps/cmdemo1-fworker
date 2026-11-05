@@ -124,8 +124,7 @@ public class VerbPolicyTests
     [Theory]
     [InlineData("revoke-worker", "use POST /api/v1/workers/{name}/revoke")]
     [InlineData("revocations", "use POST /api/v1/workers/{name}/revoke")]
-    [InlineData("plant-snapshot-save", "the plant snapshot is written and read by the gateway itself, at its stop and its start")]
-    [InlineData("leader-lease", "the plant snapshot is written and read by the gateway itself, at its stop and its start")]
+    [InlineData("plant-snapshot-save", null)]   // (V3.3: the retired verbs are gone, the script refuses them as unknown)
     [InlineData("transcript-prune", "the plant snapshot is written and read by the gateway itself, at its stop and its start")]
     [InlineData("operator-release", "use POST /api/v1/operator/record-release")]
     [InlineData("operator-releases", "use POST /api/v1/operator/record-release")]
@@ -136,7 +135,7 @@ public class VerbPolicyTests
     [InlineData("unpark-item", "use POST /api/v1/items/{n}/unpark (client: factory.ps1 unpark --item N --reason \"...\")")]
     [InlineData("resettle-item", "use POST /api/v1/items/{n}/resettle")]
     [InlineData("publish-demo", "send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)")]
-    public void UseEndpointReason_IsTheTextTheRouteAnswered(string verb, string reason) => Assert.Equal(reason, VerbPolicy.UseEndpointReason(verb));
+    public void UseEndpointReason_IsTheTextTheRouteAnswered(string verb, string? reason) => Assert.Equal(reason, VerbPolicy.UseEndpointReason(verb));
 
     [Theory]
     [InlineData("get-item")]

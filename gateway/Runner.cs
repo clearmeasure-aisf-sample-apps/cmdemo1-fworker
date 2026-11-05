@@ -47,7 +47,7 @@ sealed class Runner(string entry)
     public GitHubBudget? Budget { get; set; }
     // W9.9a: where the engine acts, the verbs that have a v2 route are answered there, whoever asks: a session (the verb endpoint reaches the same routes first) or the gateway itself (the plant's hooks, the
     // sweep, the endpoints, the runtimes, QcHub, BaseWatch, the journal lines of the ticker). Set once when the table is built (V2VerbRoutes.Build); null where the engine does not act (tdd today, uat,
-    // prod), so there every call is the rule script, as before. A verb with no route (the leader lease, the plant snapshot) is the script's in both cases.
+    // prod), so there every call is the rule script, as before. A verb with no route is the script's in both cases.
     public V2VerbRoutes? Routes { get; set; }
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
     {
