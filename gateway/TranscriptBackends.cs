@@ -7,9 +7,9 @@ using Fworker.Workflows.Transcripts;
 
 // Where the TranscriptStore keeps the sessions it holds in memory (W9.8). The store builds a session's document (the shape the ref store always held: name, item, phase, runtime, day, started, ended, lastLine, dropped,
 // total, lines) and hands it to its backend; the backend saves it, reads it back by name and prunes by age. Two backends:
-//  - RuleScriptTranscriptBackend: v1's, the rule scripts transcript-save/-load/-prune over the plant snapshot's ref store. The document is sealed first (the repository is public).
-//  - DatabaseTranscriptBackend: where the engine acts, factory.Transcripts. No seal (the database is the gateway's own), the qualified item as a column, and the rule-script backend as a fallback for a session
-//    that was written before the move (read once, saved to the database from then on; the prune clears the old refs as they age out).
+//  - RuleScriptTranscriptBackend: v1's, the rule scripts transcript-save/-load/-prune over the ref store, where the engine does not act. The document is sealed first (the repository is public).
+//  - DatabaseTranscriptBackend: where the engine acts, factory.Transcripts alone. No seal (the database is the gateway's own) and the qualified item as a column. V3.3 (slice 6): the ref store is no longer its fallback
+//    (a session written there before the move is not read, and the old refs are not pruned from here).
 
 static class TranscriptJson
 {
@@ -97,8 +97,8 @@ sealed class RuleScriptTranscriptBackend(Func<string, string, TimeSpan, Task<(in
     public async Task Prune(int days) => await run("transcript-prune", new JsonObject { ["days"] = days }.ToJsonString(), TimeSpan.FromSeconds(120));
 }
 
-/// <summary>The sessions as rows of factory.Transcripts. <paramref name="ready"/> says whether the schema is good (a start before the scripts ran is not a failure to log); <paramref name="legacy"/> is read for a session the database does not have.</summary>
-sealed class DatabaseTranscriptBackend(ITranscriptRepository repository, Fworker.Contracts.Ids.RepoId? home, Func<bool> ready, ITranscriptBackend? legacy = null) : ITranscriptBackend
+/// <summary>The sessions as rows of factory.Transcripts. <paramref name="ready"/> says whether the schema is good (a start before the scripts ran is not a failure to log).</summary>
+sealed class DatabaseTranscriptBackend(ITranscriptRepository repository, Fworker.Contracts.Ids.RepoId? home, Func<bool> ready) : ITranscriptBackend
 {
     public async Task<bool> Save(JsonObject doc)
     {
@@ -107,17 +107,11 @@ sealed class DatabaseTranscriptBackend(ITranscriptRepository repository, Fworker
         return true;
     }
 
-    public async Task<JsonObject?> Load(string name)
-    {
-        if (ready() && await repository.Load(name) is { } row) return ToDoc(row);
-        if (legacy == null) return null;
-        try { return await legacy.Load(name); } catch (Exception e) { Console.Error.WriteLine($"transcript-load {name} (ref store): {e.GetType().Name}"); return null; }
-    }
+    public async Task<JsonObject?> Load(string name) => ready() && await repository.Load(name) is { } row ? ToDoc(row) : null;
 
     public async Task Prune(int days)
     {
         if (ready()) await repository.Prune(days);
-        if (legacy != null) { try { await legacy.Prune(days); } catch { } }   // the refs written before the move age out here
     }
 
     // the document of the store -> the row: the item is qualified with the home repository

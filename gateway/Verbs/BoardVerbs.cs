@@ -9,13 +9,13 @@ using Fworker.Workflows.Transcripts;
 
 // W9.8 (docs/design/fworker-wolverine-implementation.md W9): the verbs of the board group on v2, answered in the shape of the rule script that they replace (plugin/scripts/factory.ps1 server mode: the fields of the
 // result, then "verb", "ok" and "exit"; a refusal is {ok:false, verb, code, reason, ...} with the exit code of its Reject).
-//   ingest-event     the translation of a GitHub webhook payload into the factory's events (WebhookEventTranslator): the same events as Verb_ingest_event, no rule script
-//   journal          the journal ledger (JournalLedger, the C# port of Add-Journal) answers the verb as Verb_journal does, and the line is recorded in ItemHistory (JournalHistory)
+//   ingest-event     the translation of a GitHub webhook payload into the factory's events (WebhookEventTranslator): the same events as Verb_ingest_event, no rule script (V3.3, slice 6: not even without a translator)
+//   journal          the journal ledger (JournalLedger, the C# port of Add-Journal) answers the verb as Verb_journal does, and the line is recorded in ItemHistory (JournalHistory); no rule script, not even before the ledger is made
 //   transcript-*     the sessions' transcripts in factory.Transcripts (SqlTranscriptRepository); the verbs keep the sealed form of the ref store ("fwt1:") on the wire
 //   sync-board       one pass of the board reconciler on demand (V3.2: v1's sweep, the rule script, is not run)
 // What differs from the scripts is in docs/design/fworker-wolverine-implementation.md, "W9.8 as built".
 
-/// <summary>What the board verbs read: the parts that are there where the engine acts. A part that is not there (no GitHub token, no database) makes its verb answer the refusal the script would have given.</summary>
+/// <summary>What the board verbs read: the parts that are there where the engine acts. A part that is not there (no database, no translator, the ledger not made yet) makes its verb answer a refusal that says which.</summary>
 sealed class BoardVerbParts
 {
     public ITranscriptRepository? Transcripts { get; init; }
@@ -26,7 +26,6 @@ sealed class BoardVerbParts
     public Func<JournalLedger?> Ledger { get; init; } = () => null;
     public JournalHistory? History { get; init; }
     public Func<BoardReconciler?> Reconciler { get; init; } = () => null;
-    public Func<string, string, TimeSpan, Task<(int Code, string Output)>>? RuleScript { get; init; }
     public Func<DateTimeOffset> Now { get; init; } = () => DateTimeOffset.UtcNow;
 }
 
@@ -89,21 +88,14 @@ sealed class BoardVerbs(BoardVerbParts p)
         _ => n.ToJsonString(),
     };
 
-    // A verb that v2 cannot answer here (the ledger is made when the Wolverine host is built, the translator needs the instance file's owner and repository) is the rule script's, as it was; with no script either, the refusal says why
-    async Task<VerbAnswer> RuleScript(string verb, string stdin, TimeSpan timeout, string why)
-    {
-        if (p.RuleScript is null) return BoardVerbAnswer.Rejected(verb, 30, "config-missing", why);
-        var (code, output) = await p.RuleScript(verb, stdin, timeout);
-        return new VerbAnswer(code, output);
-    }
-
     // ---- ingest-event ----------------------------------------------------------------------------------------------------------------------------
     public async Task<VerbAnswer> IngestEvent(string stdin, TimeSpan timeout)
     {
         const string verb = "ingest-event";
         if (!TryBody(verb, stdin, out var a, out var bad)) return bad;
         if (!Need(verb, a, "event", out var ev, out var refusal)) return refusal;
-        if (p.Translator is null) return await RuleScript(verb, stdin, timeout, "the instance configuration names no owner and repository");
+        // the translator needs the instance file's owner and repository: without them no event can be named, for good
+        if (p.Translator is null) return BoardVerbAnswer.Rejected(verb, 30, "config-missing", "the instance configuration names no owner and repository");
         var delivery = a.TryGetPropertyValue("delivery", out var d) && d is not null ? Text(d) : "";
         try
         {
@@ -126,7 +118,8 @@ sealed class BoardVerbs(BoardVerbParts p)
         if (!int.TryParse(itemText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var item)) return BoardVerbAnswer.Internal(verb, $"item is not a number: {itemText}");
         if (!Need(verb, a, "event", out var ev, out refusal)) return refusal;
         if (!JournalEvents.Supported.Contains(ev)) return BoardVerbAnswer.Usage(verb, $"unknown journal event '{ev}'");
-        if (p.Ledger() is not { } ledger) return await RuleScript(verb, stdin, timeout, "GH_TOKEN is not set on the gateway");
+        // the ledger is made when the Wolverine host is built: a line asked for before that is asked for again
+        if (p.Ledger() is not { } ledger) return BoardVerbAnswer.Rejected(verb, 20, "not-ready", "the journal ledger is not made yet (the Wolverine host is not built)", new JsonObject { ["retryAfterSeconds"] = 5 });
         var fields = JournalLedger.FieldsOf(a["fields"] as JsonObject);
         // a line without a key takes the ticks of the write, as the script does (a waiting line always does, in the ledger)
         var key = a.TryGetPropertyValue("key", out var k) && k is not null ? Text(k) : "";

@@ -6,7 +6,7 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.8 (gateway/Verbs/Routes/Board.cs, gateway/Ports/BoardPort.cs): the board group registers its six verbs where the engine acts and its parts are there, the Runner asks them for the gateway's own calls (W9.9a; the plant snapshot and the leader lease have no route and stay the rule scripts'), and sync-board's route is the script's sweep with one pass of the reconciler.
+/// W9.8 (gateway/Verbs/Routes/Board.cs, gateway/Ports/BoardPort.cs): the board group registers its six verbs where the engine acts and its parts are there, the Runner asks them for the gateway's own calls (W9.9a; the plant snapshot and the leader lease have no route and stay the rule scripts'), and sync-board's route is one pass of the reconciler; none of the six runs a rule script.
 /// </summary>
 public sealed class BoardRoutesTests : IDisposable
 {
@@ -29,10 +29,7 @@ public sealed class BoardRoutesTests : IDisposable
         return s.BuildServiceProvider();
     }
 
-    static BoardVerbParts Parts(Func<string, string, TimeSpan, Task<(int Code, string Output)>>? ruleScript = null) => new()
-    {
-        RuleScript = ruleScript ?? ((verb, _, _) => Task.FromResult((0, "{\"ok\":true,\"swept\":true}"))),
-    };
+    static BoardVerbParts Parts() => new();
 
     [Fact]
     public void WhereTheEngineActs_AndThePartsAreThere_AllSixVerbsAreRegistered()
@@ -77,11 +74,10 @@ public sealed class BoardRoutesTests : IDisposable
     [Fact]
     public async Task ThroughTheRouter_SyncBoardRunsNoScript_AndAJournalCallIsV2s()
     {
-        var swept = new List<string>();
-        var routes = V2VerbRoutes.Build(Engine("\"prod\""), Services(new Runner("/nonexistent/factory.ps1"), Parts((verb, stdin, _) => { swept.Add(verb); return Task.FromResult((0, "{\"ok\":true,\"offers\":[]}")); })));
+        var routes = V2VerbRoutes.Build(Engine("\"prod\""), Services(new Runner("/nonexistent/factory.ps1"), Parts()));
         var router = new V2VerbRouter(new ThrowingBelow(), routes);
         var a = await router.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(5));
-        Assert.Equal(30, a.Code); Assert.Empty(swept);   // (no board reconciler in these parts: refused, and neither the script nor v1 was asked)
+        Assert.Equal(30, a.Code);   // (no board reconciler in these parts: refused, and v1 was not asked; the parts hold no rule script at all, V3.3 slice 6)
         Assert.Equal(2, (await router.RunAsync("journal", """{"item":3}""", TimeSpan.FromSeconds(5))).Code);   // v2's usage error: missing event; v1 was never asked
     }
 
