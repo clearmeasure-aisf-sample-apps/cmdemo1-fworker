@@ -5,7 +5,7 @@ using Fworker.Workflows.Reconcilers;
 using Fworker.Workflows.Transcripts;
 
 // W9.8: the wiring of the board group (gateway/Verbs/Routes/Board.cs, BoardVerbs.cs). Only where the engine acts (Engine.V2Acts): the transcripts move to the database, the webhook translation and the journal
-// verb are answered without the rule scripts, and the parts the verbs read are registered once. Nothing here exists in v1 or in the shadow run, and nothing here runs a rule script (V3.3, slice 6).
+// verb are answered without the rule scripts, and the parts the verbs read are registered once. Nothing here exists in v1 or in the shadow run, and nothing here runs a rule script (V3.3, slice 6) but the ref store's read of an old transcript, until 2026-11-13.
 static class BoardWiring
 {
     public static void Register(IServiceCollection services, GatewayComposition c, FactorySchemaStatus schema)
@@ -15,9 +15,10 @@ static class BoardWiring
         var connection = c.Database.ConnectionString is { } raw ? WolverineHostService.WithConnectTimeout(raw, WolverineHostOptions.From(c.Instance).ConnectTimeoutSeconds) : null;
         ITranscriptRepository? repository = connection is null ? null : new SqlTranscriptRepository(() => WorkItemWiring.Open(connection));
         var home = c.Instance.Home;
-        // the sessions' transcripts: rows of factory.Transcripts, and nothing else (V3.3, slice 6: the ref store is not read or pruned here any more). FACTORY_TRANSCRIPTS=0 keeps them in memory only, as in v1
+        // the sessions' transcripts: rows of factory.Transcripts, with the ref store as the read-only fallback of a load for the sessions written before the move (until 2026-11-13; V3.3, slice 6 took out its prune).
+        // FACTORY_TRANSCRIPTS=0 keeps them in memory only, as in v1
         if (repository is not null && gw.OwnerMode && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0")
-            c.Transcripts.UseBackend(new DatabaseTranscriptBackend(repository, home, () => schema.IsGood));
+            c.Transcripts.UseBackend(new DatabaseTranscriptBackend(repository, home, () => schema.IsGood, c.Transcripts.Backend));
         services.AddSingleton(_ => new BoardVerbParts
         {
             Transcripts = repository,

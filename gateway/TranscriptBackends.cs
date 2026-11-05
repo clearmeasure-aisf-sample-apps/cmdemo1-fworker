@@ -8,8 +8,8 @@ using Fworker.Workflows.Transcripts;
 // Where the TranscriptStore keeps the sessions it holds in memory (W9.8). The store builds a session's document (the shape the ref store always held: name, item, phase, runtime, day, started, ended, lastLine, dropped,
 // total, lines) and hands it to its backend; the backend saves it, reads it back by name and prunes by age. Two backends:
 //  - RuleScriptTranscriptBackend: v1's, the rule scripts transcript-save/-load/-prune over the ref store, where the engine does not act. The document is sealed first (the repository is public).
-//  - DatabaseTranscriptBackend: where the engine acts, factory.Transcripts alone. No seal (the database is the gateway's own) and the qualified item as a column. V3.3 (slice 6): the ref store is no longer its fallback
-//    (a session written there before the move is not read, and the old refs are not pruned from here).
+//  - DatabaseTranscriptBackend: where the engine acts, factory.Transcripts. No seal (the database is the gateway's own) and the qualified item as a column. A session written before the move (2026-10-30) is read
+//    from the ref store, read-only, until the 14 days the refs were kept are over; V3.3 (slice 6) took the prune of the refs out, so they are no longer aged out from here.
 
 static class TranscriptJson
 {
@@ -97,8 +97,11 @@ sealed class RuleScriptTranscriptBackend(Func<string, string, TimeSpan, Task<(in
     public async Task Prune(int days) => await run("transcript-prune", new JsonObject { ["days"] = days }.ToJsonString(), TimeSpan.FromSeconds(120));
 }
 
-/// <summary>The sessions as rows of factory.Transcripts. <paramref name="ready"/> says whether the schema is good (a start before the scripts ran is not a failure to log).</summary>
-sealed class DatabaseTranscriptBackend(ITranscriptRepository repository, Fworker.Contracts.Ids.RepoId? home, Func<bool> ready) : ITranscriptBackend
+/// <summary>
+/// The sessions as rows of factory.Transcripts. <paramref name="ready"/> says whether the schema is good (a start before the scripts ran is not a failure to log). <paramref name="legacy"/> is read, and only read, for a
+/// session the database does not have: the sessions written to the ref store before the move of 2026-10-30. Remove it after 2026-11-13, when the last of them is past the 14 days a transcript is kept.
+/// </summary>
+sealed class DatabaseTranscriptBackend(ITranscriptRepository repository, Fworker.Contracts.Ids.RepoId? home, Func<bool> ready, ITranscriptBackend? legacy = null) : ITranscriptBackend
 {
     public async Task<bool> Save(JsonObject doc)
     {
@@ -107,7 +110,12 @@ sealed class DatabaseTranscriptBackend(ITranscriptRepository repository, Fworker
         return true;
     }
 
-    public async Task<JsonObject?> Load(string name) => ready() && await repository.Load(name) is { } row ? ToDoc(row) : null;
+    public async Task<JsonObject?> Load(string name)
+    {
+        if (ready() && await repository.Load(name) is { } row) return ToDoc(row);
+        if (legacy == null) return null;
+        try { return await legacy.Load(name); } catch (Exception e) { Console.Error.WriteLine($"transcript-load {name} (ref store): {e.GetType().Name}"); return null; }
+    }
 
     public async Task Prune(int days)
     {

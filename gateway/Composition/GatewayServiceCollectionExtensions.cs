@@ -49,8 +49,8 @@ static class GatewayServiceCollectionExtensions
         var runner = new Runner(gw.Entry) { Budget = githubBudget };
         // session transcripts of runtime workers (Transcripts.cs): stored encrypted beside the plant snapshot; FACTORY_TRANSCRIPTS=0 keeps them in memory only
         var transcriptsDurable = gw.OwnerMode && gw.TokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
-        // the ref store is the durable store only where the engine does not act: where it acts BoardWiring replaces it with factory.Transcripts (DatabaseTranscriptBackend, which has no fallback). RunScriptAsync, not RunAsync:
-        // the transcript verbs are the ref store's rule scripts, never a route
+        // the ref store is the durable store only where the engine does not act: where it acts BoardWiring replaces it with factory.Transcripts and keeps it as the read-only fallback of a load until 2026-11-13.
+        // RunScriptAsync, not RunAsync: where the engine acts the board routes answer transcript-load from factory.Transcripts, so through RunAsync that fallback would read the database a second time and never reach the refs
         var transcripts = new TranscriptStore(transcriptsDurable ? runner.RunScriptAsync : null, gw.TokenSecret);
         if (int.TryParse(Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPT_SAVE_SECONDS"), out var tss) && tss >= 0) transcripts.SaveSeconds = tss;
         services.AddSingleton(transcripts);
