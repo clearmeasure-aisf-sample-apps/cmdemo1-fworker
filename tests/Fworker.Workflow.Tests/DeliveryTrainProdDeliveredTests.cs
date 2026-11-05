@@ -5,14 +5,14 @@ using static Fworker.Workflow.Tests.TrainFixture;
 namespace Fworker.Workflow.Tests;
 
 /// <summary>
-/// The premise of "a delivered item stays in the release queue until v1's AutoPromoter reaches prod": the prod train, in shadow (v1's AutoPromoter makes the deployments), still publishes
-/// DeliveredTo(item, prod, release) when a prod deployment succeeds, and the saga holds its item for that fact. A failed deployment and an older release say nothing.
+/// The premise of "a delivered item stays in the release queue until its release reaches prod": the prod train publishes DeliveredTo(item, prod, release) when a prod deployment succeeds, also one
+/// it did not ask for (an operator's), and the saga holds its item for that fact. A failed deployment and an older release say nothing.
 /// </summary>
-public class DeliveryTrainProdShadowTests
+public class DeliveryTrainProdDeliveredTests
 {
     static async Task<TrainFixture> ProdTrain()
     {
-        var f = new TrainFixture(env: "prod", shadow: true);
+        var f = new TrainFixture(env: "prod");
         await f.Baseline();
         f.Range('d', 'a');
         await f.Merge(7, 'a');
@@ -20,7 +20,7 @@ public class DeliveryTrainProdShadowTests
     }
 
     [Fact]
-    public async Task ASucceededProdDeploymentByV1_PublishesDeliveredToProdForTheItemsOfTheRelease()
+    public async Task ASucceededProdDeploymentTheTrainDidNotAskFor_PublishesDeliveredToProdForTheItemsOfTheRelease()
     {
         var f = await ProdTrain();
         await f.Release("1.0.2", 'a');

@@ -71,7 +71,6 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, CopilotEndpoints>();
         services.AddSingleton<IEndpointModule, TranscriptEndpoints>();
         services.AddSingleton<IEndpointModule, ItemAdminEndpoints>();
-        services.AddSingleton<IEndpointModule>(sp => new AdminDeliveryShadowEndpoints(sp));   // W5.2: 404 where the delivery train does not run in shadow
         services.AddSingleton<IEndpointModule, DemoEndpoints>();
         // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
         // S1 (W1.4): the engine the environment is composed with; v1 is the only one

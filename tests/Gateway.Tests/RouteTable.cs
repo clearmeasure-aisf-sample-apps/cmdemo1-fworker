@@ -47,7 +47,6 @@ public static class RouteTable
         new("GET", "/api/v1/dashboard", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/sessions/{name}", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/manager/actions", Unauthorized, "unauthorized"),
-        new("GET", "/api/v1/delivery-shadow", Unauthorized, "unauthorized"),   // W5.2: the delivery train's shadow report (404 where the train does not run in shadow)
         new("GET", "/api/v1/wait", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/events", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/peers", Unauthorized, "unauthorized"),
