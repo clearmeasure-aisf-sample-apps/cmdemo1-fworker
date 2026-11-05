@@ -12,9 +12,12 @@ sealed class PluginArchive(GatewayOptions gateway, BuildInfo build)
 
     public string Root => Path.GetFullPath(Path.Combine(gateway.ScriptsDir, ".."));
 
-    // every file below the root but the archive's own markers and build output, in ordinal order
+    /// <summary>The gateway's own rule scripts, below the plugin root: never part of what a worker downloads.</summary>
+    public const string ServerScripts = "scripts/server/";
+
+    // every file below the root but the archive's own markers, build output and the gateway's own rule scripts (scripts/server/, V3.3: a worker never runs them), in ordinal order
     public static IEnumerable<string> Files(string root) => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-        .Where(f => { var r = Path.GetRelativePath(root, f).Replace('\\', '/'); return r != ".plugin-version" && r != ".plugin-managed" && !r.Contains("/bin/") && !r.Contains("/obj/"); })
+        .Where(f => { var r = Path.GetRelativePath(root, f).Replace('\\', '/'); return r != ".plugin-version" && r != ".plugin-managed" && !r.Contains("/bin/") && !r.Contains("/obj/") && !r.StartsWith(ServerScripts, StringComparison.Ordinal); })
         .OrderBy(f => f, StringComparer.Ordinal);
 
     public string Hash()

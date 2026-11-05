@@ -371,12 +371,6 @@ function Do-DevComplete([int]$n, [string]$Holder = 'w1') {
     $r = F $Holder @('record-review', '--item', $n, '--column', 'Development', '--role', 'reviewer', '--text-file', (TmpFile "rv-dev$n.md" "Diff matches the plan.`nREVIEW: COMPLETE"))
     return F $Holder @('complete', '--item', $n, '--column', 'Development', '--review-ref', $r.review_ref, '--comment', 'PR open, CI green. REVIEW: COMPLETE')
 }
-# The `complete` rule script run directly, as the gateway's own v2 feed reaches it (the verb route takes ftWithPendingChecks out of every call, so only a direct call can carry it):
-# the body is what the client would send, plus the holder.
-function Script-Complete([hashtable]$Body) {
-    $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') --server complete 2>$null
-    $code = $LASTEXITCODE; $j = try { ($out -join "`n") | ConvertFrom-Json -AsHashtable } catch { @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = $code }; return $j
-}
 function Do-Verdict([int]$n, [int]$pr, [string]$Holder = 'w1', [bool]$Passed = $true) {
     $r = F $Holder @('claim-item', '--item', $n, '--column', 'Functional Testing'); CheckExit "FT $n claim" $r 0
     $rv = F $Holder @('record-review', '--item', $n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "rv-ft$n.md" "Criteria exercised.`nREVIEW: COMPLETE"))
@@ -712,14 +706,14 @@ function Get-ItemState([int]$Item) {
     $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
     [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```').Groups[1].Value | ConvertFrom-Json -AsHashtable
 }
-# Holds the rule scripts' item lock (Use-ItemLock, plugin/scripts/lib/Core.ps1) the way a verb does: the item's lock file in the gateway's state
+# Holds the rule scripts' item lock (Use-ItemLock, plugin/scripts/server/lib/Core.ps1) the way a verb does: the item's lock file in the gateway's state
 # directory, opened exclusively; the caller disposes it. The directory is created first: a scenario that runs first in its group can come before
 # anything has written there (issue 405: "Could not find a part of the path" on item-1.lock).
 function Lock-ItemFile([int]$Item) {
     [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)
     return [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$Item.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
 }
-# Holds the board-intake lock (Use-IntakeLock, plugin/scripts/lib/Core.ps1) the way a verb that creates a work item does (issue 411); the caller
+# Holds the board-intake lock (Use-IntakeLock, the rule scripts' former plugin/scripts/lib/Core.ps1) the way a verb that creates a work item does (issue 411); the caller
 # disposes it.
 function Lock-IntakeFile {
     [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)

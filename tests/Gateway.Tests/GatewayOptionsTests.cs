@@ -26,7 +26,7 @@ public sealed class GatewayOptionsTests
     {
         var o = With();
         Assert.Equal("/s/scripts", o.ScriptsDir);
-        Assert.Equal(Path.Combine("/s/scripts", "factory.ps1"), o.Entry);
+        Assert.Equal(Path.Combine("/s/scripts", "server", "rule.ps1"), o.Entry);   // (V3.3: the rule scripts the gateway runs; factory.ps1 is the client)
         Assert.Equal(Token, o.ApiToken);
         Assert.Equal(Secret, o.WebhookSecret);
         Assert.Equal(25, o.SsePingSeconds);

@@ -6,7 +6,7 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// The verb inventory (task W1.10, docs/design/verb-inventory.md and .json): the one list of every server verb with its owner and destination. It
-/// fails when a verb is added to or removed from $ServerVerbs of plugin/scripts/factory.ps1 without an entry in the inventory, or the reverse, when
+/// fails when a verb is added to or removed from $ServerVerbs of plugin/scripts/server/rule.ps1 (the verbs with a rule script left) without an entry in the inventory, or the reverse, when
 /// the table of the document and the JSON differ, and when the callers, the no-lock flag or the use-endpoint flag of an entry differ from the code
 /// (VerbPolicy, $NoLockVerbs). Documentation and data only: no product behaviour is read or changed.
 /// </summary>
@@ -23,13 +23,13 @@ public class VerbInventoryTests
 
     record Entry(string Verb, string Script, string Owner, string Destination, string[] Callers, bool NoLock, bool UseEndpoint);
 
-    static readonly string FactoryPs1 = File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "factory.ps1"));
+    static readonly string FactoryPs1 = File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "server", "rule.ps1"));   // V3.3: the rule scripts the gateway still runs
 
-    /// <summary>The quoted names of a "$Name = @( ... )" list of factory.ps1.</summary>
+    /// <summary>The quoted names of a "$Name = @( ... )" list of server/rule.ps1.</summary>
     static List<string> ScriptList(string name)
     {
         var m = Regex.Match(FactoryPs1, @"\$" + name + @"\s*=\s*@\((?<body>[^)]*)\)");
-        Assert.True(m.Success, $"${name} was not found in plugin/scripts/factory.ps1");
+        Assert.True(m.Success, $"${name} was not found in plugin/scripts/server/rule.ps1");
         return Regex.Matches(m.Groups["body"].Value, @"'([a-z0-9-]+)'").Select(x => x.Groups[1].Value).ToList();
     }
 
@@ -50,17 +50,20 @@ public class VerbInventoryTests
     {
         var script = ScriptList("ServerVerbs");
         Assert.Equal(script.Count, script.Distinct().Count());
-        var inv = Inventory().Verbs.Select(e => e.Verb).ToList();
+        var all = Inventory().Verbs;
+        var inv = all.Select(e => e.Verb).ToList();
         Assert.Equal(inv.Count, inv.Distinct().Count());
-        Assert.Empty(script.Except(inv).OrderBy(x => x));   // a verb added to factory.ps1 needs an entry in docs/design/verb-inventory.json and a row in the .md
-        Assert.Empty(inv.Except(script).OrderBy(x => x));   // an entry whose verb is gone from factory.ps1 is removed
+        // V3.3: every verb keeps its entry (owner, destination, callers); the ones with a rule script left are exactly $ServerVerbs of server/rule.ps1
+        var scripted = all.Where(e => e.Script.Length > 0).Select(e => e.Verb).ToList();
+        Assert.Empty(script.Except(scripted).OrderBy(x => x));   // a verb added to rule.ps1 names its script in docs/design/verb-inventory.json and the .md
+        Assert.Empty(scripted.Except(script).OrderBy(x => x));   // an entry whose script is gone from rule.ps1 says "" (none)
     }
 
     [Fact]
     public void EveryServerVerb_HasARuleScriptFunction_InTheFileTheInventoryNames()
     {
-        var libDir = Path.Combine(Root, "plugin", "scripts", "lib");
-        foreach (var e in Inventory().Verbs)
+        var libDir = Path.Combine(Root, "plugin", "scripts", "server", "lib");
+        foreach (var e in Inventory().Verbs.Where(e => e.Script.Length > 0))
         {
             var file = Path.Combine(libDir, e.Script);
             Assert.True(File.Exists(file), $"{e.Verb}: {e.Script} does not exist");
@@ -108,7 +111,8 @@ public class VerbInventoryTests
         var noLock = ScriptList("NoLockVerbs").ToHashSet();
         foreach (var e in Inventory().Verbs)
         {
-            Assert.True(e.NoLock == noLock.Contains(e.Verb), $"{e.Verb}: noLock {e.NoLock} in the inventory, $NoLockVerbs says {noLock.Contains(e.Verb)}");
+            // (the flag of a verb with no rule script left is the v2 service's, QcService.NoLockVerbs and its kin; rule.ps1 says it for the scripted ones)
+            if (e.Script.Length > 0) Assert.True(e.NoLock == noLock.Contains(e.Verb), $"{e.Verb}: noLock {e.NoLock} in the inventory, $NoLockVerbs of rule.ps1 says {noLock.Contains(e.Verb)}");
             Assert.True(e.UseEndpoint == (VerbPolicy.UseEndpointReason(e.Verb) != null), $"{e.Verb}: useEndpoint {e.UseEndpoint} in the inventory, VerbPolicy.UseEndpointReason says otherwise");
         }
     }
@@ -117,7 +121,7 @@ public class VerbInventoryTests
     public void TheTableOfTheDocument_IsTheJson()
     {
         var rows = File.ReadAllLines(Path.Combine(Root, "docs", "design", "verb-inventory.md"))
-            .Select(l => Regex.Match(l, @"^\| `(?<v>[a-z0-9-]+)` \| `(?<s>[^`]+)` \| (?<o>[A-Za-z0-9]+) \| (?<d>[a-z]+) \| (?<c>[^|]+) \|$"))
+            .Select(l => Regex.Match(l, @"^\| `(?<v>[a-z0-9-]+)` \| (?:`(?<s>[^`]+)`|none) \| (?<o>[A-Za-z0-9]+) \| (?<d>[a-z]+) \| (?<c>[^|]+) \|$"))
             .Where(m => m.Success).ToDictionary(m => m.Groups["v"].Value, m => m);
         var (verbs, _, _) = Inventory();
         Assert.Equal(verbs.Count, rows.Count);

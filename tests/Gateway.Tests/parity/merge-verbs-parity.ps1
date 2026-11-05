@@ -1,4 +1,4 @@
-# W9.3 (#355): runs the REAL rule scripts of the merge train verbs (plugin/scripts/lib/Verbs.Merge.ps1, Verbs.Inspect.ps1, BaseUpdate.ps1) on the cases of
+# W9.3 (#355): runs the REAL rule scripts of the merge train verbs (plugin/scripts/server/lib/Verbs.Merge.ps1, Verbs.Inspect.ps1, BaseUpdate.ps1) on the cases of
 # MergeVerbParityTests.cs, with a scripted GitHub and a scripted item state in place of the network, and writes what each verb answered (the answer the
 # gateway would hand to the caller, with its exit code) as JSON. The test then runs the same cases through the C# verbs (v2) and compares the two answers
 # field by field. Nothing here touches the network or a secret.
@@ -7,7 +7,8 @@ param([Parameter(Mandatory)][string]$Cases, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json'
-foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+. (Join-Path $root 'plugin/scripts/lib/Paths.ps1'); . (Join-Path $root 'plugin/scripts/lib/Config.ps1')
+foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate') { . (Join-Path $root "plugin/scripts/server/lib/$f.ps1") }   # (V3.3: the gateway's rule scripts)
 
 $script:Case = $null
 $script:Calls = @()

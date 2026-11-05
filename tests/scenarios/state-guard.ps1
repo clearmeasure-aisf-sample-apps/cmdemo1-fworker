@@ -1,10 +1,15 @@
-# The state comment's rev check and size budget (plugin/scripts/lib/Board.ps1 Save-State, Get-State; docs/design/delivery-speed.md 18.1.2 and 18.2, issue 291):
+# The state comment's rev check and size budget (plugin/scripts/server/lib/Board.ps1 Save-State, Get-State; docs/design/delivery-speed.md 18.1.2 and 18.2, issue 291):
 # a save is refused when the comment changed since it was read (the caller reads again and retries, or reports), and a state never goes over 48,000
 # characters: promote_health, flow and lineage lose their oldest entries first and the trim is recorded. Runs in the owner suite; the rule script
 # journal (ci-released: a read and a save of the state under the item lock) is called directly, on an item that is not factory work. The fake
 # GitHub's control state-race makes the next single reads of a state comment find another process's write first.
 
-function Sg-Release([int]$n, [string]$Key) { Pm-Server 'journal' @{ item = $n; event = 'ci-released'; key = $Key; fields = @{ run = $Key; pr = 1; sha7 = 'abcdef0'; branch = "b-$Key" } } }
+# The gateway's rule script run directly (plugin/scripts/server/rule.ps1 --server; factory.ps1 is the client), with the suite's configuration.
+function Sg-Server([string]$Verb, $Body) {
+    $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/server/rule.ps1') --server $Verb 2>$null
+    $j = try { ($out -join "`n") | ConvertFrom-Json -AsHashtable } catch { @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = $LASTEXITCODE }; return $j
+}
+function Sg-Release([int]$n, [string]$Key) { Sg-Server 'journal' @{ item = $n; event = 'ci-released'; key = $Key; fields = @{ run = $Key; pr = 1; sha7 = 'abcdef0'; branch = "b-$Key" } } }
 function Sg-StateComment([int]$n) { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)".StartsWith('<!-- factory-state:') })[0] }
 # the item's state comment rewritten with $St (as another process, or an older gateway, would leave it)
 function Sg-PutState([int]$n, $St) {

@@ -1,6 +1,7 @@
 # Tier 1 scenarios of the environment label (docs/design/environment-test-factories.md 3): two gateways, tdd (the suite's) and uat (a second
-# one), share ONE fake board and ONE repository; each acts only on items labelled env:<its environment>. Suite 'envscope': FACTORY_ENVIRONMENT=tdd
-# and FACTORY_ENV_SCOPE=1 on the suite's gateway, FACTORY_ENVIRONMENT=uat on the second.
+# one), share ONE fake board and ONE repository; tdd acts only on items labelled env:tdd. Suite 'envscope': FACTORY_ENVIRONMENT=tdd
+# and FACTORY_ENV_SCOPE=1 on the suite's gateway, FACTORY_ENVIRONMENT=uat on the second. engine.v2Environments does not name uat, so the uat
+# gateway is inert (V3.3, slice 5): it refuses every verb (code inert) and writes nothing, its own items included.
 
 # The uat gateway: same fake GitHub, configuration and secrets, its own ports and state directory, sweeping every 2 s like the suite's.
 function Env-StartUat {
@@ -11,7 +12,7 @@ function Env-StartUat {
     finally { foreach ($k in $all.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
     $script:Procs += $p
     $g = @{ proc = $p; base = "http://127.0.0.1:$port" }
-    [void](Wait-Until -Seconds 40 { try { "$((Invoke-RestMethod "$($g.base)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep)" -ne '' } catch { $false } })
+    [void](Wait-Until -Seconds 40 { try { (Invoke-WebRequest "$($g.base)/ready" -SkipHttpErrorCheck -TimeoutSec 2).StatusCode -eq 503 } catch { $false } })
     return $g
 }
 # One verb over HTTP with the operator token; the parsed answer (ok, code, ...).
@@ -23,10 +24,13 @@ function Env-NoCardIssue([string]$Title, [string[]]$Labels) { (Fake 'issue' @{ t
 
 $EnvScopeScenarios = [ordered]@{
 
-'env label: two gateways on one board each act only on items of their own env: label; unlabelled and doubly labelled items are nobody''s' = {
+'env label: tdd acts only on items of its env: label beside an inert uat gateway on the same board; unlabelled and doubly labelled items are nobody''s' = {
     $tdd = Get-GatewayBase
     $uat = Env-StartUat
     try {
+        $ready = Invoke-WebRequest "$($uat.base)/ready" -SkipHttpErrorCheck -TimeoutSec 5
+        $rj = try { "$($ready.Content)" | ConvertFrom-Json -AsHashtable } catch { @{} }
+        Check 'the uat gateway is inert: /ready 503 waitingFor engine' ($ready.StatusCode -eq 503 -and $rj.waitingFor -eq 'engine') "$($ready.StatusCode) $($ready.Content)"
         $wl = @('factory worker', 'Auto Merge')
         $a = New-Item-Fake 'tdd item' 'x' ($wl + 'env:tdd')
         $u = New-Item-Fake 'uat item' 'x' ($wl + 'env:uat')
@@ -45,27 +49,28 @@ $EnvScopeScenarios = [ordered]@{
         $c1 = Env-Verb $tdd 'claim-item' @{ item = $u; column = 'Technical Design'; holder = 'w-tdd' }
         Check 'tdd refuses to claim the env:uat item: out-of-scope' (-not $c1.ok -and $c1.code -eq 'out-of-scope') ($c1 | ConvertTo-Json -Compress)
         $c2 = Env-Verb $uat.base 'claim-item' @{ item = $a; column = 'Technical Design'; holder = 'w-uat' }
-        Check 'uat refuses to claim the env:tdd item: out-of-scope' (-not $c2.ok -and $c2.code -eq 'out-of-scope') ($c2 | ConvertTo-Json -Compress)
-        foreach ($b in $tdd, $uat.base) {
-            foreach ($n in $x, $z) { $c = Env-Verb $b 'claim-item' @{ item = $n; column = 'Technical Design'; holder = 'w' }; Check "item #$n (doubly or not labelled) is refused by $b" ($c.code -eq 'out-of-scope') ($c | ConvertTo-Json -Compress) }
+        Check 'uat (inert) refuses to claim the env:tdd item' (-not $c2.ok -and $c2.code -eq 'inert' -and $c2.exit -eq 20) ($c2 | ConvertTo-Json -Compress)
+        foreach ($n in $x, $z) {
+            $c = Env-Verb $tdd 'claim-item' @{ item = $n; column = 'Technical Design'; holder = 'w' }; Check "item #$n (doubly or not labelled) is refused by tdd" ($c.code -eq 'out-of-scope') ($c | ConvertTo-Json -Compress)
+            $c = Env-Verb $uat.base 'claim-item' @{ item = $n; column = 'Technical Design'; holder = 'w' }; Check "item #$n (doubly or not labelled) is refused by uat (inert)" ($c.code -eq 'inert') ($c | ConvertTo-Json -Compress)
         }
         $own = Env-Verb $tdd 'claim-item' @{ item = $a; column = 'Technical Design'; holder = 'w-tdd' }
         Check 'tdd claims its own item' ($own.ok) ($own | ConvertTo-Json -Compress)
         $ownU = Env-Verb $uat.base 'claim-item' @{ item = $u; column = 'Technical Design'; holder = 'w-uat' }
-        Check 'uat claims its own item' ($ownU.ok) ($ownU | ConvertTo-Json -Compress)
+        Check 'uat (inert) refuses even its own item' (-not $ownU.ok -and $ownU.code -eq 'inert') ($ownU | ConvertTo-Json -Compress)
 
         # merge: the other environment's item is refused before any other check
         $m = Env-Verb $tdd 'merge' @{ item = $u; pr = 1 }
         Check 'tdd refuses to merge for the env:uat item: out-of-scope' ($m.code -eq 'out-of-scope') ($m | ConvertTo-Json -Compress)
         $m2 = Env-Verb $uat.base 'merge' @{ item = $a; pr = 1 }
-        Check 'uat refuses to merge for the env:tdd item: out-of-scope' ($m2.code -eq 'out-of-scope') ($m2 | ConvertTo-Json -Compress)
+        Check 'uat (inert) refuses to merge' ($m2.code -eq 'inert') ($m2 | ConvertTo-Json -Compress)
 
         # webhooks: an event about the other environment's item makes no event
         $payload = @{ action = 'labeled'; label = @{ name = 'factory worker' }; issue = @{ number = $u; labels = @(@{ name = 'factory worker' }, @{ name = 'env:uat' }) }; repository = @{ full_name = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
         $ev = Env-Verb $tdd 'ingest-event' @{ event = 'issues'; delivery = 'd1'; payload = $payload }
         Check 'tdd makes no event of a uat item''s webhook' ($ev.ok -and @($ev.events).Count -eq 0) ($ev | ConvertTo-Json -Compress -Depth 6)
         $evU = Env-Verb $uat.base 'ingest-event' @{ event = 'issues'; delivery = 'd2'; payload = $payload }
-        Check 'uat makes its item.labeled event of the same webhook' (@($evU.events | Where-Object { $_.event -eq 'item.labeled' }).Count -eq 1) ($evU | ConvertTo-Json -Compress -Depth 6)
+        Check 'uat (inert) makes no event of its own item''s webhook' ($evU.code -eq 'inert' -and -not $evU.ContainsKey('events')) ($evU | ConvertTo-Json -Compress -Depth 6)
 
         # after several sweeps of both: neither gateway wrote on the other's items (state comments, journal lines, claim refs)
         Start-Sleep -Seconds 6
@@ -73,10 +78,11 @@ $EnvScopeScenarios = [ordered]@{
         Check 'no comment of any gateway on the unlabelled or doubly labelled items' (@(@($fs.issues | Where-Object { $_.number -in $x, $z }) | ForEach-Object { @($_.comments) } | Where-Object { $_ }).Count -eq 0)
         $claimU = (Get-FakeIssue $u).comments | Where-Object { "$($_.body)" -match 'w-tdd' }
         Check 'the uat item carries nothing of the tdd holder' (@($claimU).Count -eq 0)
+        Check 'the uat item carries nothing of the inert uat gateway' (@((Get-FakeIssue $u).comments | Where-Object { "$($_.body)" -match 'w-uat' }).Count -eq 0)
         $claimA = (Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'w-uat' }
         Check 'the tdd item carries nothing of the uat holder' (@($claimA).Count -eq 0)
         $uerr = @(Select-String -Path (Join-Path $script:Work 'gateway-uat.out'), (Join-Path $script:Work 'gateway-uat.err') -Pattern 'sweepError|internal error|"sweep":"error"|"sweep":"failed"' -ErrorAction SilentlyContinue)
-        Check 'the uat gateway swept without errors beside tdd''s claims' ($uerr.Count -eq 0) ($uerr | Select-Object -First 2 | Out-String)
+        Check 'the inert uat gateway logged no errors beside tdd''s claims' ($uerr.Count -eq 0) ($uerr | Select-Object -First 2 | Out-String)
     } finally {
         try { Stop-Process -Id $uat.proc.Id -Force -ErrorAction SilentlyContinue } catch { }
     }

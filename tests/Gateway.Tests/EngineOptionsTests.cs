@@ -141,18 +141,20 @@ public sealed class EngineStatusTests(TwoPortGateway gw) : IClassFixture<TwoPort
         var sp = gw.Host.Services;
         var engine = Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService<EngineOptions>(sp);
         Assert.Same(engine, Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService<EngineOptions>(sp));
-        // plain v1 adds no block (the C0 pins list the keys): its absence means v1
+        // the unit tests' stand-in (FACTORY_TEST_STUB_SCRIPTS) is no inert gateway and adds no block (the C0 pins list the keys)
         Assert.False(engine.Reported);
         var r = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
         Assert.Null(r.Json!["engine"]);
     }
 
     [Fact]
-    public void Reported_OnlyWhereNotPlainV1()
+    public void Reported_WhereV2IsNamed_AndWhereTheGatewayIsInert()
     {
         var v2 = EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("\"tdd\"")), _ => null), "tdd", _ => null);
         Assert.True(v2.Reported);
-        Assert.False(EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("\"tdd\"")), _ => null), "uat", _ => null).Reported);
+        // V3.3: an environment v2Environments does not name is inert, and its status says so
+        var uat = EngineOptions.From(InstanceConfig.Load(Write(EngineOptionsTests.BlockFor("\"tdd\"")), _ => null), "uat", _ => null);
+        Assert.True(uat.Inert); Assert.True(uat.Reported); Assert.Equal("engine", uat.Status()["waitingFor"]!.ToString());
     }
 
     static string Write(string json) { var p = Path.Combine(Path.GetTempPath(), "engine-status-" + Guid.NewGuid().ToString("N") + ".json"); File.WriteAllText(p, json); return p; }

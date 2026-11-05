@@ -21,12 +21,6 @@ function Rp-ForeignIssue([string]$Title, [string]$Body = 'x', [string]$Column = 
     return [int](Fake 'issue' $b).number
 }
 # True when the sweep's answer names the item: as "item":N in an entry, as a number in one of its lists, or as a key of one of its maps.
-function Rp-Mentions($Answer, [int]$n) {
-    if (($Answer | ConvertTo-Json -Depth 12 -Compress) -match "`"item`":$n[,}]") { return $true }
-    foreach ($k in 'unconfirmed', 'settling', 'holds', 'unparked') { if (@(Pv $Answer $k) -contains $n) { return $true } }
-    foreach ($k in 'owners', 'pins', 'priorities') { $mp = Pv $Answer $k; if ($mp -is [System.Collections.IDictionary] -and $mp.Contains("$n")) { return $true } }
-    return $false
-}
 # An open home issue without a card (the board guard puts it on the board).
 function Rp-NoCardIssue([string]$Title) { return [int](Fake 'issue' @{ title = $Title; body = 'x'; labels = @(@($L) + @($script:DefaultEnvLabel | Where-Object { $_ })) }).number }
 
@@ -58,13 +52,9 @@ $ReposScenarios['repos: a webhook delivery for another repository is dropped and
     Check 'the same delivery for the home repository (any case) makes its item.labeled event' ($evH.ok -eq $true -and @($evH.events | Where-Object { $_ -and $_.event -eq 'item.labeled' -and $_.item -eq $n }).Count -eq 1) ($evH | ConvertTo-Json -Compress -Depth 6)
 }
 
-$ReposScenarios['repos: a card of another repository on the shared board is ignored by the intake and the board guard [full]'] = {
-    # the intake: the foreign card is first in Todo, the home card second; one item is pulled, and it is the home one
+$ReposScenarios['repos: a card of another repository on the shared board is ignored by the board guard [full]'] = {
+    # (V3.3: which card the intake pulls is IntakeRule's, IntakeRuleTests; v1's intake script is gone)
     $fTodo = Rp-ForeignIssue 'Foreign Todo' 'x' 'Todo'
-    $hTodo = New-Item-Fake 'Home Todo' 'x' $L 'Todo'
-    $in = Qc-Server 'sync-board' @{ intake = @{ freeSlots = 2 } } @{ FACTORY_INTAKE = '1' }
-    Check 'the intake pulls the home card from Todo' (@($in.actions | Where-Object { $_ -and $_.action -eq 'intake-pulled' -and $_.item -eq $hTodo }).Count -eq 1 -and (Get-FakeIssue $hTodo).column -eq 'Technical Design') ($in | ConvertTo-Json -Compress -Depth 6)
-    Check 'and never the foreign card' ((Get-FakeIssue $fTodo).column -eq 'Todo' -and -not (Rp-Mentions @{ actions = $in.actions } $fTodo)) ($in.actions | ConvertTo-Json -Compress -Depth 6)
     # a foreign card in an AI column: nothing of the gateway's touches it (below)
     $fTd = Rp-ForeignIssue 'Foreign Technical Design' 'x' 'Technical Design'
     # the board guard: a labelled issue without a card is put on the board; the foreign one without a card is not

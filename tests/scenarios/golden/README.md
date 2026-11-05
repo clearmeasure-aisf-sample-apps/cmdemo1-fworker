@@ -57,8 +57,8 @@ came:
   (`gateway/TestCause.cs`: an `AsyncLocal` box, set by a middleware and cleared when the request ends). Every rule-script run it starts
   meanwhile, pooled or spawned (`Runner.RunProcessAsync`), gets the id as the field `_cause` of its JSON arguments, when the id is 1 to 80
   characters of `[A-Za-z0-9._-]`. Without the variable the gateway reads no header and adds nothing.
-- The rule script (`factory.ps1 --server`), with `FACTORY_TEST_CAUSE_HEADER=1`, takes `_cause` out of its arguments before the verb runs
-  and sends it as `X-Fake-Cause` with every write: the GitHub calls of `Invoke-GhRaw` (lib/Core.ps1, REST and GraphQL), the release asset
+- The rule script (`server/rule.ps1 --server`), with `FACTORY_TEST_CAUSE_HEADER=1`, takes `_cause` out of its arguments before the verb runs
+  and sends it as `X-Fake-Cause` with every write: the GitHub calls of `Invoke-GhRaw` (server/lib/Core.ps1, REST and GraphQL), the release asset
   upload of `publish-demo` (lib/Verbs.Pr.ps1) and the Octopus calls of `Invoke-OctoPost` (lib/Verbs.Promote.ps1). Without the variable the
   key is left as it is.
 - The fake keeps each write's `X-Fake-Cause` and counts the write as carrying the scenario's id when the id is the open scenario's nonce or

@@ -70,6 +70,8 @@ public sealed class NonOwnerPinGateway : IAsyncLifetime
         Env.Set("FACTORY_OWNER_MODE", "0");
         // the revocation test switch needs messaging.testHooks, which needs owner mode: the stub answers the read instead
         Env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
+        // the test stand-in for the rule scripts needs messaging.testHooks too: this gateway is what its environment is, inert (V3.3; its verbs are refused "inert", /ready answers 503 "engine")
+        Env.Set("FACTORY_TEST_STUB_SCRIPTS", null);
         Env.Set("GH_TOKEN", "fake");
         Env.Set("FACTORY_TRANSCRIPTS", "0");
         Env.Apply();

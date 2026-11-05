@@ -195,32 +195,6 @@ function Format-JournalFold([string]$Event, $Fold, [string]$Key) {
     return $b
 }
 
-# For a caller that holds no item lock (the sweep): the ledger entries Add-Journal put into the caller's holder are written under the item lock into
-# a state read there, never as a save of the holder itself. The holder was read before whatever a verb recorded meanwhile (an approval, a claim):
-# saving it would undo that (seen on slow runners: an inspector's approval lost to the sweep that was posting the QC offer).
-function Save-JournalKeys([int]$Item, [string[]]$Keys) {
-    Use-ItemLock $Item {
-        # (a state-conflict, a write by another process since the read, reads the state again and adds the keys to that: they are repeatable)
-        for ($try = 1; ; $try++) {
-            $f = Get-State $Item; $fs = $f.state; $added = 0
-            if (-not (Test-Has $fs 'journal')) { $fs.journal = @{ keys = @(); count = 0 } }
-            $at = ConvertTo-Iso (Get-UtcNow)
-            foreach ($k in $Keys) {
-                if (@($fs.journal.keys) -contains $k) { continue }
-                $fs.journal.keys = @(@($fs.journal.keys) + $k | Select-Object -Last 200); $fs.journal.count = [int]$fs.journal.count + 1; $added++
-                # the line's kind ends the open folds and is counted, as Add-Journal does for a holder it saves itself (the lines of this path are
-                # QC and skipped lines, never folded)
-                $ev = ($k -split '\|', 2)[0]; if (-not (Test-Has $fs.journal 'fold')) { $fs.journal.fold = @{} }
-                Close-JournalFolds $fs.journal $ev; Add-JournalKind $fs.journal $ev $at
-            }
-            if ($added -eq 0) { break }
-            try { Save-State $Item $f; break }
-            catch [FactoryReject] { if ($_.Exception.Code -ne 'state-conflict' -or $try -ge 3) { throw } }
-        }
-    }
-}
-function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($State.journal.keys) }; return @() }
-
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"

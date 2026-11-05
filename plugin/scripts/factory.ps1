@@ -1,6 +1,5 @@
 #!/usr/bin/env pwsh
 # factory.ps1 <verb> [--flag value ...]        client: sends the verb to the gateway (no GitHub or Octopus secret on this machine)
-# factory.ps1 --server <verb>  < args.json     server: runs the rule script (gateway only; holds GH_TOKEN, OCTOPUS_API_KEY)
 # factory.ps1 build-slot --item N [--release] [--ttl S]   a private-build slot of this host: acquire before the private build, release after it
 # factory.ps1 private-build --item N --worktree <path> [--dotnet <path>] [--log <file>]   the private build of a worktree under the host's build slot (lib/Client.Build.ps1)
 # factory.ps1 <verb> ... --max-chars N        an answer over N characters is saved whole to the work directory and printed cut, as one JSON line
@@ -26,14 +25,7 @@ $Rest = [string[]]$args
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here 'lib/Paths.ps1')
-# test-only (Tier 1 golden writes, tests/scenarios/golden/README.md): the cause id of the harness's call a rule-script run serves (server mode
-# below sets it; lib/Core.ps1 Get-FactoryCause reads it). $null in every other run, in both modes
-$script:FactoryCause = $null
 
-$ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
-    'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'backlog', 'amend-criteria', 'split-item', 'create-item', 'set-priority', 'link-dependency', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action', 'git-credential', 'park-item', 'resettle-item', 'item-pr', 'ci-release', 'copilot-settle', 'copilot-owner', 'transcript-save', 'transcript-load', 'transcript-prune')
-$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'metrics', 'backlog', 'git-credential', 'item-pr', 'ci-release', 'transcript-save', 'transcript-load', 'transcript-prune')
 
 function Write-Out($obj, [int]$code) {
     $obj.exit = $code
@@ -41,45 +33,9 @@ function Write-Out($obj, [int]$code) {
     exit $code
 }
 
-# ---------------------------------------------------------------- server mode
-# the rate limit this call saw on GitHub, for the gateway's shared budget (gateway/GitHubBudget.cs, issue 92); the gateway takes the field out of
-# the answer before anyone else reads it
-function Add-GhReport($o) { try { $g = Get-GhRateReport; if ($g -and $o -is [System.Collections.IDictionary]) { $o['_github'] = $g } } catch { } }
-if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
-    $verb = $Rest[1]
-    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'Transcripts', 'Metrics', 'Verbs.Manager', 'Verbs.Keeper', 'Replenish') { . (Join-Path $here "lib/$f.ps1") }
-    $ErrorActionPreference = 'Stop'
-    try {
-        if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }
-        $raw = [Console]::In.ReadToEnd()
-        $a = if ($raw.Trim()) { $raw | ConvertFrom-Json -AsHashtable -DateKind String } else { @{} }
-        # the AI session the gateway runs this verb for (Program.cs SessionLinkOf): the footer of every comment written for it (Board.ps1)
-        $script:FactorySession = $null
-        if ($a -is [System.Collections.IDictionary] -and $a.ContainsKey('_session')) { $script:FactorySession = $a['_session']; $a.Remove('_session') }
-        # test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: the cause id of the harness's
-        # call whose request the gateway served when it started this run (gateway/TestCause.cs), sent as X-Fake-Cause with every write
-        $script:FactoryCause = $null
-        if ($env:FACTORY_TEST_CAUSE_HEADER -eq '1' -and $a -is [System.Collections.IDictionary] -and $a.ContainsKey('_cause')) { $script:FactoryCause = "$($a['_cause'])"; $a.Remove('_cause') }
-        $fn = 'Verb_' + ($verb -replace '-', '_')
-        $r = if ((Test-Has $a 'item') -and $verb -notin $NoLockVerbs) { Use-ItemLock ([int]$a.item) { & $fn $a } } else { & $fn $a }
-        $r.verb = $verb
-        if (-not $r.ContainsKey('ok')) { $r.ok = $true }
-        Add-GhReport $r
-        Write-Out $r 0
-    } catch [FactoryReject] {
-        $e = $_.Exception
-        # A refused gate call is one data point for the model ladder: repeated refusals on one item mean the session is looping.
-        if ($e.Exit -eq 10 -and $verb -in 'complete', 'record-review', 'validation-verdict', 'approve-pr', 'merge', 'open-pr', 'append-body' -and (Test-Has $a 'item')) { try { Add-Refusal ([int]$a.item) } catch { } }
-        $o = @{ ok = $false; verb = $verb; code = $e.Code; reason = $e.Message }
-        foreach ($k in $e.Extra.Keys) { $o[$k] = $e.Extra[$k] }
-        Add-GhReport $o
-        Write-Out $o $e.Exit
-    } catch {
-        [Console]::Error.WriteLine("internal error in $verb : $($_.Exception.Message)`n$($_.ScriptStackTrace)")
-        $o = @{ ok = $false; verb = $verb; code = 'internal-error'; reason = "$($_.Exception.Message)"; retryAfterSeconds = 30 }; Add-GhReport $o
-        Write-Out $o 20
-    }
-}
+# ---------------------------------------------------------------- server mode: gone
+# V3.3: the rule scripts the gateway still runs are plugin/scripts/server/rule.ps1 (the gateway's own pwsh; the plugin a worker downloads leaves them out). This script is the client.
+if ($Rest.Count -ge 1 -and $Rest[0] -eq '--server') { Write-Out @{ ok = $false; code = 'no-server-mode'; reason = 'factory.ps1 is the client: the rule scripts run in the gateway (plugin/scripts/server/rule.ps1)' } 2 }
 
 # ---------------------------------------------------------------- client mode
 # Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md): the cause id the harness gave this call (FACTORY_TEST_CAUSE), read once and

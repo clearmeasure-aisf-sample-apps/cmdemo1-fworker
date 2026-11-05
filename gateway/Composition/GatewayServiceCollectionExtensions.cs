@@ -86,7 +86,7 @@ static class GatewayServiceCollectionExtensions
                 leaderSettings.SqlRequestFreshSeconds));
         }
         // the rule scripts that act on the board are no longer fenced by a lease ref (the ref is gone): the gateway's own check, MayAct, is the fence of the routes of a fenced verb (Runner.RunAsync)
-        c.Runner.Inert = () => c.Engine.NoDatabase;   // cutover review: with no database only the housekeeping and the reading verbs reach the rule script (InertVerbs)
+        c.Runner.Inert = () => c.Engine.Inert ? c.Engine : null;   // V3.3: an inert gateway runs no rule script (InertVerbs)
         c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lock is lost
         // the gap since the stored plant was written: the first full sweep after the restore renews the claims that ran out meanwhile
         var sweepGap = new SweepGap();
@@ -257,7 +257,7 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret));
         // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs); only the acting gateway
         var leader = c.Leader;
-        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase });
+        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct && !c.Engine.Inert });
         // the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
         var skipRevocations = c.Revocation.SkipRevocations;
         services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, skipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
@@ -318,9 +318,9 @@ static class GatewayServiceCollectionExtensions
                 rmx.OnStartRefused = (item, key, outcome) => _ = saga.StartRefused(item, key, outcome);
             }
             rmx.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
-            return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase };
+            return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct && !c.Engine.Inert };
         });
-        services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase });
+        services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct && !c.Engine.Inert });
         c.SweepMinSeconds = sweepMinSeconds;
         // C5c: the loops Program.cs started after Build(), in that order: the Copilot CI release, the Copilot owner watch, the Cursor owner watch
         services.AddGatewayCloudOwners(c);
@@ -334,9 +334,9 @@ static class GatewayServiceCollectionExtensions
         return services;
     }
 
-    // Cutover review: the lease as the loops that act on items see it. Where v2 is configured and there is no database (EngineOptions.NoDatabase) nothing may act: the lease is held (status, hand-over) but MayAct is false.
+    // Cutover review: the lease as the loops that act on items see it. Where the gateway is inert (EngineOptions.Inert: the engine does not act in its environment) nothing may act: the lease is held (status, hand-over) but MayAct is false.
     internal static ILeadership ActingLeadership(GatewayComposition c, IServiceProvider sp) =>
-        c.Engine.NoDatabase ? new InertLeadership(sp.GetRequiredService<ILeadership>()) : sp.GetRequiredService<ILeadership>();
+        c.Engine.Inert ? new InertLeadership(sp.GetRequiredService<ILeadership>()) : sp.GetRequiredService<ILeadership>();
 
     // The CI release and the owner watches of the cloud runtimes (gateway/Runtimes/Owner*.cs, task C5c), where Program.cs started them: the CI release
     // where the Copilot runtime is on and api.copilot.ciRelease; one CloudOwnerWatch per cloud runtime that is on. The Copilot watch's registration

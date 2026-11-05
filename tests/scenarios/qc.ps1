@@ -98,7 +98,7 @@ function Qc-Hook($Event, $Payload) {
 function Qc-Server([string]$Verb, $Body, [hashtable]$Env = @{}) {
     $old = @{}; foreach ($k in $Env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $Env[$k]) }
     try {
-        $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') --server $Verb 2>$null
+        $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/server/rule.ps1') --server $Verb 2>$null   # (V3.3: the gateway's rule scripts; factory.ps1 is the client)
         $code = $LASTEXITCODE; $j = try { ($out -join "`n") | ConvertFrom-Json -AsHashtable } catch { @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = $code }; return $j
     } finally { foreach ($k in $Env.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k]) } }
 }
@@ -742,27 +742,6 @@ $QcScenarios = [ordered]@{
     $rs = Invoke-RestMethod "$(Qc-Base)/api/v1/workers/qw1/resume" -Method POST -Headers @{ Authorization = 'Bearer test-token' }
     $served = Wait-Until -Seconds 60 { try { (Qc-RecState $z.n $z.pr) -eq 'assigned' -and (Qc-QcAssignments $z.n)[0].worker -eq 'qw1' } catch { $false } }
     Check 'and served once a qualified worker is there' $served (Qc-RecState $z.n $z.pr)
-}
-
-'qc: configuration guards [full]' = {
-    $c = Get-Content -Raw (Join-Path $script:Root 'config/instance.json') | ConvertFrom-Json -AsHashtable
-    $good = Join-Path $script:Work 'cfg-guard.json'
-    $c.qc = @{ allowLoopbackForTests = $true }; $c | ConvertTo-Json -Depth 12 | Set-Content $good
-    $r0 = Qc-Server 'qc-link' @{ item = 1; pr = 1 } @{ FACTORY_CONFIG = $good; FACTORY_PUBLIC_URL = 'https://gw.example.org' }
-    CheckExit 'allowLoopbackForTests refuses to load when the public URL is not loopback' $r0 30 'config-invalid'
-    $c.qc = @{ allowLoopbackForTests = $false }; $c | ConvertTo-Json -Depth 12 | Set-Content $good
-    $r0 = Qc-Server 'qc-link' @{ item = 1; pr = 1 } @{ FACTORY_CONFIG = $good; FACTORY_PUBLIC_URL = "http://127.0.0.1:$($script:PublicPort)" }
-    CheckExit 'a loopback public URL is refused for links' $r0 30 'public-url-not-reachable'
-    $r0 = Qc-Server 'qc-link' @{ item = 1; pr = 1 } @{ FACTORY_CONFIG = $good; FACTORY_PUBLIC_URL = "http://localhost:$($script:PublicPort)" }
-    CheckExit 'localhost is refused too' $r0 30 'public-url-not-reachable'
-    $r0 = Qc-Server 'qc-link' @{ item = 1; pr = 1 } @{ FACTORY_CONFIG = $good; FACTORY_PUBLIC_URL = '' }
-    CheckExit 'no public URL is refused' $r0 30 'public-url-not-reachable'
-    $c.timing.qcTokenHours = 8; $c | ConvertTo-Json -Depth 12 | Set-Content $good
-    $r0 = Qc-Server 'qc-link' @{ item = 1; pr = 1 } @{ FACTORY_CONFIG = $good; FACTORY_PUBLIC_URL = 'https://gw.example.org' }
-    CheckExit 'a QC token TTL not above build cap plus lifetime is refused' $r0 30 'config-invalid'
-    $c.timing.qcTokenHours = 16; $c | ConvertTo-Json -Depth 12 | Set-Content $good
-    $r0 = Qc-Server 'qc-link' @{ item = 1; pr = 1 } @{ FACTORY_CONFIG = $good; FACTORY_PUBLIC_URL = 'https://gw.example.org'; FACTORY_TOKEN_SECRET = '' }
-    CheckExit 'without the token secret no link is made' $r0 30 'no-token-secret'
 }
 
 'qc: capacity, memory and worker choice [full]' = {

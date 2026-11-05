@@ -9,7 +9,7 @@ $sandbox = $(if ($env:FACTORY_SANDBOX_REPO) { $env:FACTORY_SANDBOX_REPO } else {
 $script:bad = 0
 function Row([string]$Name, [bool]$Ok, [string]$Detail = '') { if (-not $Ok) { $script:bad++ }; '{0,-4} {1,-58} {2}' -f $(if ($Ok) { 'ok' } else { 'FAIL' }), $Name, $Detail }
 $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json'
-foreach ($f in 'Core', 'Apps') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+. (Join-Path $root 'plugin/scripts/lib/Paths.ps1'); . (Join-Path $root 'plugin/scripts/lib/Config.ps1'); foreach ($f in 'Core', 'Apps') { . (Join-Path $root "plugin/scripts/server/lib/$f.ps1") }   # (V3.3: the gateway's rule scripts)
 $all = Get-Content -Raw (Join-Path $PSScriptRoot 'items.json') | ConvertFrom-Json; $pickN = @($Pick -split ',' | ForEach-Object { [int]$_.Trim() }); $items = @($all | Where-Object { $pickN -contains [int]$_.n })
 
 # --- GitHub

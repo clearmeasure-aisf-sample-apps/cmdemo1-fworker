@@ -92,6 +92,7 @@ public sealed class C7cMessagingUnconfiguredGateway : C7cGatewayBase
     protected override void Configure(GatewayEnvironment env, JsonObject cfg)
     {
         env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
+        env.Set("FACTORY_TEST_STUB_SCRIPTS", null);   // (the stand-in needs the test hooks: this gateway is inert, V3.3)
         env.Set("GH_TOKEN", "fake");
         cfg["messaging"] = new JsonObject { ["enabled"] = false, ["testHooks"] = false };
     }
@@ -103,6 +104,7 @@ public sealed class C7cTestHooksOffGateway : C7cGatewayBase
     protected override void Configure(GatewayEnvironment env, JsonObject cfg)
     {
         env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
+        env.Set("FACTORY_TEST_STUB_SCRIPTS", null);   // (the stand-in needs the test hooks: this gateway is inert, V3.3)
         env.Set("GH_TOKEN", "fake");
         cfg["messaging"] = new JsonObject { ["testHooks"] = false };
     }

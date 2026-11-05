@@ -9,7 +9,8 @@ Get-ChildItem (Join-Path $root 'plugin/scripts') -Recurse -Filter *.ps1 | ForEac
     Check $_.Name ($errs.Count -eq 0); $errs | ForEach-Object { "       $($_.Message) line $($_.Extent.StartLineNumber)" }
 }
 $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json'
-foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+. (Join-Path $root 'plugin/scripts/lib/Paths.ps1'); . (Join-Path $root 'plugin/scripts/lib/Config.ps1'); . (Join-Path $root 'plugin/scripts/lib/Models.ps1')   # the client's
+foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner') { . (Join-Path $root "plugin/scripts/server/lib/$f.ps1") }   # the gateway's rule scripts (V3.3)
 "rules"
 Check 'docs-only: docs and md only' (Test-DocsOnlyFiles @(@{filename='docs/a.md'}, @{filename='README.md'}))
 Check 'docs-only: src file is code' (-not (Test-DocsOnlyFiles @(@{filename='docs/a.md'}, @{filename='src/X.cs'})))
@@ -17,37 +18,15 @@ Check 'docs-only: workflow is code' (-not (Test-DocsOnlyFiles @(@{filename='.git
 foreach ($f in 'docs/x.ps1', 'docs/ci.yml', 'src/UI/README.md', '.github/pull_request_template.md', 'CLAUDE.md', 'AGENTS.md', 'sub/CLAUDE.md', '.claude/skills/x/SKILL.md', '.cursor/rules/x.md', '.cursor/commands/y.md', 'plugin/skills/x/SKILL.md', 'LICENSE.exe', 'LICENSES/x.cs') { Check "docs-only: $f is not documentation" (-not (Test-DocsOnlyFiles @(@{filename=$f}))) }
 foreach ($f in 'docs/a/b.md', 'docs/diagram.svg', 'README.md', 'arch/Workflow.md', 'LICENSE', 'LICENSE.txt') { Check "docs-only: $f is documentation" (Test-DocsOnlyFiles @(@{filename=$f})) }
 Check 'docs-only: empty list is not docs-only' (-not (Test-DocsOnlyFiles @()))
-$fpInfo = @{ body = "Criteria:`n- The guide names the route.`n`n## Technical Design`nFiles: docs/guide.md`n<!-- aisf:docs-only -->`n- add the sentence." }
-Check 'fast path: a criterion that contains double quotes is matched whole' ((Get-GroundedFindings @{ body = "- The page says `"Ready`" in bold.`n## Technical Design`n- x" } 'Technical Design' @('FINDING: criterion "The page says "Ready" in bold." - not covered')).accepted.Count -eq 1)
 $mk = "x`n<!-- aisf:docs-only -->"
 $legacy = '2026-10-01T00:00:00Z'
 Check 'docs-only flag: the body counts only for an item created before timing.docsOnlyLegacyBefore' ((Get-LegacyCutoff) -eq [DateTime]::new(2026, 10, 16, 0, 0, 0, [DateTimeKind]::Utc) -and -not (Test-ItemDocsOnly @{} @{ column = 'Development'; body = $mk; createdAt = '2026-10-16T00:00:00Z' }) -and -not (Test-ItemDocsOnly @{} @{ column = 'Development'; body = $mk; createdAt = [DateTime]::UtcNow.AddYears(1) }) -and -not (Test-ItemDocsOnly @{} @{ column = 'Development'; body = $mk }) -and (Test-ItemDocsOnly @{} @{ column = 'Development'; body = $mk; createdAt = '2026-10-15T23:59:59Z' }))
-Check 'fast path: the quote of a finding ends at the first separator when that grounds it, so a remark with quotes and a dash is not read into it' ((Get-GroundedFindings $fpInfo 'Technical Design' @('FINDING: criterion "The guide names the route." - the design says "the route" - which one?')).accepted[0].quote -eq 'The guide names the route.' -and (Get-GroundedFindings @{ body = "- The label reads `"A`" - not `"B`" in bold.`n## Technical Design`n- x" } 'Technical Design' @('FINDING: criterion "The label reads "A" - not "B" in bold." - missing')).accepted.Count -eq 1)
 Check 'docs-only flag: the field decides once it exists; only a field-less state past the design column reads the body' ((Test-ItemDocsOnly @{} @{ column = 'Development'; body = $mk; createdAt = $legacy }) -and -not (Test-ItemDocsOnly @{ design = @{ docs_only = $false } } @{ column = 'Development'; body = $mk }) -and -not (Test-ItemDocsOnly @{} @{ column = 'Technical Design'; body = $mk }) -and (Test-ItemDocsOnly @{ design = @{ docs_only = $true } } @{ column = 'Development'; body = 'x' }))
-$gf = Get-GroundedFindings $fpInfo 'Technical Design' @('FINDING: criterion "The guide names the route." - not covered', '- FINDING: file "docs/guide.md" - outside the scope', 'FINDING: criterion "add the sentence." - vague', 'FINDING: better wording', 'a remark')
-Check 'fast path: only findings that quote the item count' ($gf.accepted.Count -eq 2 -and $gf.dropped -eq 2)
-Check 'fast path: the design review of a marked item, and only that' ((Test-DocsOnlyDesignReview @{ design = @{ docs_only = $true } } 'Technical Design') -and -not (Test-DocsOnlyDesignReview @{ design = @{ docs_only = $true } } 'Development') -and -not (Test-DocsOnlyDesignReview @{ design = @{ docs_only = $false } } 'Technical Design') -and -not (Test-DocsOnlyDesignReview @{} 'Technical Design'))
 $pr = [pscustomobject]@{ head = [pscustomobject]@{ ref = 'factory-worker/12-development' }; title = 'x (#12)' }
 Check 'belongs: branch /12-' (Test-PrBelongs $pr 12)
 $pr2 = [pscustomobject]@{ head = [pscustomobject]@{ ref = 'other/branch' }; title = 'fix #123' }
 Check 'belongs: #12 does not match #123' (-not (Test-PrBelongs $pr2 12))
 Check 'belongs: #123 matches' (Test-PrBelongs $pr2 123)
-# W0.4: the forms of a Depends on reference. Home is clearmeasure-aisf-sample-apps/cmdemo1-workorders (config/instance.json)
-$ho = "$((Get-Cfg).owner)"; $hr = "$((Get-Cfg).repo)"
-Check 'depends: #N is the home item' ((Get-ItemDependencies 1 'Depends on #12').Count -eq 1 -and (Get-ItemDependencies 1 'Depends on #12')[0] -eq 12)
-Check 'depends: repo#N naming the home repository is the home item' ((Get-ItemDependencies 1 "Depends on $hr#12")[0] -eq 12)
-Check 'depends: owner/repo#N naming the home repository is the home item, in any case' ((Get-ItemDependencies 1 "Depends on $($ho.ToUpperInvariant())/$hr#12")[0] -eq 12 -and (Get-ItemDependencies 1 "depends on: $ho/$hr#12").Count -eq 1)
-Check 'depends: owner/other#N is not the home item' ((Get-ItemDependencies 1 'Depends on acme/other#12').Count -eq 0 -and (Get-ItemDependencies 1 'Depends on other#12').Count -eq 0)
-Check 'depends: a foreign ref is listed as a foreign dependency, qualified and lowercased' ((Get-ItemForeignDependencies 1 'Depends on Acme/Other#12, other#13')[0] -eq 'acme/other#12' -and (Get-ItemForeignDependencies 1 'Depends on Acme/Other#12, other#13')[1] -eq "$($ho.ToLowerInvariant())/other#13" -and (Get-ItemForeignDependencies 1 'Depends on #12').Count -eq 0)
-$mix = Get-ItemDependencies 5 "Depends on #7, acme/other#7, $ho/$hr#8 and #5 and #7`nDepends on:#9"
-Check 'depends: a mixed line keeps the home items once each, without its own number or the foreign ref of the same number' ($mix.Count -eq 3 -and $mix[0] -eq 7 -and $mix[1] -eq 8 -and $mix[2] -eq 9)
-Check 'depends: a qualified ref to the home repository with the item''s own number is not a dependency' ((Get-ItemDependencies 5 "Depends on $ho/$hr#5").Count -eq 0 -and (Get-ItemDependencies 5 'Depends on acme/other#5').Count -eq 0)
-Check 'depends: the refs carry owner, repo, number and home' ((Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].owner -eq 'acme' -and (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].repo -eq 'other' -and (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].number -eq 12 -and -not (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].home)
-foreach ($sep in @('#1/#2', '#1-#2', '#1, #2', '#1 #2', '#1 and #2', '#1,#2', '#1;#2')) { $dd = Get-ItemDependencies 9 "Depends on $sep"; Check "depends: '$sep' reads both home items, as before" ($dd.Count -eq 2 -and $dd[0] -eq 1 -and $dd[1] -eq 2) }
-Check 'depends: a bare #N after a qualified ref is still home' ((Get-ItemDependencies 9 'Depends on acme/other#1, #2')[0] -eq 2 -and (Get-ItemDependencies 9 'Depends on acme/other#1, #2').Count -eq 1)
-Check 'depends: qualified refs mixed with the separators' (((Get-ItemDependencies 9 'Depends on #1-#2, acme/other#3 and #4') -join ',') -eq '1,2,4' -and ((Get-ItemForeignDependencies 9 'Depends on #1-#2, acme/other#3') -join ',') -eq 'acme/other#3')   # no @(...) around the calls: they return ,`$array, and @() would nest it so that -join gives '1 2 4'
-Check 'depends: text outside a Depends on line is not read' ((Get-ItemDependencies 1 "See #12 and acme/other#13`nDepends on #14").Count -eq 1)
-Check 'column order' ((Get-ColumnIndex 'Development') -eq 1 -and (Get-ColumnIndex 'Nope') -eq -1)
 Check 'name in list is case-insensitive' (Test-NameIn 'FACTORY WORKER' @('factory worker'))
 try { Reject 10 'x' 'y' } catch { Check 'reject carries exit and code' ($_.Exception.Exit -eq 10 -and $_.Exception.Code -eq 'x') }
 $d = '{"a":"2026-10-10T21:09:32.250Z"}' | ConvertFrom-Json -AsHashtable -DateKind String
@@ -56,7 +35,6 @@ $d2 = '{"a":"2026-10-10T21:09:32.250Z"}' | ConvertFrom-Json -AsHashtable
 Check 'a DateTime from the default parser keeps its milliseconds' ((ConvertTo-Iso (ConvertFrom-Iso $d2.a)) -eq '2026-10-10T21:09:32.250Z')
 Check 'iso roundtrip' ((ConvertTo-Iso (ConvertFrom-Iso '2026-10-10T12:00:00.250Z')) -eq '2026-10-10T12:00:00.250Z' -and (ConvertFrom-Iso '2026-10-10T12:00:00Z') -lt (ConvertFrom-Iso '2026-10-10T12:00:00.001Z'))
 "model ladder"
-Check 'tier thresholds: below, at, past' (((Get-TierFor 1 @(2,3)) -eq 0) -and ((Get-TierFor 2 @(2,3)) -eq 1) -and ((Get-TierFor 3 @(2,3)) -eq 2) -and ((Get-TierFor 99 @(2,3)) -eq 2))
 $mc = Get-Content -Raw (Join-Path $root 'plugin/scripts/models.default.json') | ConvertFrom-Json -AsHashtable
 $m0 = Resolve-ModelFor 'orchestrator' 0 $mc; $m1 = Resolve-ModelFor 'subagent' 1 $mc; $m2 = Resolve-ModelFor 'subagent' 2 $mc; $m9 = Resolve-ModelFor 'subagent' 9 $mc
 Check 'default ladder starts on haiku 5.5 at xhigh' ($m0.model -eq 'claude-haiku-5-5' -and $m0.effort -eq 'xhigh')
@@ -129,17 +107,11 @@ try {
     Check 'config: the Copilot cloud agent uses Auto model selection: no model in the source defaults or the deployed overrides, so no model is sent and GitHub picks Auto (owner 2026-10-20)' (([string]((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).api.copilot.model)) -eq '' -and ([string]$copDep.model) -eq '')
     Check 'config: the Copilot cloud agent runs one task at a time, 60 minutes, 30 a day, and no token in the file' (((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).api.copilot | ForEach-Object { $_.maxConcurrent -eq 1 -and $_.maxMinutes -eq 60 -and $_.maxExecutionsPerDay -eq 30 -and -not $_.ContainsKey('token') }))
     Check 'config: the CI release of the Copilot agent''s held workflow runs is on wherever the mode is, a pass every 120 s (owner 2026-10-20: no file guard)' ($copSrc.ciRelease -eq $true -and $copSrc.ciReleaseSeconds -eq 120 -and $copDep.ciRelease -eq $true -and $copDep.ciReleaseSeconds -eq 120)
-    $ciText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Verbs.Pr.ps1')
-    Check 'CI release: only copilot/ runs, only the item''s pull request head, re-run (never approve) with the gateway''s own identity' ($ciText -match "head_branch\)`" -like 'copilot/\*'" -and $ciText -match 'head-mismatch' -and $ciText -match '/actions/runs/\$\(\[long\]\$r\.id\)/rerun"' -and $ciText -notmatch 'runs/[^"]*/approve' -and $ciText -notmatch 'Use-GhAs')
     # every gateway source, one file at a time: the registration moved from Program.cs to gateway/Composition/ (C5a, #278) and may move again.
     # Wanted: a loop that registers each RuntimeLoop with AddSingleton<IHostedService>; refused: any AddHostedService that makes a RuntimeLoop
     # (the lambda up to `new RuntimeLoop(` with no other Add* call between, or AddHostedService<RuntimeLoop>), anywhere in gateway/
     $gwSources = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..' 'gateway') -Recurse -Filter '*.cs' -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName })
-    # replenish backpressure (W0.6, delivery-speed.md 6): the gateway passes the last plan's waiting count, the sweep hands it to Invoke-Replenish, and both settings
-    # exist in the source defaults (off) so an override can name them
-    $rpText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Replenish.ps1'); $swText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Verbs.Sweep.ps1')
     $rpSrc = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).keeper.replenish
-    Check 'replenish: the sweep hands it and the free sessions to Invoke-Replenish, which holds on no-plan, waiting and not-idle' ($swText -match 'Invoke-Replenish \$list \$last \$designCol \$rpWaiting \$rpFree' -and $rpText -match "skipped = 'no-plan'" -and $rpText -match "skipped = 'waiting'" -and $rpText -match "skipped = 'not-idle'")
     Check 'replenish: holdWhenWaiting (0) and onlyWhenIdle (false) are in the source defaults, so behaviour is unchanged until a setting turns them on' ($rpSrc.holdWhenWaiting -eq 0 -and $rpSrc.onlyWhenIdle -eq $false)
     $loopEach = 'foreach \([^\n]*?\) (?:builder\.)?services\.AddSingleton<IHostedService>\(sp =>\s*\{(?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\('
     $loopHosted = 'AddHostedService(?:<RuntimeLoop>|\((?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\()'
@@ -199,7 +171,6 @@ Check 'state budget: a state that does not fit without the three collections is 
 $script:StateBudget = 48000
 Check 'state rev: absent is 0, present is read' ((Get-StateRev @{}) -eq 0 -and (Get-StateRev @{ rev = 7 }) -eq 7)
 'flow metrics'
-. (Join-Path $root 'plugin/scripts/lib/Metrics.ps1')
 $fl = @{ item = 5 }
 Add-FlowStamp $fl 'Technical Design'; Add-FlowStamp $fl 'Technical Design'; Add-FlowStamp $fl 'Development'
 Check 'flow: one entry per stage entered, the same stage twice in a row is one' (@($fl.flow).Count -eq 2 -and $fl.flow[0].c -eq 'Technical Design' -and $fl.flow[1].c -eq 'Development' -and "$($fl.flow[1].at)" -match '^\d{4}-\d\d-\d\dT')
@@ -211,13 +182,6 @@ Check 'flow: a full set is far inside the state budget' ((@{ flow = $fl.flow } |
 $ms = @{ item = 8; claim = @{ holder = 'w' } }
 Move-OwnerTo 8 $ms 'Development'; Move-OwnerTo 8 $ms 'Functional Testing'
 Check 'flow: Move-OwnerTo stamps each stage it enters, next to dispatched_at' (@($ms.flow).Count -eq 2 -and $ms.flow[0].c -eq 'Development' -and $ms.flow[1].c -eq 'Functional Testing' -and $ms.dispatched_at.ContainsKey('Functional Testing') -and $ms.claim.column -eq 'Functional Testing')
-$fs = @{ item = 5; flow = @(@{ c = 'Technical Design'; at = '2026-01-01T00:00:00Z' }, @{ c = 'Development'; at = '2026-01-01T00:10:00Z' }, @{ c = 'Functional Testing'; at = '2026-01-01T01:10:00Z' }); merge = @{ merged_at = '2026-01-01T01:40:00Z' } }
-$cy = Get-ItemCycle 5 @{ state = $fs; comments = @() } 'bot'
-Check 'flow metrics: the seconds of each stage, the last one up to the merge' (@($cy.flow).Count -eq 3 -and $cy.flow[0].seconds -eq 600 -and $cy.flow[1].seconds -eq 3600 -and $cy.flow[2].seconds -eq 1800 -and $cy.flow[1].stage -eq 'Development')
-$cyOpen = Get-ItemCycle 6 @{ state = @{ item = 6; flow = @(@{ c = 'Development'; at = '2026-01-01T00:00:00Z' }) ; merge = @{ pr = 3; merged_at = $null } }; comments = @() } 'bot'
-Check 'flow metrics: an item with no merge time is not measured (no journal either)' ($null -eq $cyOpen)
-$cyOld = Get-ItemCycle 7 @{ state = @{ item = 7; merge = @{ merged_at = '2026-01-01T00:20:00Z' } }; comments = @() } 'bot'
-Check 'flow metrics: a state without flow has an empty flow and the old fields' (@($cyOld.flow).Count -eq 0 -and $cyOld.times.merged -and $cyOld.columns -is [hashtable])
 # The declared differences of v2 (issue #468): tests/scenarios/v2-differences.ps1, the pure functions the Tier 1 harness (lib.ps1) uses for every suite
 'v2 declared differences'
 . (Join-Path $root 'tests/scenarios/v2-differences.ps1')
