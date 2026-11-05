@@ -10,7 +10,7 @@ namespace Gateway.Tests;
 
 /// <summary>
 /// V2.1: the journal lines of v1's AutoPromoter (Verbs.Promote.ps1) written by the acting train through the journal ledger: promoted, promotion-waiting (once per release, environment and reason, naming the item that
-/// holds the others; the refusal of Octopus with the permission) and promotion-signoff. A shadow train writes none (v1 still writes its own there).
+/// holds the others; the refusal of Octopus with the permission) and promotion-signoff.
 /// </summary>
 public sealed class PromotionJournalTests
 {
@@ -30,21 +30,21 @@ public sealed class PromotionJournalTests
         public Task<PatchOutcome> Patch(long commentId, string body, CancellationToken ct) => Task.FromResult(PatchOutcome.Ok);
     }
 
-    sealed class Policies(bool shadow) : IDeliveryPolicies
+    sealed class Policies : IDeliveryPolicies
     {
-        DeliveryPolicy Make(string env) => new("ui", Repo, env, Promoter.Gateway, true, "orders-ui", new Dictionary<string, string> { ["uat"] = "UAT", ["prod"] = "Production" }, new Dictionary<string, string>(), "/health", new HealthWindow(5, 10), 2, false, Shadow: shadow);
+        DeliveryPolicy Make(string env) => new("ui", Repo, env, Promoter.Gateway, true, "orders-ui", new Dictionary<string, string> { ["uat"] = "UAT", ["prod"] = "Production" }, new Dictionary<string, string>(), "/health", new HealthWindow(5, 10), 2, false);
         public DeliveryPolicy? For(string deployable, string environment) => environment == "tdd" ? null : Make(environment);
         public IReadOnlyList<DeliveryPolicy> All() => [Make("uat"), Make("prod")];
         public IReadOnlyList<DeliveryPolicy> ForOctopusEvents() => All();
         public IReadOnlyList<DeliveryPolicy> ForRepository(RepoId repository) => All();
     }
 
-    static (PromotionJournal Journal, Store Store, InMemoryTrainStore Trains) Rig(bool shadow = false)
+    static (PromotionJournal Journal, Store Store, InMemoryTrainStore Trains) Rig()
     {
         var store = new Store();
         var ledger = new JournalLedger(store, new JournalSettings(), log: _ => { });
         var trains = new InMemoryTrainStore();
-        return (new PromotionJournal(() => ledger, Repo, new Policies(shadow), trains, _ => { }), store, trains);
+        return (new PromotionJournal(() => ledger, Repo, new Policies(), trains, _ => { }), store, trains);
     }
 
     static readonly PromoteRelease Cmd = new("PromoteRelease|ui|1.0.5|uat|1", "ui", "orders-ui", "1.0.5", "uat", ["o/r#7", "o/r#8", "x/other#9"]);
@@ -116,14 +116,6 @@ public sealed class PromotionJournalTests
         await journal.AnswerRefused(new AnswerSignOff("AnswerSignOff|ui|I-1", "ui", "I-1", "ServerTasks-9", true, "n"), "Octopus refused to answer (403, missing permission InterruptionSubmit)", default);
         Assert.Equal(7, Assert.Single(store.Posts).Item);
         Assert.Contains("missing permission InterruptionSubmit", store.Posts[0].Body);
-    }
-
-    [Fact]
-    public async Task AShadowTrain_WritesNoLines()
-    {
-        var (journal, store, _) = Rig(shadow: true);
-        await journal.Decided(new TrainDecided("ui/uat", "waiting", "1.0.5", ["o/r#7"], ["#7 has no 'Auto Merge' label"], DateTimeOffset.UnixEpoch), default);
-        Assert.Empty(store.Posts);
     }
 
     [Fact]

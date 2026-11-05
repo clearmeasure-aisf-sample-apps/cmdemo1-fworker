@@ -73,19 +73,11 @@ public sealed record TrainDependencyDelivered(string Key, string Item, string En
 /// <summary>
 /// What the train decided, once per change: <paramref name="Action"/> is one of idle, waiting, promote, following, signoff-waiting, signoff-proceed, signoff-abort, delivered, held,
 /// observing (the train does not act in this environment). One decision is per release: "idle" with a release says the release is no longer judged (a decision before it is retracted), "delivered"
-/// retracts the release and the <paramref name="Superseded"/> ones it carried. The shadow run (W5.2) compares it with v1's promotions and Sign-off answers.
+/// retracts the release and the <paramref name="Superseded"/> ones it carried.
 /// </summary>
 [MessageIdentity("delivery.train.decided")]
 public sealed record TrainDecided(string Key, string Action, string Release, IReadOnlyList<string> Items, IReadOnlyList<string> Reasons, DateTimeOffset At,
     IReadOnlyList<string>? Superseded = null, bool Replay = false) : IEvent;
-
-/// <summary>
-/// W9.10p: a command that a train in an engine that acts would send for an environment v1's AutoPromoter still promotes (<see cref="DeliveryPolicy.Shadow"/>): the train publishes this in place of the
-/// <c>PromoteRelease</c> or <c>AnswerSignOff</c>, so no executor ever sees the command. Only the shadow records it (<see cref="DeliveryActingShadowHandlers"/>); the fields are plain text, so it travels the
-/// outbox like any other message. <paramref name="Name"/> is the command's name, <paramref name="IdempotencyKey"/> its key.
-/// </summary>
-[MessageIdentity("delivery.train.shadow-command")]
-public sealed record ShadowCommand(string Key, string Name, string IdempotencyKey, string Release) : IEvent;
 
 /// <summary>
 /// The watcher's replay of Octopus's history begins (<paramref name="Active"/> true) or is applied (false). While it runs the train takes its inputs in and decides nothing; the end makes it judge

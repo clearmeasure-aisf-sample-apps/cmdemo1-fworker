@@ -168,6 +168,58 @@ public class ArchitectureInventoryTests
         Assert.True(problems.Count == 0, "The v1 fallbacks differ from docs/design/verb-inventory.json:\n  " + string.Join("\n  ", problems));
     }
 
+    // ---- what the removal of v1 took out stays out -----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The types and members the removal took out (V2.3 and V3.2 of the plan): v1's AutoPromoter and the delivery train's shadow of it (the comparison with v1's pass, its store, gate, report, handlers and
+    /// holder, the ShadowCommand of a shadowed environment, the shadow environments of a policy). A name here that is in the code of gateway/ or src/ again, generated code included, fails: bringing one back is
+    /// a decision, so it is a visible edit of this list. The live parts that kept a shadow name (ShadowHistory, ShadowOctopusPort, OctopusShadowIngress, DeliveryShadowSettings, DeliveryShadowWiring) are not here.
+    /// </summary>
+    static readonly string[] RetiredNames =
+    [
+        "AutoPromoter", "ObserveV1", "ObserveV2",
+        "DeliveryShadow", "DeliveryShadowHandlers", "DeliveryActingShadowHandlers", "DeliveryShadowService", "DeliveryShadowHolder", "AdminDeliveryShadowEndpoints",
+        "ShadowCommand", "ShadowComparer", "ShadowClassifier", "ShadowComparisonResult", "ShadowComparisonRow", "ShadowDecision", "ShadowSide", "ShadowActions", "ShadowOutcomes", "ShadowReasons",
+        "ShadowGate", "ShadowLiveRow", "ShadowLiveRelease", "ShadowSummary", "IShadowComparisonStore", "SqlShadowComparisonStore", "InMemoryShadowComparisonStore", "ShadowEnvironments",
+    ];
+
+    /// <summary>The route of the shadow's report and the identity of its command message: text a string literal could bring back without any of the names.</summary>
+    static readonly string[] RetiredLiterals = ["\"/api/v1/delivery-shadow\"", "MessageIdentity(\"delivery.train.shadow-command\")"];
+
+    /// <summary>The code with its string literals emptied, so that a log line or a history type that says a retired word is no use of it.</summary>
+    static string Identifiers(string code) => Regex.Replace(code, @"""(?:\\.|[^""\\\n])*""", "\"\"");
+
+    static List<string> RetiredUses(string path, string code)
+    {
+        var found = new List<string>();
+        var ids = Identifiers(code);
+        foreach (var name in RetiredNames)
+            if (Regex.IsMatch(ids, $@"\b{name}\b")) found.Add($"{path}: {name}");
+        // DeliveryPolicy.Shadow, read as a member or set as a named argument or a property pattern
+        if (Regex.IsMatch(ids, @"\.Shadow\b|[(,{]\s*Shadow\s*:")) found.Add($"{path}: DeliveryPolicy.Shadow");
+        foreach (var literal in RetiredLiterals)
+            if (code.Contains(literal, StringComparison.Ordinal)) found.Add($"{path}: {literal}");
+        return found;
+    }
+
+    [Fact]
+    public void TheRetiredV1AndShadowNames_AreNotInTheCode()
+    {
+        var found = Sources("gateway").Concat(Sources("src")).SelectMany(s => RetiredUses(s.Path, s.Code)).ToList();
+        Assert.True(found.Count == 0, "What the removal of v1 took out is in the code again (a decision: edit RetiredNames in the same pull request):\n  " + string.Join("\n  ", found));
+    }
+
+    [Fact]
+    public void TheRetiredNamesCheck_SeesAViolation_WhenOneIsPlanted()
+    {
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("public static void Handle(ShadowCommand m, DeliveryShadow s) { }")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("if (policy is { Shadow: true }) return;")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("var acts = p.Acts && !p.Shadow;")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("routes.MapGet(\"/api/v1/delivery-shadow\", h);")));
+        // the live names that kept a shadow word, a comment and a string are no use
+        Assert.Empty(RetiredUses("x.cs", ArchitectureTests.Code("new ShadowHistoryRecord(k, t, d, at); var p = new ShadowOctopusPort(f, true); // the DeliveryShadow is gone\nlog(\"the AutoPromoter is gone\");")));
+    }
+
     // ---- the document says what the JSON says --------------------------------------------------------------------------------------------------
 
     [Fact]

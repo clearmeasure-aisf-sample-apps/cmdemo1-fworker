@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using Fworker.Contracts.Catalog;
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Messaging;
@@ -16,12 +15,10 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.10p (#555, owner decision 2026-10-30) in a real Wolverine host: the registration the gateway makes where the engine acts (<c>DeliveryActingWiring.Configure</c>, the same one <c>Attach</c> calls). The train there promotes for tdd
-/// only: in uat and prod, which v1's AutoPromoter still promotes, it decides in shadow, so the decision lands in the shadow's comparison (<see cref="DeliveryActingShadowHandlers"/>) and the command it would send leaves as a
-/// ShadowCommand, which is recorded; no PromoteRelease or AnswerSignOff reaches the executor queue. The control: the same scenario with uat promoted by the train (W9.12) reaches the executor and records nothing.
-/// The host has no database: the train's state is in memory and the queues are not durable (the tests of the SQL parts are DeliveryShadowTrackedTests).
+/// W9.10p (#555) in a real Wolverine host: the registration the gateway makes where the engine acts (<c>DeliveryActingWiring.Configure</c>, the same one <c>Attach</c> calls). The train promotes uat and prod: its
+/// PromoteRelease and its AnswerSignOff reach the executor. The host has no database: the train's state is in memory and the queues are not durable (the tests of the SQL parts are DeliveryTrainTrackedTests).
 /// </summary>
-public sealed class DeliveryActingShadowHostTests
+public sealed class DeliveryActingHostTests
 {
     static readonly RepoId Repo = new("acme", "orders");
     static string Sha(char c) => new(c, 40);
@@ -37,7 +34,7 @@ public sealed class DeliveryActingShadowHostTests
         public Task<EnvProbe> Probe(string deployable, string environment, CancellationToken ct) => Task.FromResult(new EnvProbe($"https://{environment}.example", Running.GetValueOrDefault(environment), "Healthy", DateTimeOffset.UtcNow));
     }
 
-    /// <summary>The policy source with the short pauses a test can wait for (the tracked tests of the shadow run do the same).</summary>
+    /// <summary>The policy source with the short pauses a test can wait for.</summary>
     sealed class FastPolicies(IDeliveryPolicies inner) : IDeliveryPolicies
     {
         DeliveryPolicy Fast(DeliveryPolicy p) => p with { MinReadGapSeconds = 0, PollSeconds = 1 };
@@ -58,7 +55,7 @@ public sealed class DeliveryActingShadowHostTests
             public void Log<TState>(LogLevel level, EventId id, TState state, Exception? error, Func<TState, Exception?, string> format)
             {
                 var text = format(state, error);
-                if (level >= LogLevel.Warning || text.Contains("Train", StringComparison.Ordinal) || text.Contains("Shadow", StringComparison.Ordinal))
+                if (level >= LogLevel.Warning || text.Contains("Train", StringComparison.Ordinal))
                     lock (lines) lines.Add($"{DateTime.UtcNow:HH:mm:ss.fff} {level} {category.Split('.').Last()}: {text}{(error is null ? "" : " | " + error.GetType().Name + ": " + error.Message)}");
             }
         }
@@ -84,24 +81,21 @@ public sealed class DeliveryActingShadowHostTests
     sealed class Rig : IAsyncDisposable
     {
         public readonly IHost Host;
-        public readonly List<string> Log = [];   // (what the host logged about the train's messages, shown when the decision does not arrive)
-        public readonly DeliveryShadow Shadow;
-        public readonly InMemoryShadowComparisonStore Store = new();
+        public readonly List<string> Log = [];   // (what the host logged about the train's messages, shown when a command does not arrive)
         public int ExecutorCalls;   // each PromoteRelease or AnswerSignOff that reaches the executor asks for the Octopus key once (none is set, so none reaches Octopus)
         readonly Reads reads;
 
-        public Rig(bool shadowed)
+        public Rig()
         {
-            // the policy as DeliveryShadowSettings.From makes it: the engine acts, uat and prod are named by autoPromote; with trainActs off they are shadowed, with it on the train promotes them
-            var settings = new DeliveryPolicySettings("orders-project", Promoter.Gateway, shadowed ? [] : ["uat", "prod"],
+            // the policy as DeliveryShadowSettings.From makes it: the engine acts, uat and prod are named by autoPromote
+            var settings = new DeliveryPolicySettings("orders-project", Promoter.Gateway, ["uat", "prod"],
                 new Dictionary<string, string> { ["tdd"] = "Tdd", ["uat"] = "Uat", ["prod"] = "Prod" }, new Dictionary<string, string> { ["tdd"] = "https://tdd.example", ["uat"] = "https://uat.example", ["prod"] = "https://prod.example" },
-                null, new HealthWindow(0.01, 0.02), 2, false, shadowed ? ["uat", "prod"] : null);
+                null, new HealthWindow(0.01, 0.02), 2, false);
             var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Repo, null, [new RepositoryEntry(Repo, [new DeployableEntry("orders", Repo, null, null, null, null, false)])], []);
             var policies = new FastPolicies(new CatalogDeliveryPolicies(() => snapshot, n => n == "orders" ? settings : null));
             reads = new Reads();
-            Shadow = new DeliveryShadow(policies, Store, () => DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5));
             var delivered = new DeliveredToTable(() => throw new InvalidOperationException("no database in this host"));
-            var parts = new DeliveryShadowParts(Shadow, policies, reads, delivered, "");
+            var parts = new DeliveryShadowParts(policies, reads, delivered, "");
             // (the key is counted, and the deployment is created: a promotion the executor is refused is taken back by the train, which then ignores the Sign-off of a deployment it did not ask for)
             var octopus = new OctopusPromoter(new HttpClient(new Answers()) { BaseAddress = new Uri("https://octopus.example/") }, new OctopusPromoteSettings("Spaces-1", new Dictionary<string, string>(), () => { Interlocked.Increment(ref ExecutorCalls); return "k"; }));
             var ledger = new InMemoryIdempotencyLedger();
@@ -121,8 +115,6 @@ public sealed class DeliveryActingShadowHostTests
 
         public Task Start() => Host.StartAsync();
         public IMessageBus Bus => Host.Services.GetRequiredService<IMessageBus>();
-        public long Recorded => (long)Shadow.Status()["v2"]!["commandsRecorded"]!;
-        public long Decisions => (long)Shadow.Status()["v2"]!["decisions"]!;
 
         /// <summary>Release 1.0.1 runs in every environment; 1.0.2 with item 7 is built, deployed to tdd and succeeds there: the train then decides to promote it to uat.</summary>
         public async Task ReleaseGoesThroughTdd()
@@ -154,36 +146,10 @@ public sealed class DeliveryActingShadowHostTests
     }
 
     [Fact]
-    public async Task InAShadowEnvironment_TheTrainsDecisionIsComparedWithTheAutoPromoters_ItsCommandIsRecorded_AndNoCommandReachesTheExecutor()
-    {
-        await using var rig = new Rig(shadowed: true);
-        await rig.Start();
-        await rig.ReleaseGoesThroughTdd();
-        Assert.True(await Until(() => rig.Recorded >= 1), "the train did not decide to promote, or its ShadowCommand was not handled");
-        // (the decision and the command are separate messages: the command can be recorded before the shadow has the decision, so the tick below waits for both)
-        Assert.True(await Until(() => rig.Decisions >= 1), $"the train's decision did not reach the shadow; its status: {rig.Shadow.Status()["v2"]!.ToJsonString()}; log: {string.Join(" // ", rig.Log.TakeLast(40))}");
-        // the AutoPromoter's pass says the same (what AddGatewayBackground's OnActions gives the holder's shadow)
-        rig.Shadow.ObserveV1(new JsonArray(JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new { item = 7, action = "promoted", release = "1.0.2", environment = "Uat", task = "ServerTasks-9", items = new[] { 7 } }))));
-        await rig.Shadow.Tick(default);
-        var rows = rig.Store.All.Where(x => x.Release == "1.0.2" && x.V2Action == "promote").ToList();
-        Assert.True(rows.Count == 1, $"rows: {rows.Count} of {rig.Store.All.Count}; status {rig.Shadow.Status()["v2"]!.ToJsonString()}; log: {string.Join(" // ", rig.Log.TakeLast(40))}");
-        var row = rows[0];
-        Assert.Equal(ShadowOutcomes.Match, row.Outcome);
-        var report = await rig.Shadow.Report(10, null, default);
-        var command = (JsonObject)((JsonArray)report["recentCommands"]!)[0]!;
-        Assert.Equal("PromoteRelease", (string)command["command"]!);
-        Assert.False((bool)command["executed"]!);
-        // the executor's queue saw nothing: not now, and not after the retry pause of a command (a second, longer than the train's poll here)
-        await Task.Delay(2500);
-        Assert.Equal(0, rig.ExecutorCalls);
-        Assert.Equal(0L, (long)rig.Shadow.Status()["v2"]!["commandsExecuted"]!);
-    }
-
-    [Fact]
     public async Task WhereTheTrainPromotes_ASignOffTheWatcherReports_ReachesTheTrain_AndItsAnswerReachesTheExecutor()
     {
         // V2.1: the Octopus watcher's SignOffRequested goes through the router to the train that asked for the deployment, which answers it
-        await using var rig = new Rig(shadowed: false);
+        await using var rig = new Rig();
         await rig.Start();
         await rig.ReleaseGoesThroughTdd();
         Assert.True(await Until(() => Volatile.Read(ref rig.ExecutorCalls) >= 1), "the PromoteRelease did not reach the executor");
@@ -193,13 +159,11 @@ public sealed class DeliveryActingShadowHostTests
     }
 
     [Fact]
-    public async Task WhereTheTrainPromotes_TheCommandReachesTheExecutor_AndTheShadowRecordsNothing()
+    public async Task WhereTheTrainPromotes_TheCommandReachesTheExecutor()
     {
-        await using var rig = new Rig(shadowed: false);
+        await using var rig = new Rig();
         await rig.Start();
         await rig.ReleaseGoesThroughTdd();
         Assert.True(await Until(() => Volatile.Read(ref rig.ExecutorCalls) >= 1), "the PromoteRelease did not reach the executor");
-        Assert.Equal(0L, rig.Recorded);
-        Assert.Equal(0L, rig.Decisions);   // (a decision of an environment the train promotes is no shadow decision)
     }
 }

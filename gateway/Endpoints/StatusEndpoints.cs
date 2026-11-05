@@ -80,7 +80,6 @@ sealed class StatusQuery
         // a FACTORY_DB_CONNECTION that is set and is not a connection string (W9.10o) is treated as no database; the status says so, so that "v1 alone" is not mistaken for "not configured"
         if (services.GetService<DatabaseOptions>() is { Malformed: true }) o["database"] = new JsonObject { ["configured"] = false, ["malformed"] = true };
         // the shadow run of the delivery train (W5.2): the comparison counts since this process started; the report endpoint reads the stored ones. Only in the shadow run
-        if (services.GetService<DeliveryShadowHolder>()?.Shadow is { } deliveryShadow) o["deliveryShadow"] = deliveryShadow.Status();
         return o;
     }
 

@@ -10,10 +10,10 @@ using Fworker.Workflows.Delivery;
 using Wolverine;
 using Wolverine.ErrorHandling;
 
-// W9.4 (#356): the delivery train where the engine acts. In the shadow run (DeliveryShadowWiring) the train decides and its commands are only recorded; here the train is the promoter: the router and the train's handlers
-// are attached, and PromoteRelease and AnswerSignOff are executed against Octopus (Fworker.Integrations.Octopus.OctopusPromoter, ported from Verbs.Promote.ps1) from a durable queue of their own, with the runtime
-// commands' retry rule. v1's loop that called the rule script auto-promote (AutoPromoter) starts only for the environments the train does not promote (W9.10p, AutoPromoter.Runs): the app's uat and prod stay with it until delivery.autoPromote.trainActs, and the train decides them in shadow (DeliveryPolicy.Shadow; the ShadowCommand it sends is recorded by DeliveryActingShadowHandlers, nothing executes it), so exactly one of them promotes an environment. The events of the Octopus watcher (W4.2) reach the
-// train through the same port the shadow run uses (ShadowOctopusPort) and the ingress that wraps it; what the train decides goes to the history. Nothing is registered unless the engine acts.
+// W9.4 (#356): the delivery train where the engine acts: the router and the train's handlers are attached, and PromoteRelease and AnswerSignOff are executed against Octopus
+// (Fworker.Integrations.Octopus.OctopusPromoter, ported from Verbs.Promote.ps1) from a durable queue of their own, with the runtime commands' retry rule. The train promotes every environment its
+// policy names (uat and prod since V2.2; v1's AutoPromoter and the shadow of its environments are gone). The events of the Octopus watcher (W4.2) reach the train through ShadowOctopusPort and the
+// ingress that wraps it; what the train decides goes to the history. Nothing is registered unless the engine acts.
 
 /// <summary>A delivery command was settled: executed, or refused for good (then <see cref="IntegrationFailed"/> goes with it). Public because Wolverine's generated code refers to it.</summary>
 [MessageIdentity("delivery.command-finished")]
@@ -59,7 +59,7 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         var messages = await RuntimeCommandService.Outcome(c, async () => Settle(c, result = await answer.Handle(c, ct)), e => Exhausted(c, e), attempts);
         if (journal is not null && result is { Ok: false } && result.Error.Contains("(403", StringComparison.Ordinal)) await journal.AnswerRefused(c, result.Error, ct);
         if (policies is not null && messages.OfType<DeliveryCommandFinished>().Any(m => !m.Ok))
-            return [.. messages, .. policies.All().Where(x => x.Acts && !x.Shadow && string.Equals(x.Deployable, c.Deployable, StringComparison.OrdinalIgnoreCase))
+            return [.. messages, .. policies.All().Where(x => x.Acts && string.Equals(x.Deployable, c.Deployable, StringComparison.OrdinalIgnoreCase))
                 .Select(x => new TrainCommandRefused(TrainKey.Of(x.Deployable, x.Environment), c.Name, "", c.TaskId, c.IdempotencyKey, IsSettled(result), DateTimeOffset.UtcNow))];
         return messages;
     }
@@ -78,7 +78,7 @@ public static class DeliveryExecutorHandlers
     public static void Handle(DeliveryCommandFinished m) =>
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "delivery-command", ["command"] = m.Name, ["key"] = m.IdempotencyKey, ["ok"] = m.Ok, ["error"] = m.Ok ? null : m.Error }.ToJsonString());
 
-    /// <summary>What the train decided, once per change, for the history (the shadow run keeps it in the comparison; here it is the record of why a release waited or went).</summary>
+    /// <summary>What the train decided, once per change, for the history: the record of why a release waited or went.</summary>
     public static ShadowHistoryRecord Handle(TrainDecided m)
     {
         var detail = new JsonObject
@@ -113,7 +113,7 @@ public static class SignOffWaitHandler
 /// V2.1: the journal lines of Verbs.Promote.ps1 on the items of a release, written through the journal ledger where the train acts (v1 wrote them from the AutoPromoter): <c>promoted</c> (the executor made the deployment),
 /// <c>promotion-waiting</c> (once per release, environment and reason, per item; the gates name the item that holds the others, and each other item is told "#N, carried by this release, does not qualify"; the Sign-off that waits;
 /// the refusal of Octopus with the permission it names) and <c>promotion-signoff</c> (the Sign-off answered). The ledger keeps the key of every line, so a command or a decision that runs again writes nothing twice. A line that cannot
-/// be written is logged and dropped, as v1 does: the journal never stops a promotion. Only the trains that act write (a shadow train executes nothing and v1 still writes its own lines there).
+/// be written is logged and dropped, as v1 does: the journal never stops a promotion. Only the trains that act write.
 /// </summary>
 public sealed class PromotionJournal(Func<JournalLedger?> ledger, RepoId home, IDeliveryPolicies policies, ITrainStore trains, Action<string>? log = null)
 {
@@ -129,7 +129,7 @@ public sealed class PromotionJournal(Func<JournalLedger?> ledger, RepoId home, I
     /// <summary>The refusal to answer a Sign-off: the items are those of the release the train asked for (the command names only the interruption).</summary>
     public async Task AnswerRefused(AnswerSignOff c, string error, CancellationToken ct)
     {
-        foreach (var p in policies.All().Where(x => x.Acts && !x.Shadow && string.Equals(x.Deployable, c.Deployable, StringComparison.OrdinalIgnoreCase)))
+        foreach (var p in policies.All().Where(x => x.Acts && string.Equals(x.Deployable, c.Deployable, StringComparison.OrdinalIgnoreCase)))
         {
             var state = (await trains.Load(TrainKey.Of(p.Deployable, p.Environment), ct))?.State;
             if (state?.SignOffs.FirstOrDefault(x => x.TaskId == c.TaskId) is { } so)
@@ -148,7 +148,7 @@ public sealed class PromotionJournal(Func<JournalLedger?> ledger, RepoId home, I
     {
         if (m.Items.Count == 0 || m.Replay) return;
         var (deployable, environment) = TrainKey.Split(m.Key);
-        if (policies.For(deployable, environment) is not { Acts: true, Shadow: false }) return;
+        if (policies.For(deployable, environment) is not { Acts: true }) return;
         switch (m.Action)
         {
             case "waiting":
@@ -208,10 +208,10 @@ public static class PromotionJournalHandler
 static class DeliveryActingWiring
 {
     /// <summary>
-    /// The acting train for an engine that acts: the same parts the shadow run is made of (policies, the reads, the delivered-to table), the executor of its commands and the port for the watcher's events.
+    /// The acting train for an engine that acts: its parts (policies, the reads, the delivered-to table), the executor of its commands and the port for the watcher's events.
     /// The returned port is the one the ingress publishes the Octopus events to; it is disabled when the train cannot be built (no GH_TOKEN or catalog).
     /// </summary>
-    public static ShadowOctopusPort Attach(WolverineHostService host, GatewayComposition c, Func<Fworker.Contracts.Catalog.ISystemCatalog?> catalog, string connectionString, Func<string, string?> env, Func<bool> mayAct, IIdempotencyLedger ledger, DeliveryShadowHolder? shadowHolder = null, PromotionStateWriter? promotions = null)
+    public static ShadowOctopusPort Attach(WolverineHostService host, GatewayComposition c, Func<Fworker.Contracts.Catalog.ISystemCatalog?> catalog, string connectionString, Func<string, string?> env, Func<bool> mayAct, IIdempotencyLedger ledger, PromotionStateWriter? promotions = null)
     {
         var parts = catalog() is { } cat ? DeliveryShadowWiring.Make(c, cat, connectionString, env) : null;
         if (parts is null) return new ShadowOctopusPort(_ => Task.FromResult(false), false);
@@ -226,8 +226,6 @@ static class DeliveryActingWiring
         // V2.1: the journal lines of the promotion on the items (the home repository's), through the one journal ledger of the gateway
         var journal = c.Instance.Home is { } homeRepo ? new PromotionJournal(() => c.JournalLedger, homeRepo, parts.Policies, trainStore) : null;
         var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter), promotions, journal, parts.Policies);
-        // W9.10p: the shadow of the environments v1's AutoPromoter still promotes (uat and prod until delivery.autoPromote.trainActs): the AutoPromoter's passes (AddGatewayBackground) and the status endpoints find it through the holder
-        if (shadowHolder is not null) shadowHolder.Shadow = parts.Shadow;
         RollbackWiring.Attach(host, c, env, mayAct, ledger);   // W8.3: the executor of the train's incident rollback (RollbackRelease) and the migration probe it takes; the executor refuses every environment but tdd
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
@@ -239,15 +237,13 @@ static class DeliveryActingWiring
     }
 
     /// <summary>
-    /// What the acting train adds to the Wolverine host: its services, its handlers, the executor of its commands and the recording of the train's shadow (<see cref="DeliveryActingShadowHandlers"/>: the decisions and
-    /// the ShadowCommands of an environment v1 still promotes, which nothing executes). Apart from <see cref="Attach"/> so that a host test builds the same registration with a store of its own.
+    /// What the acting train adds to the Wolverine host: its services, its handlers and the executor of its commands. Apart from <see cref="Attach"/> so that a host test builds the same registration with a store of its own.
     /// </summary>
     internal static void Configure(IServiceCollection services, WolverineOptions w, DeliveryShadowParts parts, ITrainStore store, DeliveryExecutorService service, bool durable = true, PromotionStateWriter? promotions = null, PromotionJournal? journal = null)
     {
         services.AddSingleton(parts.Policies);
         services.AddSingleton(parts.Reads);
         services.AddSingleton<IDeliveredLookup>(parts.Delivered);
-        services.AddSingleton(parts.Shadow);
         services.AddSingleton(store);
         services.AddSingleton<DeliveryTrainService>();
         services.AddSingleton<DeliveryTrainRouter>();
@@ -258,14 +254,13 @@ static class DeliveryActingWiring
         w.Discovery.IncludeType(typeof(DeliveryTrainHandlers));
         w.Discovery.IncludeType(typeof(DeliveryTrainRouting));
         w.Discovery.IncludeType(typeof(DeliveryExecutorHandlers));
-        w.Discovery.IncludeType(typeof(DeliveryActingShadowHandlers));
         // the Octopus events and the trains' inputs each travel one queue, one at a time and in order (DeliveryTopology says why)
         DeliveryTopology.Route(w);
         w.PublishMessage<PromoteRelease>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
         w.PublishMessage<AnswerSignOff>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
         w.PublishMessage<DeliveryCommandFinished>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
         if (durable) w.LocalQueue(DeliveryExecutorHandlers.Queue).UseDurableInbox();
-        // the same backstop as the shadow run: GitHub or the app not answering is tried again with growing pauses and then scheduled again every few minutes, never to the dead letters
+        // the backstop of the train's reads: GitHub or the app not answering is tried again with growing pauses and then scheduled again every few minutes, never to the dead letters
         w.Policies.OnException<HttpRequestException>().Or<Fworker.Integrations.GitHub.MergeFactsException>().Or<TaskCanceledException>().Or<TrainConflictException>().Or<TimeoutException>().Or<System.Data.Common.DbException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
     }
 }

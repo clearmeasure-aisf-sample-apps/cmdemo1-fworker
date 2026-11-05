@@ -27,7 +27,7 @@ static class GatewayWolverineExtensions
         JournalCommandSink? journalSink = null;
         CopilotReconciler? copilotReconciler = null;
         IngressCorrelations? correlations = null; IngressInboxPort? inboxPort = null;
-        ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
+        ShadowOctopusPort? octopusPort = null;
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
         Func<bool>? leaseHold = null;   // V1.4: set where the jobs are made; while true the timer of an expired lease waits for the term's gap renewal
@@ -108,8 +108,8 @@ static class GatewayWolverineExtensions
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
                     if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)), acting: true);
-                    // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it. W9.10p: for tdd only; v1's auto-promote loop keeps uat and prod (AddGatewayBackground, AutoPromoter.Runs) and the train's shadow of them is the holder's
-                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger, shadowHolder, workItems.Docs.Promotions);
+                    // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it
+                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger, workItems.Docs.Promotions);
                     // W6.6: the intake of docs items (off unless intake is enabled and names the docs plan in intake.v2Plans); the plant's facts are read when the job runs
                     if (workItems.Intake is { Enabled: true } && workItems.Intake.V2Plans.Count > 0)
                     {

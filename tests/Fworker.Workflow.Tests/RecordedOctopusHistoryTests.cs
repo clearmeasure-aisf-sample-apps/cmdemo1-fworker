@@ -212,7 +212,7 @@ public class RecordedOctopusHistoryTests
     /// the release to the target that ended is a wait for "failed", one that runs is followed; no deployment to the previous environment is a wait for "none", one that is not successful a wait for
     /// "failed" (ended) or "started" (still running). Null: the previous environment succeeded, and the decision is made by gates GitHub and the apps answer (the fake cannot).
     /// </summary>
-    static (string Target, ShadowDecision? Decision)? V1(string deployable, Truth t, string version)
+    static (string Target, Judgment? Decision)? V1(string deployable, Truth t, string version)
     {
         string[] chain = ["tdd", "uat", "prod"];
         string? target = null;
@@ -220,15 +220,39 @@ public class RecordedOctopusHistoryTests
         if (target is null) return null;   // promoted all the way: v1 does not judge it
         var prev = chain[Array.IndexOf(chain, target) - 1];
         var have = t.Of(version, target); var pd = t.Of(version, prev);
-        ShadowDecision D(string action, string native, string reason) => new(ShadowSide.V1, deployable, target, version, action, native, [reason], [], DateTimeOffset.MinValue);
-        if (have is { Completed: true }) return (target, D(ShadowActions.Wait, "promotion-waiting", $"its deployment to {target} ended {have.State} ({have.Id}); the operator deploys it again, or the item goes back to Development"));
-        if (have is { Completed: false }) return (target, new ShadowDecision(ShadowSide.V1, deployable, target, version, ShadowActions.Follow, "promotion-following", [], [], DateTimeOffset.MinValue));
-        if (pd is null) return (target, D(ShadowActions.Wait, "promotion-waiting", $"it has no deployment to {prev}"));
-        if (!pd.Success) return (target, D(ShadowActions.Wait, "promotion-waiting", $"its deployment to {prev} is {(pd.Completed ? pd.State : "still " + pd.State)} ({pd.Id})"));
+        Judgment D(string reason) => new(Judgment.Wait, [reason]);
+        if (have is { Completed: true }) return (target, D($"its deployment to {target} ended {have.State} ({have.Id}); the operator deploys it again, or the item goes back to Development"));
+        if (have is { Completed: false }) return (target, new Judgment(Judgment.Follow, []));
+        if (pd is null) return (target, D($"it has no deployment to {prev}"));
+        if (!pd.Success) return (target, D($"its deployment to {prev} is {(pd.Completed ? pd.State : "still " + pd.State)} ({pd.Id})"));
         return (target, null);
     }
 
-    static ShadowDecision Train(TrainDecided d) => new(ShadowSide.V2, TrainKey.Split(d.Key).Deployable, TrainKey.Split(d.Key).Environment, d.Release, ShadowActions.OfTrain(d.Action) ?? d.Action, d.Action, d.Reasons, d.Items, d.At, d.Replay);
+    static Judgment Train(TrainDecided d) => new(Judgment.OfTrain(d.Action), d.Reasons);
+
+    /// <summary>
+    /// A decision as v1's pass and the train both say it: the action (the train's waiting is v1's wait, its following v1's follow) and, for a wait, what it waits for: failed (the deployment ended in a
+    /// failure), none (no deployment to the previous environment), started (a deployment still running), health (the previous environment's app) or gates (anything else). Two waits agree by what they
+    /// wait for, not by the words of two implementations.
+    /// </summary>
+    sealed record Judgment(string Action, IReadOnlyList<string> Reasons)
+    {
+        public const string Wait = "wait", Follow = "follow";
+        public const string Failed = "failed", None = "none", Started = "started", Health = "health", Gates = "gates";
+
+        static readonly Regex FailedText = new(@"\bended (Failed|TimedOut|Canceled)\b|deployment to .+ is (Failed|TimedOut|Canceled) \(", RegexOptions.Compiled);
+        static readonly Regex StartedText = new(@"deployment to .+ is still ", RegexOptions.Compiled);
+
+        public static string OfTrain(string action) => action switch { "waiting" => Wait, "following" => Follow, _ => action };
+
+        /// <summary>The class of a wait; with several reasons the first of the order failed, none, started, health, gates.</summary>
+        public string ReasonClass => Action != Wait ? "" : Reasons.Select(One).OrderBy(x => x.Rank).Select(x => x.Class).FirstOrDefault() ?? Gates;
+
+        static (string Class, int Rank) One(string r) =>
+            FailedText.IsMatch(r) ? (Failed, 0) : r.StartsWith("it has no deployment to ") ? (None, 1) : StartedText.IsMatch(r) ? (Started, 2) : r.Contains(" app ") || r.StartsWith("no health URL") ? (Health, 3) : (Gates, 4);
+
+        public bool Agrees(Judgment other) => Action == other.Action && ReasonClass == other.ReasonClass;
+    }
 
     // ---- the checks -------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -317,12 +341,12 @@ public class RecordedOctopusHistoryTests
                     if (v1.Decision is null)
                     {
                         // the previous environment succeeded: v1 decides on gates that Octopus does not hold; the train must not say anything of the previous deployment
-                        if (Train(d).Action == ShadowActions.Wait && Train(d).ReasonClass is ShadowReasons.None or ShadowReasons.Failed or ShadowReasons.Started)
+                        if (Train(d).Action == Judgment.Wait && Train(d).ReasonClass is Judgment.None or Judgment.Failed or Judgment.Started)
                             problems.Add($"{env} {version}: the previous environment succeeded in Octopus, the train says {Describe(d)}");
                         continue;
                     }
                     compared++;
-                    if (!ShadowClassifier.Agree(v1.Decision, Train(d)))
+                    if (!v1.Decision.Agrees(Train(d)))
                         problems.Add($"{env} {version}: v1 decides {v1.Decision.Action}/{v1.Decision.ReasonClass} [{string.Join("; ", v1.Decision.Reasons)}], the train {Describe(d)}");
                 }
             Assert.True(problems.Count == 0, $"{slug} (shadow settings: {shadow}), {problems.Count} releases differ from v1 (of {compared} compared):\n" + string.Join("\n", problems.Take(40)));
@@ -352,8 +376,8 @@ public class RecordedOctopusHistoryTests
             Assert.Equal("uat", v1.Target);
             Assert.Equal([$"its deployment to tdd is Failed ({tdd.Id})"], d!.Reasons);
             Assert.Equal(v1.Decision!.Reasons, d.Reasons);
-            Assert.Equal(ShadowReasons.Failed, Train(d).ReasonClass);
-            Assert.True(ShadowClassifier.Agree(v1.Decision, Train(d)));
+            Assert.Equal(Judgment.Failed, Train(d).ReasonClass);
+            Assert.True(v1.Decision.Agrees(Train(d)));
             Assert.True(d.Replay);
         }
     }
@@ -373,7 +397,7 @@ public class RecordedOctopusHistoryTests
             Assert.Null(t.Of(version, "uat"));
             Assert.Equal("waiting", d.Action);
             Assert.Equal(["it has no deployment to uat"], d.Reasons);
-            Assert.Equal(ShadowReasons.None, Train(d).ReasonClass);
+            Assert.Equal(Judgment.None, Train(d).ReasonClass);
         }
     }
 
@@ -388,7 +412,7 @@ public class RecordedOctopusHistoryTests
         var d = r.Final("uat", "2.4.1298");
         Assert.NotNull(d);
         Assert.DoesNotContain(d!.Reasons, x => x.Contains("still"));
-        Assert.NotEqual(ShadowReasons.Started, Train(d).ReasonClass);
+        Assert.NotEqual(Judgment.Started, Train(d).ReasonClass);
         Assert.Equal("Succeeded", r.States["ui/uat"].DeploymentOf("2.4.1298", "tdd")!.Phase);
     }
 

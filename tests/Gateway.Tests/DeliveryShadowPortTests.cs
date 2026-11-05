@@ -467,34 +467,27 @@ public sealed class DeliveryShadowPortTests
     }
 
     [Fact]
-    public void TheShadowRunsCode_HasNoWayToWrite()
+    public void TheTrainsReadParts_HaveNoWayToWrite()
     {
-        // The shadow run may read GitHub, Octopus and the apps and write the Wolverine database; it holds no command port, no Octopus or GitHub client with a write and sends no HTTP verb but GET.
-        var files = new[] { "gateway/Ports/DeliveryShadowPort.cs", "gateway/Ports/DeliveryShadowReads.cs", "gateway/Endpoints/AdminDeliveryShadow.cs",
-            "src/Fworker.Workflows/Delivery/DeliveryShadow.cs", "src/Fworker.Workflows/Delivery/ShadowComparison.cs", "src/Fworker.Workflows/Delivery/ShadowStore.cs" };
+        // The train's settings, reads and ingress may read GitHub, Octopus and the apps; they hold no command port, no Octopus or GitHub client with a write and send no HTTP verb but GET (the executor writes, DeliveryExecutorPort.cs).
+        var files = new[] { "gateway/Ports/DeliveryShadowPort.cs", "gateway/Ports/DeliveryShadowReads.cs" };
         var forbidden = new[] { "PostAsync", "PutAsync", "DeleteAsync", "PatchAsync", "HttpMethod.Post", "HttpMethod.Put", "HttpMethod.Delete", "HttpMethod.Patch", "SendAsJsonAsync", "PostAsJsonAsync",
             "ICommandPort", "SendAsync(", "Runner", "RunAsync(", "HttpOctopusClient", "OctopusRuntime" };
         foreach (var f in files)
         {
             var code = string.Join('\n', File.ReadAllLines(Path.Combine(Root(), f)).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("///")));
-            foreach (var word in forbidden) Assert.False(code.Contains(word, StringComparison.Ordinal), $"{f} uses {word}: the shadow run must not be able to write");
+            foreach (var word in forbidden) Assert.False(code.Contains(word, StringComparison.Ordinal), $"{f} uses {word}: the train's reads must not be able to write");
         }
     }
 
     [Fact]
-    public void TheShadowHostsHandlers_OfTheTrainsCommands_AreOnlyTheRecordingOnes()
+    public void TheOnlyHandlersOfTheTrainsCommands_AreTheExecutors()
     {
-        // every handler method of the types the shadow host discovers that takes a PromoteRelease or an AnswerSignOff is in DeliveryShadowHandlers
-        var asm = typeof(DeliveryShadowHandlers).Assembly;
-        var taking = asm.GetTypes().SelectMany(t => t.GetMethods().Where(m => m.Name == "Handle" && m.GetParameters().Length > 0
-            && m.GetParameters()[0].ParameterType.FullName is "Fworker.Contracts.Commands.PromoteRelease" or "Fworker.Contracts.Commands.AnswerSignOff").Select(m => t.Name)).Distinct().ToList();
-        Assert.Equal(["DeliveryShadowHandlers"], taking);
-        // and the gateway has none of its own but the executor's (W9.4: DeliveryExecutorHandlers), which only DeliveryActingWiring attaches, where the engine acts
-        var gw = typeof(DeliveryShadowWiring).Assembly;
-        Assert.DoesNotContain(gw.GetTypes().Where(t => t.Name != "DeliveryExecutorHandlers").SelectMany(t => t.GetMethods()), m => m.Name == "Handle" && m.GetParameters().Any(p => p.ParameterType.Name is "PromoteRelease" or "AnswerSignOff"));
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "gateway", "Program.cs"))) dir = dir.Parent;
-        var shadowWiring = File.ReadAllText(Path.Combine(dir!.FullName, "gateway", "Ports", "DeliveryShadowPort.cs"));
+        // the workflows hold no handler of a PromoteRelease or an AnswerSignOff, and the gateway none but the executor's (W9.4: DeliveryExecutorHandlers), which only DeliveryActingWiring attaches, where the engine acts
+        static bool Takes(System.Reflection.MethodInfo m) => m.Name == "Handle" && m.GetParameters().Any(p => p.ParameterType.FullName is "Fworker.Contracts.Commands.PromoteRelease" or "Fworker.Contracts.Commands.AnswerSignOff");
+        Assert.DoesNotContain(typeof(DeliveryTrainHandlers).Assembly.GetTypes().SelectMany(t => t.GetMethods()), Takes);
+        Assert.Equal(["DeliveryExecutorHandlers"], typeof(DeliveryShadowWiring).Assembly.GetTypes().Where(t => t.GetMethods().Any(Takes)).Select(t => t.Name).Distinct().ToList());
+        var shadowWiring = File.ReadAllText(Path.Combine(Root(), "gateway", "Ports", "DeliveryShadowPort.cs"));
         Assert.DoesNotContain("DeliveryExecutor", shadowWiring);
         Assert.DoesNotContain("PromoteReleaseHandler", shadowWiring);
     }
