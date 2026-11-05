@@ -32,13 +32,13 @@ static class InertVerbs
     /// <summary>The verbs that write nothing at all (kebab-case, as on the wire). Not item-pr (it can retarget, rename, close and ready a pull request and saves state) and not wait-for-checks (it re-runs a job and saves the re-run).</summary>
     public static readonly IReadOnlySet<string> ReadOnly = new HashSet<string>(StringComparer.Ordinal)
     {
-        "get-item", "my-items", "inspect-facts", "pr-checks", "metrics", "qc-view", "qc-list", "get-delivery", "backlog", "revocations", "operator-releases", "transcript-load", "plant-snapshot-load",
+        "get-item", "my-items", "inspect-facts", "pr-checks", "metrics", "qc-view", "qc-list", "get-delivery", "backlog", "revocations", "operator-releases", "transcript-load",
     };
 
-    /// <summary>The gateway's own housekeeping, which keeps the process and its lease alive and writes nothing about an item: the leader lease, the plant snapshot, the revocations (reading and revoking a worker: a credential action that writes no item), the operator's release record, the automatic promotion of uat and prod, the transcripts.</summary>
+    /// <summary>The gateway's own housekeeping, which keeps the process alive and writes nothing about an item: the revocations (reading and revoking a worker: a credential action that writes no item), the operator's release record, the automatic promotion of uat and prod, the transcripts.</summary>
     public static readonly IReadOnlySet<string> Housekeeping = new HashSet<string>(StringComparer.Ordinal)
     {
-        "leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-await", "plant-snapshot-clear", "revocations", "revoke-worker", "operator-releases", "operator-release", "transcript-save", "transcript-load", "transcript-prune",
+        "revocations", "revoke-worker", "operator-releases", "operator-release", "transcript-save", "transcript-load", "transcript-prune",
     };
 
     public static bool RunnerMayRun(string verb) => ReadOnly.Contains(verb) || Housekeeping.Contains(verb);

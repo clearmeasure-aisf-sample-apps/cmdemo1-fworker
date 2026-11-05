@@ -96,7 +96,7 @@ static class VerbPolicy
     public static string? UseEndpointReason(string verb) => verb switch
     {
         "revoke-worker" or "revocations" => "use POST /api/v1/workers/{name}/revoke",
-        "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear" or "plant-snapshot-await" or "leader-lease" or "transcript-save" or "transcript-load" or "transcript-prune"
+        "transcript-save" or "transcript-load" or "transcript-prune"
             => "the plant snapshot is written and read by the gateway itself, at its stop and its start",
         "operator-release" or "operator-releases" => "use POST /api/v1/operator/record-release",
         "ci-release" => "the gateway releases the Copilot agent's held workflow runs by itself",

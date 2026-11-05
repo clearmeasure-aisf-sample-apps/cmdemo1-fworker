@@ -188,7 +188,58 @@ public class ArchitectureInventoryTests
     /// Text a string literal could bring back without any of the names: the route of the shadow's report, the identity of its command message, the pool's switch, its setting and its worker host (the gateway
     /// starts no long-lived pwsh; the scenario harness's client host is the harness's own).
     /// </summary>
-    static readonly string[] RetiredLiterals = ["\"/api/v1/delivery-shadow\"", "MessageIdentity(\"delivery.train.shadow-command\")", "\"FACTORY_RUNNER_POOL\"", "\"poolMaxCalls\"", "runner-host.ps1"];
+    static readonly string[] RetiredLiterals = ["\"/api/v1/delivery-shadow\"", "MessageIdentity(\"delivery.train.shadow-command\")", "\"FACTORY_RUNNER_POOL\"", "\"poolMaxCalls\"", "runner-host.ps1",
+        "\"leader-lease\"", "\"plant-snapshot-save\"", "\"plant-snapshot-load\"", "\"plant-snapshot-clear\"", "\"plant-snapshot-await\""];
+
+    // ---- the server scripts V3.3 deleted ----------------------------------------------------------------------------------------------------------
+
+    /// <summary>The rule-script files V3.3 deleted: the GitHub-ref lease with the scripts' fencing (Leader.ps1) and the ref snapshot of the plant (PlantSnapshot.ps1; its transcript verbs live in Transcripts.ps1).</summary>
+    static readonly string[] DeletedScripts = ["plugin/scripts/lib/Leader.ps1", "plugin/scripts/lib/PlantSnapshot.ps1"];
+
+    /// <summary>The verbs those scripts served: the inventory called them retired, no gateway path called them and the verb route refused them to every caller.</summary>
+    static readonly string[] DeletedVerbs = ["leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-clear", "plant-snapshot-await"];
+
+    /// <summary>Their functions, and the fence state every write of a script once checked: none may be defined or used again anywhere in the plugin.</summary>
+    static readonly string[] DeletedFunctions = ["Verb_leader_lease", "Verb_plant_snapshot_save", "Verb_plant_snapshot_load", "Verb_plant_snapshot_clear", "Verb_plant_snapshot_await",
+        "Read-LeaderLease", "Write-LeaderLease", "Get-LeaderRefPath", "Get-PlantSnapshotRefPath", "Set-LeaseFence", "Test-LeaseHeld", "Assert-LeaseHeld", "Get-LeaseFenceInfo", "Test-FencedWrite", "LeaseFence"];
+
+    /// <summary>The script's code with its comment lines and the trailing comments of its lines blanked (a word in a comment is no use of it).</summary>
+    static string ScriptCode(string text) => string.Join('\n', text.Split('\n').Select(l => Regex.Replace(l.TrimStart().StartsWith('#') ? "" : l, @"\s#\s.*$", "")));
+
+    static List<string> DeletedScriptUses(string path, string code)
+    {
+        var found = new List<string>();
+        foreach (var name in DeletedFunctions)
+            if (Regex.IsMatch(code, $@"(?<![\w-]){Regex.Escape(name)}(?![\w-])")) found.Add($"{path}: {name}");
+        foreach (var file in DeletedScripts)
+            if (code.Contains(Path.GetFileName(file), StringComparison.Ordinal) || code.Contains($"'{Path.GetFileNameWithoutExtension(file)}'", StringComparison.Ordinal)) found.Add($"{path}: {file}");
+        return found;
+    }
+
+    [Fact]
+    public void TheServerScriptsV33Deleted_StayDeleted()
+    {
+        var problems = new List<string>();
+        foreach (var file in DeletedScripts) if (File.Exists(Path.Combine(Root, file))) problems.Add($"{file} exists again");
+        foreach (var f in Directory.EnumerateFiles(Path.Combine(Root, "plugin"), "*.ps1", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
+            problems.AddRange(DeletedScriptUses(Rel(f), ScriptCode(File.ReadAllText(f))));
+        // and no server verb of factory.ps1 is one of them (the verb inventory follows $ServerVerbs, VerbInventoryTests)
+        var factory = File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "factory.ps1"));
+        var list = Regex.Match(factory, @"\$ServerVerbs\s*=\s*@\((?<body>[^)]*)\)").Groups["body"].Value;
+        foreach (var verb in DeletedVerbs) if (list.Contains($"'{verb}'", StringComparison.Ordinal)) problems.Add($"plugin/scripts/factory.ps1: $ServerVerbs names '{verb}' again");
+        Assert.True(problems.Count == 0, "What V3.3 deleted of the server scripts is back (a decision: edit the lists of this test in the same pull request):\n  " + string.Join("\n  ", problems));
+    }
+
+    [Fact]
+    public void TheDeletedScriptsCheck_SeesAViolation_WhenOneIsPlanted()
+    {
+        Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode("function Verb_leader_lease($a) { }")));
+        Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode("    if ($script:LeaseFence -and (Test-FencedWrite $Method $Path $Body)) { Assert-LeaseHeld 'x' }")));
+        Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode(". (Join-Path $here 'lib/Leader.ps1')")));
+        Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode("foreach ($f in 'Core', 'PlantSnapshot') { . (Join-Path $here \"lib/$f.ps1\") }")));
+        // a comment that names them, and a live name that contains one of the words, are no use
+        Assert.Empty(DeletedScriptUses("x.ps1", ScriptCode("# Assert-LeaseHeld and lib/Leader.ps1 are gone (V3.3)\n$x = Get-TranscriptRefs   # not Set-LeaseFence")));
+    }
 
     /// <summary>The code with its string literals emptied, so that a log line or a history type that says a retired word is no use of it.</summary>
     static string Identifiers(string code) => Regex.Replace(code, @"""(?:\\.|[^""\\\n])*""", "\"\"");
@@ -223,6 +274,7 @@ public class ArchitectureInventoryTests
         Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("readonly RunnerPool? pool = RunnerPool.Create(entry);")));
         Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("var size = Environment.GetEnvironmentVariable(\"FACTORY_RUNNER_POOL\");")));
         Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("var host = Path.Combine(dir, \"runner-host.ps1\");")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("await runner.RunAsync(\"plant-snapshot-save\", body, timeout);")));
         // the live names that kept a shadow word, a comment and a string are no use
         Assert.Empty(RetiredUses("x.cs", ArchitectureTests.Code("new ShadowHistoryRecord(k, t, d, at); var p = new ShadowOctopusPort(f, true); // the DeliveryShadow is gone\nlog(\"the AutoPromoter is gone\");")));
     }

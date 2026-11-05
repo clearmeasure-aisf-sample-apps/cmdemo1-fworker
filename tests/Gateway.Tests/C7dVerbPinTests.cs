@@ -111,11 +111,6 @@ public class C7dVerbPinTests(C7dVerbGateway gw) : IClassFixture<C7dVerbGateway>
         var verbs = new Dictionary<string, string>
         {
             ["revoke-worker"] = "use POST /api/v1/workers/{name}/revoke", ["revocations"] = "use POST /api/v1/workers/{name}/revoke",
-            ["plant-snapshot-save"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
-            ["plant-snapshot-load"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
-            ["plant-snapshot-clear"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
-            ["plant-snapshot-await"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
-            ["leader-lease"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
             ["transcript-save"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
             ["transcript-load"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",
             ["transcript-prune"] = "the plant snapshot is written and read by the gateway itself, at its stop and its start",

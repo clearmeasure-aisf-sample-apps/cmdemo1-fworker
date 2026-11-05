@@ -1,9 +1,9 @@
 using System.Text.Json.Nodes;
 
 // Plant state survives a restart (enhancement 5). The plant is in memory; a release, a scale-in or a replica move restarts the process. On SIGTERM the
-// gateway writes what it would otherwise lose of the hand-over to GitHub (rule script plant-snapshot-save, one ref in the work-orders repository):
+// gateway writes what it would otherwise lose of the hand-over to the database (SnapshotCoordinator, factory.PlantState; the GitHub ref of v1 is gone):
 // the offers and assignments of items (not QC environments: QcHub rebuilds those from the item states), the owners and bot holders, and what the
-// last sweep said of each owned item's lease. The next start reads it back before its first sweep (plant-snapshot-load) and restores it:
+// last sweep said of each owned item's lease. The next start reads it back before its first sweep and restores it:
 //   - an accepted assignment keeps its worker, its id (the item token the worker holds names it) and its time of acceptance;
 //   - an offer that waited for its answer is given a fresh window, so the worker that reconnects is offered it again (RegisterWorker pushes every
 //     unanswered offer of its name) and accepts with the token it gets then; one that does not come back lapses as any offer does;

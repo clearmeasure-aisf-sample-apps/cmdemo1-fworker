@@ -7,7 +7,7 @@ fails when the three disagree: the `$ServerVerbs` list of `factory.ps1`, the JSO
 `gateway/Policies/VerbPolicy.cs`, and the `$NoLockVerbs` list and `UseEndpointReason` for the two flags of the JSON). Adding or removing a verb
 means a row here and an entry in the JSON in the same pull request.
 
-**Count: 73.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan.
+**Count: 68.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan; the five `retired` verbs (`plant-snapshot-save`, `-load`, `-clear`, `-await` and `leader-lease`, `lib/PlantSnapshot.ps1` and `lib/Leader.ps1`) left in V3.3: the plant is kept in SQL and the SQL lock is the only lease, no gateway path called them and the verb route refused them to every caller. The transcript verbs moved to `lib/Transcripts.ps1`.
 
 ## Columns
 
@@ -16,8 +16,8 @@ means a row here and an entry in the JSON in the same pull request.
 - **Owner**: the v2 component that takes the verb over (names of R9's table; the read models and services are the C# classes of `src/`
   that the stages after W1 create).
 - **Destination**: `saga` (a Wolverine saga handles it: decision verbs by `InvokeAsync`, event verbs published), `handler` (a handler, read
-  model or C# service answers it; no saga state), `coordinator` (the board reconciler or the event ingress S3: it feeds sagas, it is not one),
-  `retired` (removed at R9: Wolverine's leader election and durable state replace it). No verb "stays v1": at the cutover v1 is removed.
+  model or C# service answers it; no saga state), `coordinator` (the board reconciler or the event ingress S3: it feeds sagas, it is not one).
+  The `retired` verbs (Wolverine's leader election and durable state replace them) are deleted (V3.3). No verb "stays v1": at the cutover v1 is removed.
 - **Callers**: the credential kinds that `VerbPolicy.AuthorizeVerb` lets call the verb (`owner` and `inspector` are item-token roles,
   `owner-runtime` an owner token minted for a runtime worker). The admin credential may call any verb. "admin only" is a verb that
   only the gateway's own loops (and the admin) start.
@@ -91,14 +91,9 @@ means a row here and an entry in the JSON in the same pull request.
 | `operator-releases` | `OperatorRelease.ps1` | OperatorReleaseService | handler | admin only |
 | `operator-release` | `OperatorRelease.ps1` | OperatorReleaseService | handler | admin only |
 | `metrics` | `Metrics.ps1` | MetricsReadModel | handler | admin only |
-| `transcript-save` | `PlantSnapshot.ps1` | TranscriptService | handler | admin only |
-| `transcript-load` | `PlantSnapshot.ps1` | TranscriptService | handler | admin only |
-| `transcript-prune` | `PlantSnapshot.ps1` | TranscriptService | handler | admin only |
-| `plant-snapshot-save` | `PlantSnapshot.ps1` | WolverineDurableState | retired | admin only |
-| `plant-snapshot-load` | `PlantSnapshot.ps1` | WolverineDurableState | retired | admin only |
-| `plant-snapshot-clear` | `PlantSnapshot.ps1` | WolverineDurableState | retired | admin only |
-| `plant-snapshot-await` | `PlantSnapshot.ps1` | WolverineDurableState | retired | admin only |
-| `leader-lease` | `Leader.ps1` | WolverineLeaderElection | retired | admin only |
+| `transcript-save` | `Transcripts.ps1` | TranscriptService | handler | admin only |
+| `transcript-load` | `Transcripts.ps1` | TranscriptService | handler | admin only |
+| `transcript-prune` | `Transcripts.ps1` | TranscriptService | handler | admin only |
 
 ## Totals
 

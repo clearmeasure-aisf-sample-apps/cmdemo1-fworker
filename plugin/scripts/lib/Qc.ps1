@@ -400,7 +400,6 @@ function Verb_qc_link($a) {
     return @{ ok = $true; id = $n; pr = $prNum; outcome = $o }
 }
 
-function Get-QcPublicRec($rec) { if ($null -eq $rec) { return $null }; return $rec }
 
 function Verb_qc_view($a) {
     $n = Get-ItemNumber $a; $prNum = [int](Need $a 'pr'); $c = Get-Cfg
@@ -430,14 +429,6 @@ function New-QcRecord([int]$n, $pr, [int]$Attempt, [string]$State) {
     return $rec
 }
 
-function Move-QcAssignmentAside($rec) {
-    if ((Test-Has $rec 'assignment') -and "$($rec.assignment)") {
-        $old = @(@($rec.old_assignments) + "$($rec.assignment)") | Select-Object -Last 5
-        $rec.old_assignments = @($old)
-    }
-    $rec.assignment = ''; $rec.worker = ''
-    foreach ($k in 'accepted_at', 'ready_at', 'expires_at', 'port', 'probe', 'fail', 'teardown', 'approved') { if (Test-Has $rec $k) { $rec.Remove($k) } }
-}
 
 function Verb_qc_request($a) {
     $n = Get-ItemNumber $a; $prNum = [int](Need $a 'pr'); $c = Get-Cfg

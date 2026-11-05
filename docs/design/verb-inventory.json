@@ -1,6 +1,6 @@
 {
   "comment": "The verb inventory (W1.10): every server verb of plugin/scripts/factory.ps1 with its v1 rule script, its owner in the v2 design (docs/design/fworker-wolverine-refactor.md R9), its destination kind and who may call it (gateway/Policies/VerbPolicy.cs; the admin credential may call any). tests/Gateway.Tests/VerbInventoryTests.cs keeps it equal to the code.",
-  "destinationKinds": ["saga", "handler", "coordinator", "retired"],
+  "destinationKinds": ["saga", "handler", "coordinator"],
   "gatewayVerbs": ["qc-heartbeat", "qc-touch"],
   "verbs": [
     { "verb": "get-item", "script": "Verbs.Item.ps1", "owner": "WorkItemSaga", "destination": "saga", "callers": ["owner", "inspector", "manager", "keeper", "qc"], "noLock": true, "useEndpoint": false },
@@ -68,14 +68,9 @@
     { "verb": "operator-releases", "script": "OperatorRelease.ps1", "owner": "OperatorReleaseService", "destination": "handler", "callers": [], "noLock": false, "useEndpoint": true },
     { "verb": "operator-release", "script": "OperatorRelease.ps1", "owner": "OperatorReleaseService", "destination": "handler", "callers": [], "noLock": false, "useEndpoint": true },
     { "verb": "metrics", "script": "Metrics.ps1", "owner": "MetricsReadModel", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": false },
-    { "verb": "transcript-save", "script": "PlantSnapshot.ps1", "owner": "TranscriptService", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "transcript-load", "script": "PlantSnapshot.ps1", "owner": "TranscriptService", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "transcript-prune", "script": "PlantSnapshot.ps1", "owner": "TranscriptService", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "plant-snapshot-save", "script": "PlantSnapshot.ps1", "owner": "WolverineDurableState", "destination": "retired", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "plant-snapshot-load", "script": "PlantSnapshot.ps1", "owner": "WolverineDurableState", "destination": "retired", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "plant-snapshot-clear", "script": "PlantSnapshot.ps1", "owner": "WolverineDurableState", "destination": "retired", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "plant-snapshot-await", "script": "PlantSnapshot.ps1", "owner": "WolverineDurableState", "destination": "retired", "callers": [], "noLock": true, "useEndpoint": true },
-    { "verb": "leader-lease", "script": "Leader.ps1", "owner": "WolverineLeaderElection", "destination": "retired", "callers": [], "noLock": true, "useEndpoint": true }
+    { "verb": "transcript-save", "script": "Transcripts.ps1", "owner": "TranscriptService", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": true },
+    { "verb": "transcript-load", "script": "Transcripts.ps1", "owner": "TranscriptService", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": true },
+    { "verb": "transcript-prune", "script": "Transcripts.ps1", "owner": "TranscriptService", "destination": "handler", "callers": [], "noLock": true, "useEndpoint": true }
   ],
   "internalCallers": [
     {"id": "base-watch-verbs", "file": "gateway/BaseUpdate.cs", "sites": 1, "verbs": [], "kind": "router", "owner": "W9.3", "leaves": "", "exception": null, "note": "BaseWatch runs base-watch and base-update-branch through the Runner (routed since #542; its own table is gone)."},

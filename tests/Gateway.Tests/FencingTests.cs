@@ -24,10 +24,8 @@ public sealed class FencingTests
     public void TheVerbsThatActOnTheBoard_AreFenced(string verb) => Assert.Contains(verb, Runner.FencedVerbs);
 
     [Theory]
-    [InlineData("leader-lease")]
-    [InlineData("plant-snapshot-save")]
-    [InlineData("plant-snapshot-load")]
     [InlineData("revocations")]
+    [InlineData("transcript-save")]
     [InlineData("get-item")]
     public void TheReadsAndTheSnapshotsOwnVerbs_AreNotFenced(string verb) => Assert.DoesNotContain(verb, Runner.FencedVerbs);
 

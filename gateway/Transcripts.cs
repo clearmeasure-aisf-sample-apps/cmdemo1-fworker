@@ -8,7 +8,7 @@ using System.Text.Json.Nodes;
 // credential (POST /api/v1/runtime/transcript); the operator reads them at /sessions/{name} (live while the session runs) and
 // GET /api/v1/sessions/{name}.
 //
-// Durable store, v1 (RuleScriptTranscriptBackend): the one the plant snapshot uses (rule scripts transcript-save/-load/-prune, plugin/scripts/lib/PlantSnapshot.ps1): a
+// Durable store, v1 (RuleScriptTranscriptBackend): the rule scripts transcript-save/-load/-prune (plugin/scripts/lib/Transcripts.ps1): a
 // parentless commit per save in the work-orders repository, one ref per session under refs/factory/<instance>/transcripts/<yyyymmdd>/<name>.
 // The gateway holds no disk and no blob store of its own, and GitHub is what it already writes to and reads back at a start. That repository is
 // public, so the message is ciphertext: gzip of the JSON, then AES-GCM with a key derived (HKDF) from the gateway's token secret, which the

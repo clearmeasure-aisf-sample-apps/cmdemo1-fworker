@@ -69,9 +69,9 @@ public sealed class BoardRoutesTests : IDisposable
         Assert.Equal(2, mine.Code);
         Assert.Equal("usage", JsonNode.Parse(mine.Output)!["code"]!.ToString());
         Assert.Equal(2, (await runner.RunAsync("journal", "{}", TimeSpan.FromSeconds(5))).Code);
-        // a verb with no route (the plant snapshot) is the rule script's still; the Runner of this test points at no script, so the script's run is a failure and not v2's answer
-        Assert.False(routes.TryGet("plant-snapshot-save", out _));
-        Assert.NotEqual(0, (await runner.RunAsync("plant-snapshot-save", "{}", TimeSpan.FromSeconds(5))).Code);
+        // a verb with no route is the rule script's still; the Runner of this test points at no script, so the script's run is a failure and not v2's answer
+        Assert.False(routes.TryGet("no-such-verb", out _));
+        Assert.NotEqual(0, (await runner.RunAsync("no-such-verb", "{}", TimeSpan.FromSeconds(5))).Code);
     }
 
     [Fact]
