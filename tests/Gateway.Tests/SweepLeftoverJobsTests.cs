@@ -77,17 +77,6 @@ public class SweepLeftoverJobsTests
     }
 
     [Fact]
-    public async Task TheGapRenewalIsIndependentOfTheSweepTakingTheGap()
-    {
-        var r = new Rig();
-        await r.Seed(1, Since.AddMinutes(5)); r.Owners[1] = "alice";
-        r.Gap.Set(Since);
-        Assert.Equal(Since, r.Gap.Take());   // the first full sweep took it (for the items that have no saga)
-        Assert.Equal("renewed", await r.Jobs.GapRenew(default));
-        Assert.Single(r.Sent);
-    }
-
-    [Fact]
     public async Task TheGapRenewalWaitsForTheLeaseTheRestoreTheAdoptionAndTheSagaTable()
     {
         var r = new Rig();

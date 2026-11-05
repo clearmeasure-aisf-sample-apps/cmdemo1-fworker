@@ -15,7 +15,7 @@ demo system.
 
 | Path | Content |
 |---|---|
-| `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `RunnerPool.cs`, `Operator.cs` (the operator session) |
+| `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `Runner.cs` (the verb routes, and the rule script in a `pwsh` of its own where no route answers), `Operator.cs` (the operator session) |
 | `src/Fworker.Database/` | The schema of the gateway's database: plain `.sql` scripts run by DbUp at gateway start (`scripts/Update/NNN_*.sql`, `schema-manifest.json`); see "Database" below |
 | `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot`, `launcher/` (the session loop, `docs/launcher.md`) |
 | `config/instance.json` | The source defaults. The tests run on these: messaging off, supervisor off, `ownerSessions` false |

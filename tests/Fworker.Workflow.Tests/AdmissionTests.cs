@@ -421,6 +421,17 @@ public class AdmissionTests
     }
 
     [Fact]
+    public async Task ADependencyOnAnotherRepository_HoldsNothing_ADependencyOnTheSameNumberAtHomeDoes()
+    {
+        // the number of an open home item, qualified with another repository, is no dependency of the home repository
+        var w = new World().Put(20, Develop, null).Put(12, Design, null, body: "Depends on other-org/other-repo#20").Put(13, Design, null, body: "Depends on #20");
+        await w.Run();
+        Assert.Contains(w.Of<StartWorkItem>(), s => s.Item.Number == 12);
+        Assert.DoesNotContain(w.Of<StartWorkItem>(), s => s.Item.Number == 13);
+        Assert.Equal(1, (int)w.Admission.Report.ToJson()["skippedBy"]!["depends-on"]!);
+    }
+
+    [Fact]
     public async Task APassStartsNoMoreThanTheLimit_AndTheRestWaitForTheNext()
     {
         var w = new World { Config = new("factory worker", "AI Factory", "Demo", "", "<!-- aisf:docs-only -->", Settings().Policy, MaxStarts: 2) };

@@ -20,7 +20,6 @@ function Env-Verb([string]$Base, [string]$Verb, [hashtable]$Body) {
     try { return ("$($r.Content)" | ConvertFrom-Json -AsHashtable) } catch { return @{ ok = $false; code = "http-$([int]$r.StatusCode)" } }
 }
 function Env-NoCardIssue([string]$Title, [string[]]$Labels) { (Fake 'issue' @{ title = $Title; body = 'x'; labels = $Labels }).number }
-function Env-Mentions($Answer, [int]$n) { (($Answer | ConvertTo-Json -Depth 12 -Compress) -match "`"item`":$n[,}]") }
 
 $EnvScopeScenarios = [ordered]@{
 
@@ -40,10 +39,7 @@ $EnvScopeScenarios = [ordered]@{
         Start-Sleep -Seconds 5
         Check 'nobody places an issue without an env: label' ($null -eq (Get-FakeIssue $gz).column)
 
-        # the sweep plans only its own items
-        $st = Env-Verb $tdd 'sync-board' @{ dry = $true }; $su = Env-Verb $uat.base 'sync-board' @{ dry = $true }
-        Check 'the tdd sweep never names the uat, doubly labelled or unlabelled items' (-not (Env-Mentions $st $u) -and -not (Env-Mentions $st $x) -and -not (Env-Mentions $st $z)) ($st | ConvertTo-Json -Compress -Depth 6)
-        Check 'the uat sweep never names the tdd, doubly labelled or unlabelled items' (-not (Env-Mentions $su $a) -and -not (Env-Mentions $su $x) -and -not (Env-Mentions $su $z)) ($su | ConvertTo-Json -Compress -Depth 6)
+        # (V3.2: what each environment's intake and admission take is IntakeRule's and the admission's envScope rule: IntakeCapacityTests, AdmissionTests)
 
         # assignment: a claim through the other environment's gateway is refused before anything is written
         $c1 = Env-Verb $tdd 'claim-item' @{ item = $u; column = 'Technical Design'; holder = 'w-tdd' }

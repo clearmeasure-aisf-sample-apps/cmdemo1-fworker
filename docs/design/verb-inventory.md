@@ -1,8 +1,8 @@
 # The verb inventory
 
 Task W1.10 of `fworker-wolverine-implementation.md`, the inventory that R1 of `fworker-wolverine-refactor.md` promises and R9 executes. One
-row for each server verb: a verb that `plugin/scripts/factory.ps1 --server <verb>` runs, and that the gateway's `RunnerPool` starts in a `pwsh`
-child process. The data is in `docs/design/verb-inventory.json`; this table is the same data for people. `tests/Gateway.Tests/VerbInventoryTests.cs`
+row for each server verb: a verb that `plugin/scripts/factory.ps1 --server <verb>` runs, and that the gateway's `Runner` starts in a `pwsh`
+child process where no v2 route answers it. The data is in `docs/design/verb-inventory.json`; this table is the same data for people. `tests/Gateway.Tests/VerbInventoryTests.cs`
 fails when the three disagree: the `$ServerVerbs` list of `factory.ps1`, the JSON and this table (and, for the callers, the `VerbPolicy` sets of
 `gateway/Policies/VerbPolicy.cs`, and the `$NoLockVerbs` list and `UseEndpointReason` for the two flags of the JSON). Adding or removing a verb
 means a row here and an entry in the JSON in the same pull request.

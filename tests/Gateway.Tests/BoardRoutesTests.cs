@@ -75,13 +75,13 @@ public sealed class BoardRoutesTests : IDisposable
     }
 
     [Fact]
-    public async Task ThroughTheRouter_SyncBoardIsTheScriptsSweep_AndAJournalCallIsV2s()
+    public async Task ThroughTheRouter_SyncBoardRunsNoScript_AndAJournalCallIsV2s()
     {
         var swept = new List<string>();
         var routes = V2VerbRoutes.Build(Engine("\"prod\""), Services(new Runner("/nonexistent/factory.ps1"), Parts((verb, stdin, _) => { swept.Add(verb); return Task.FromResult((0, "{\"ok\":true,\"offers\":[]}")); })));
         var router = new V2VerbRouter(new ThrowingBelow(), routes);
         var a = await router.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(5));
-        Assert.Equal(0, a.Code); Assert.Equal(["sync-board"], swept);
+        Assert.Equal(30, a.Code); Assert.Empty(swept);   // (no board reconciler in these parts: refused, and neither the script nor v1 was asked)
         Assert.Equal(2, (await router.RunAsync("journal", """{"item":3}""", TimeSpan.FromSeconds(5))).Code);   // v2's usage error: missing event; v1 was never asked
     }
 

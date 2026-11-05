@@ -12,7 +12,7 @@ using Fworker.Workflows.Transcripts;
 //   ingest-event     the translation of a GitHub webhook payload into the factory's events (WebhookEventTranslator): the same events as Verb_ingest_event, no rule script
 //   journal          the journal ledger (JournalLedger, the C# port of Add-Journal) answers the verb as Verb_journal does, and the line is recorded in ItemHistory (JournalHistory)
 //   transcript-*     the sessions' transcripts in factory.Transcripts (SqlTranscriptRepository); the verbs keep the sealed form of the ref store ("fwt1:") on the wire
-//   sync-board       the sweep is v1's until W9.11 (the hybrid plant reads its offers, owners and parks): the answer is the rule script's, and one pass of the board reconciler rides along
+//   sync-board       one pass of the board reconciler on demand (V3.2: v1's sweep, the rule script, is not run)
 // What differs from the scripts is in docs/design/fworker-wolverine-implementation.md, "W9.8 as built".
 
 /// <summary>What the board verbs read: the parts that are there where the engine acts. A part that is not there (no GitHub token, no database) makes its verb answer the refusal the script would have given.</summary>
@@ -227,19 +227,14 @@ sealed class BoardVerbs(BoardVerbParts p)
     }
 
     // ---- sync-board -------------------------------------------------------------------------------------------------------------------------------
-    // The sweep stays the rule script's until the hybrid plant is gone (W9.11): its answer is returned as it is. The board reconciler's pass for the same scope (the items named, or the whole board; dry: counted, not published)
-    // follows a sweep that succeeded and is added as "reconciler"; a reconciler that cannot run (no GitHub token, no board) adds null and never changes the exit code.
+    // V3.2: the board reconciler's pass for the scope asked (the items named, or the whole board; dry: counted, not published), on demand. v1's sweep (the rule script's Invoke-SyncBoard) no longer runs here: the
+    // plant is fed from the saga's state (Sweeper, SagaPlantFeed) and every step of the sweep has its v2 owner, and a pass of the script beside the engine would act on the saga's items.
     public async Task<VerbAnswer> SyncBoard(string stdin, TimeSpan timeout)
     {
         const string verb = "sync-board";
-        if (p.RuleScript is null) return BoardVerbAnswer.Rejected(verb, 30, "config-missing", "the rule script runner is not available");
-        var (code, output) = await p.RuleScript(verb, stdin, timeout);
-        if (code != 0 || p.Reconciler() is not { } reconciler) return new VerbAnswer(code, output);
-        JsonObject? answer;
-        try { answer = JsonNode.Parse(output) as JsonObject; } catch (System.Text.Json.JsonException) { answer = null; }
-        if (answer is null) return new VerbAnswer(code, output);
+        if (p.Reconciler() is not { } reconciler) return BoardVerbAnswer.Rejected(verb, 30, "config-missing", "the board reconciler does not run in this gateway (no GitHub token or no board)");
         JsonObject body;
-        try { body = string.IsNullOrWhiteSpace(stdin) ? new JsonObject() : JsonNode.Parse(stdin) as JsonObject ?? new JsonObject(); } catch (System.Text.Json.JsonException) { body = new JsonObject(); }
+        try { body = string.IsNullOrWhiteSpace(stdin) ? new JsonObject() : JsonNode.Parse(stdin) as JsonObject ?? new JsonObject(); } catch (System.Text.Json.JsonException) { return BoardVerbAnswer.Usage(verb, "the input is not a JSON object"); }
         HashSet<int>? only = null;
         if (body["items"] is JsonArray items)
         {
@@ -249,15 +244,14 @@ sealed class BoardVerbs(BoardVerbParts p)
         var dry = body["dry"] is JsonValue dv && dv.TryGetValue<bool>(out var db) && db;
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var cts = new CancellationTokenSource(timeout < TimeSpan.FromSeconds(60) ? timeout : TimeSpan.FromSeconds(60));
             var r = await reconciler.Run(cts.Token, only, dry);
-            answer["reconciler"] = new JsonObject { ["outcome"] = r.Outcome, ["cards"] = r.Cards, ["published"] = r.Published, ["dry"] = dry };
+            return BoardVerbAnswer.Ok(verb, new JsonObject { ["reconciler"] = new JsonObject { ["outcome"] = r.Outcome, ["cards"] = r.Cards, ["published"] = r.Published, ["dry"] = dry } });
         }
         catch (Exception e)
         {
             Console.Error.WriteLine($"sync-board reconciler pass: {e.GetType().Name}: {e.Message}");
-            answer["reconciler"] = null;
+            return BoardVerbAnswer.Internal(verb, "the board reconciler's pass failed: " + e.GetType().Name);
         }
-        return new VerbAnswer(code, answer.ToJsonString());
     }
 }

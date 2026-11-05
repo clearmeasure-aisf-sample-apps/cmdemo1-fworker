@@ -296,8 +296,6 @@ $OwnerScenarios = [ordered]@{
     $offItem = New-Item-Fake 'Messaging off' 'x' @()
     $oc = F 'msgoff' @('comment', '--item', $offItem, '--body', 'the words aisf:assumption are ordinary text here', '--from-message', 'm-00000000-0001')
     Check 'a comment that names the marker, with a from-message, is posted as it is' ($oc.exit -eq 0 -and @((Get-FakeIssue $offItem).comments | Where-Object { $_.body -match 'the words aisf:assumption are ordinary text here' -and $_.body -notmatch '<!-- aisf:assumption' }).Count -eq 1) ($oc | ConvertTo-Json -Compress)
-    $sb = F 'msgoff' @('sync-board', '--dry', 'true')
-    Check 'the sweep answers as before, and lists what it owns for a gateway that asks' ($sb.exit -eq 0 -and $sb.ContainsKey('owners') -and $sb.ContainsKey('owned') -and $sb.ContainsKey('settling')) ($sb.Keys -join ',')
     # with messaging off nobody guards the marker, so it marks nothing: get-item labels no block and the inspector gets the whole body
     $ov = To-Verdict 0 0 -HoldMerge
     $ob = "<!-- aisf:assumption source=m-00000000-0001 from=alice -->`n> a closed block`n<!-- /aisf:assumption -->`n<!-- aisf:assumption source=m-00000000-0002 from=alice -->`nACCEPTANCE-AFTER-AN-OPEN-MARKER"

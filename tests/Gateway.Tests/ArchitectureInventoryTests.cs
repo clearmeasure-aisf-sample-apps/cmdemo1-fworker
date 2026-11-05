@@ -172,7 +172,7 @@ public class ArchitectureInventoryTests
 
     /// <summary>
     /// The types and members the removal took out (V2.3 and V3.2 of the plan): v1's AutoPromoter and the delivery train's shadow of it (the comparison with v1's pass, its store, gate, report, handlers and
-    /// holder, the ShadowCommand of a shadowed environment, the shadow environments of a policy). A name here that is in the code of gateway/ or src/ again, generated code included, fails: bringing one back is
+    /// holder, the ShadowCommand of a shadowed environment, the shadow environments of a policy); the Runner's pool of long-lived pwsh workers and the GitHub-ref lease it put into the scripts. A name here that is in the code of gateway/ or src/ again, generated code included, fails: bringing one back is
     /// a decision, so it is a visible edit of this list. The live parts that kept a shadow name (ShadowHistory, ShadowOctopusPort, OctopusShadowIngress, DeliveryShadowSettings, DeliveryShadowWiring) are not here.
     /// </summary>
     static readonly string[] RetiredNames =
@@ -181,10 +181,14 @@ public class ArchitectureInventoryTests
         "DeliveryShadow", "DeliveryShadowHandlers", "DeliveryActingShadowHandlers", "DeliveryShadowService", "DeliveryShadowHolder", "AdminDeliveryShadowEndpoints",
         "ShadowCommand", "ShadowComparer", "ShadowClassifier", "ShadowComparisonResult", "ShadowComparisonRow", "ShadowDecision", "ShadowSide", "ShadowActions", "ShadowOutcomes", "ShadowReasons",
         "ShadowGate", "ShadowLiveRow", "ShadowLiveRelease", "ShadowSummary", "IShadowComparisonStore", "SqlShadowComparisonStore", "InMemoryShadowComparisonStore", "ShadowEnvironments",
+        "RunnerPool", "InjectLease", "KillBusy",
     ];
 
-    /// <summary>The route of the shadow's report and the identity of its command message: text a string literal could bring back without any of the names.</summary>
-    static readonly string[] RetiredLiterals = ["\"/api/v1/delivery-shadow\"", "MessageIdentity(\"delivery.train.shadow-command\")"];
+    /// <summary>
+    /// Text a string literal could bring back without any of the names: the route of the shadow's report, the identity of its command message, the pool's switch, its setting and its worker host (the gateway
+    /// starts no long-lived pwsh; the scenario harness's client host is the harness's own).
+    /// </summary>
+    static readonly string[] RetiredLiterals = ["\"/api/v1/delivery-shadow\"", "MessageIdentity(\"delivery.train.shadow-command\")", "\"FACTORY_RUNNER_POOL\"", "\"poolMaxCalls\"", "runner-host.ps1"];
 
     /// <summary>The code with its string literals emptied, so that a log line or a history type that says a retired word is no use of it.</summary>
     static string Identifiers(string code) => Regex.Replace(code, @"""(?:\\.|[^""\\\n])*""", "\"\"");
@@ -216,8 +220,46 @@ public class ArchitectureInventoryTests
         Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("if (policy is { Shadow: true }) return;")));
         Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("var acts = p.Acts && !p.Shadow;")));
         Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("routes.MapGet(\"/api/v1/delivery-shadow\", h);")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("readonly RunnerPool? pool = RunnerPool.Create(entry);")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("var size = Environment.GetEnvironmentVariable(\"FACTORY_RUNNER_POOL\");")));
+        Assert.NotEmpty(RetiredUses("x.cs", ArchitectureTests.Code("var host = Path.Combine(dir, \"runner-host.ps1\");")));
         // the live names that kept a shadow word, a comment and a string are no use
         Assert.Empty(RetiredUses("x.cs", ArchitectureTests.Code("new ShadowHistoryRecord(k, t, d, at); var p = new ShadowOctopusPort(f, true); // the DeliveryShadow is gone\nlog(\"the AutoPromoter is gone\");")));
+    }
+
+    /// <summary>The body of a method of a source file, from its signature to the line that closes it at the indentation of the signature (comments blanked).</summary>
+    static string MethodBody(string file, string signature)
+    {
+        var code = ArchitectureTests.Code(File.ReadAllText(Path.Combine(Root, file.Replace('/', Path.DirectorySeparatorChar))));
+        var at = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"{file}: '{signature}' is gone (the test names the method it reads)");
+        var indent = at - (code.LastIndexOf('\n', at) + 1);
+        var end = code.IndexOf("\n" + new string(' ', indent) + "}", at, StringComparison.Ordinal);
+        return code[at..(end < 0 ? code.Length : end)];
+    }
+
+    /// <summary>The words of a rule-script call: the Runner's script path, the board verbs' script part, any verb call of the Runner, the verb of v1's sweep.</summary>
+    static readonly Regex ScriptCall = new(@"\bRunScriptAsync\b|\bRuleScript\b|\.RunAsync\s*\(|""sync-board""", RegexOptions.Compiled);
+
+    [Fact]
+    public void V1sSweepIsNotRun_TheVerbIsTheReconcilersPass_AndThePlantFeedCallsNoScript()
+    {
+        // V3.2: sync-board answers with the board reconciler's pass; v1's Invoke-SyncBoard would act on the saga's items beside the engine
+        var verb = MethodBody("gateway/Verbs/BoardVerbs.cs", "public async Task<VerbAnswer> SyncBoard(");
+        Assert.False(Regex.IsMatch(Identifiers(verb), @"\bRunScriptAsync\b|\bRuleScript\b"), "BoardVerbs.SyncBoard runs the rule script again:\n" + verb);
+        Assert.Contains("reconciler.Run(", verb);
+        // the plant's feed reads the saga's state and the cards' labels only
+        var feed = ArchitectureTests.Code(File.ReadAllText(Path.Combine(Root, "gateway", "Sweeper.cs")));
+        Assert.False(ScriptCall.IsMatch(feed), "gateway/Sweeper.cs calls a rule script or the verb of v1's sweep: " + ScriptCall.Match(feed).Value);
+    }
+
+    [Fact]
+    public void TheScriptCallCheck_SeesAViolation_WhenOneIsPlanted()
+    {
+        Assert.Matches(ScriptCall, "var (code, output) = await p.RuleScript(verb, stdin, timeout);");
+        Assert.Matches(ScriptCall, "await runner.RunAsync(\"sync-board\", body, timeout);");
+        Assert.Matches(ScriptCall, "RuleScript = runner.RunScriptAsync,");
+        Assert.DoesNotMatch(ScriptCall, "var r = await reconciler.Run(cts.Token, only, dry);");
     }
 
     // ---- the document says what the JSON says --------------------------------------------------------------------------------------------------
