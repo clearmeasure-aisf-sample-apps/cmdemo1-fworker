@@ -1,0 +1,4 @@
+# suite: auto
+# scenario: board: a card of another repository linked to the board is never seen: no comment, no column event
+# runs: 2
+~ gateway STATE factory-worker v1 #{#2}
