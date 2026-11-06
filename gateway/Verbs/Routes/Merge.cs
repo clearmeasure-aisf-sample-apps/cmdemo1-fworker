@@ -1,5 +1,5 @@
 // W9.3 (#355): the merge train verbs, owned by the MergeTrainSaga (Fworker.Workflows.Merge). Registered to the v2 path only where the engine acts (V2VerbRoutes.Build); v1 routing is unchanged.
-// The handlers are gateway/Verbs/MergeVerbs.cs: each verb is v2's for the items the WorkItemSaga owns and, in the hybrid composition, the rule script's for every other item and for merge policy peer-approved.
+// The handlers are gateway/Verbs/MergeVerbs.cs: each verb is v2's alone (V3.3, slice 6: an item the WorkItemSaga does not own, and a merge policy other than auto, are refused, not handed to the rule script).
 static class MergeRoutes
 {
     public const string Group = "merge";

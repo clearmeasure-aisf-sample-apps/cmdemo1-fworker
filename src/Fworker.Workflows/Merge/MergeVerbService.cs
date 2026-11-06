@@ -9,7 +9,7 @@ namespace Fworker.Workflows.Merge;
 // W9.3 (#355): `merge`, `approve-pr` and `clear-hold` for the items the WorkItemSaga owns. The merge itself is the saga's: its Merge step asks the repository's MergeTrainSaga for the turn and the merge port runs the C# direct merge
 // (W6.2, W7.2). So the verb a session calls does not merge on its own: it applies the script's checks to the saga's state, asks the saga to make its merge call now (its retry timer, delivered at once), waits a short while for
 // the answer and says what the saga did, in the shape of Verb_merge's answers (merged, already-merged, waiting, demoted, parked, or its refusals). An item the saga does not own, and a merge policy other than auto
-// (the approval of the current head, the QC gate), are the script's: `Merge` answers null and the caller runs the verb on v1. W9.10q: the migration number collision of the script (Get-MigrationCollision) is refused here as there,
+// (the approval of the current head, the QC gate), are not decided here: `Merge` answers null and the gateway refuses the call (V3.3: no rule script takes it). W9.10q: the migration number collision of the script (Get-MigrationCollision) is refused here as there,
 // and a refusal 10 of `merge` or `approve-pr` counts for the model ladder (Add-Refusal) as it does when the script answers.
 
 /// <summary>Where a verb reads whether an item carries a label (the GitHub issue's labels).</summary>
@@ -43,7 +43,7 @@ public sealed class MergeVerbService(RepoId home, IWorkItemStore store, IItemLab
     /// <summary>Whether the saga knows the item (any instance): the verbs below decide for these and only these.</summary>
     public async Task<WorkItemState?> StateOf(int item, CancellationToken ct) => (await store.Load(new ItemId(home, item).ToString(), ct))?.State;
 
-    /// <summary><c>merge</c> for an item the saga owns; null when the verb is the script's (not owned, or a policy other than auto).</summary>
+    /// <summary><c>merge</c> for an item the saga owns; null when the saga does not decide it (not owned, or a policy other than auto).</summary>
     public async Task<VerbAnswer?> Merge(JsonObject body, CancellationToken ct)
     {
         if (!MergeVerbReplies.ItemNumber("merge", body, out var item, out var refusal)) return refusal;
@@ -122,10 +122,10 @@ public sealed class MergeVerbService(RepoId home, IWorkItemStore store, IItemLab
         catch (Exception e) when (e is not OperationCanceledException) { }
     }
 
-    /// <summary><c>approve-pr</c>: the script's answer under merge policy auto; null where the inspector's review is the script's.</summary>
+    /// <summary><c>approve-pr</c>: the script's answer under merge policy auto; null under any other policy (the inspector's review, which is not ported).</summary>
     public VerbAnswer? ApprovePr(JsonObject body) => MergeVerbRules.ApprovePr(body, settings);
 
-    /// <summary><c>clear-hold</c> for an item the saga knows, under merge policy auto; null where the hold is the script's.</summary>
+    /// <summary><c>clear-hold</c> for an item the saga knows, under merge policy auto; null for an item the saga does not know, and under any other policy.</summary>
     public async Task<VerbAnswer?> ClearHold(JsonObject body, CancellationToken ct)
     {
         if (!MergeVerbReplies.ItemNumber("clear-hold", body, out var item, out var refusal)) return refusal;

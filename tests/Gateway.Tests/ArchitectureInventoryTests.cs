@@ -44,7 +44,7 @@ public class ArchitectureInventoryTests
         n["owner"]!.ToString(), n["leaves"]!.ToString(), Exc(n["exception"]))).ToList();
 
     /// <summary>The exceptions that may exist; a new one is a decision, so it is a visible edit of this list.</summary>
-    static readonly string[] DeclaredExceptions = ["transcripts", "merge-peer-approved", "merge-hybrid-script"];
+    static readonly string[] DeclaredExceptions = ["transcripts"];
 
     static readonly string[] Kinds = ["runner", "router"];
 
@@ -312,6 +312,41 @@ public class ArchitectureInventoryTests
         Assert.Matches(ScriptCall, "await runner.RunAsync(\"sync-board\", body, timeout);");
         Assert.Matches(ScriptCall, "RuleScript = runner.RunScriptAsync,");
         Assert.DoesNotMatch(ScriptCall, "var r = await reconciler.Run(cts.Token, only, dry);");
+    }
+
+    // ---- the routed verbs' fallbacks V3.3 (slice 6) removed ------------------------------------------------------------------------------------
+
+    /// <summary>The routed verbs that had a rule script behind them (the transcripts' database backend, which keeps a read-only fallback of the ref store until 2026-11-13, is checked for its prune only): the merge train's hybrid composition (an item the saga does not own, a policy other than auto), ingest-event without a translator, journal without a ledger.</summary>
+    static readonly string[] RoutedVerbFiles = ["gateway/Verbs/MergeVerbs.cs", "gateway/Verbs/BoardVerbs.cs", "gateway/Ports/BoardPort.cs"];
+
+    static readonly Regex FallbackCall = new(@"\bRunScriptAsync\b|\bRuleScript\b|\bScript\s*\(|GetRequiredService<Runner>|\.RunAsync\s*\(", RegexOptions.Compiled);
+
+    static List<string> FallbackUses(string path, string code)
+    {
+        var found = FallbackCall.Matches(Identifiers(code)).Select(m => $"{path}: {m.Value}").ToList();
+        // the transcripts' database backend may read the ref store (read-only, until 2026-11-13) but prunes the database alone
+        if (Regex.Match(code, @"public\s+async\s+Task\s+Prune\s*\(int\s+days\)\s*\{(?<body>[^}]*)\}") is { Success: true } prune && code.Contains("class DatabaseTranscriptBackend", StringComparison.Ordinal)
+            && Regex.IsMatch(prune.Groups["body"].Value, @"\blegacy\b"))
+            found.Add($"{path}: DatabaseTranscriptBackend prunes the ref store");
+        return found;
+    }
+
+    [Fact]
+    public void TheRoutedVerbs_RunNoRuleScript_AndTheTranscriptsDatabasePrunesNoRefs()
+    {
+        var found = RoutedVerbFiles.Append("gateway/TranscriptBackends.cs")
+            .SelectMany(f => FallbackUses(f, ArchitectureTests.Code(File.ReadAllText(Path.Combine(Root, f.Replace('/', Path.DirectorySeparatorChar)))))).ToList();
+        Assert.True(found.Count == 0, "A routed verb hands a call to the rule script again (a decision: V3.3 removed these fallbacks):\n  " + string.Join("\n  ", found));
+    }
+
+    [Fact]
+    public void TheFallbackCheck_SeesAViolation_WhenOneIsPlanted()
+    {
+        Assert.NotEmpty(FallbackUses("x.cs", ArchitectureTests.Code("return answer ?? await Script(verb, stdin, timeout);")));
+        Assert.NotEmpty(FallbackUses("x.cs", ArchitectureTests.Code("RuleScript = sp.GetRequiredService<Runner>().RunScriptAsync,")));
+        Assert.NotEmpty(FallbackUses("x.cs", ArchitectureTests.Code("sealed class DatabaseTranscriptBackend(ITranscriptBackend? legacy) : ITranscriptBackend\n{\n    public async Task Prune(int days)\n    {\n        if (legacy != null) await legacy.Prune(days);\n    }\n}")));
+        // a comment and a log line that name the script are no use of it
+        Assert.Empty(FallbackUses("x.cs", ArchitectureTests.Code("// the rule script's RunScriptAsync is gone\nlog(\"no Script(...) any more\");\nsealed class DatabaseTranscriptBackend(ITranscriptBackend? legacy) : ITranscriptBackend\n{\n    public async Task Prune(int days)\n    {\n        if (ready()) await repository.Prune(days);\n    }\n}")));
     }
 
     // ---- the document says what the JSON says --------------------------------------------------------------------------------------------------

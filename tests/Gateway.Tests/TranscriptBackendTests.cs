@@ -7,8 +7,8 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.8 (gateway/TranscriptBackends.cs): the transcript store saves to a backend. The database backend keeps the session as a row with the qualified item and reads a session it does not have from the ref store (the 14 days written
-/// before the move); the rule-script backend is what the store always did (sealed, capped, the tree of the last save sent along). TranscriptServiceTests pins the store's loop and its final flush.
+/// W9.8 (gateway/TranscriptBackends.cs): the transcript store saves to a backend. The database backend keeps the session as a row with the qualified item and reads a session it does not have from the ref store, read-only,
+/// until 2026-11-13 (the 14 days written before the move; V3.3, slice 6 took out the prune of the refs); the rule-script backend is what the store does where the engine does not act (sealed, capped, the tree of the last save sent along). TranscriptServiceTests pins the store's loop and its final flush.
 /// </summary>
 public sealed class TranscriptBackendTests
 {
@@ -146,6 +146,7 @@ public sealed class TranscriptBackendTests
         Assert.Equal("old", (await b.Load("old"))!["name"]!.ToString());  // an older session: the ref store
         Assert.Equal(["load old"], legacy.Calls);
         Assert.Null(await b.Load("nobody"));
+        Assert.Equal(["load old", "load nobody"], legacy.Calls);         // read only: nothing was saved to the ref store
     }
 
     [Fact]
@@ -158,17 +159,17 @@ public sealed class TranscriptBackendTests
         Assert.NotNull(await b.Load("old"));
         await b.Prune(14);
         Assert.Equal(-1, repo.Pruned);
-        Assert.Equal(14, legacy.Pruned);
+        Assert.Null(legacy.Pruned);   // V3.3 (slice 6): the refs are no longer pruned from here
     }
 
     [Fact]
-    public async Task ThePrune_ClearsBothStores_AndAFailingRefStoreChangesNothing()
+    public async Task ThePrune_ClearsTheDatabaseOnly_AndAFailingRefStoreIsAMiss()
     {
         var repo = new MemoryRepository(); var legacy = new ThrowingBackend();
         var b = new DatabaseTranscriptBackend(repo, Home, () => true, legacy);
-        await b.Prune(7);
+        await b.Prune(7);   // (a ref store that throws on a prune would fail this: it is not asked)
         Assert.Equal(7, repo.Pruned);
-        Assert.Null(await new DatabaseTranscriptBackend(repo, Home, () => true, legacy).Load("anything"));   // a ref store that throws is a miss
+        Assert.Null(await b.Load("anything"));   // a ref store that throws is a miss
     }
 
     sealed class ThrowingBackend : ITranscriptBackend
@@ -242,18 +243,18 @@ public sealed class TranscriptBackendTests
         foreach (var verb in BoardRoutes.Verbs.Where(v => v.StartsWith("transcript-", StringComparison.Ordinal)))
             routes.Add(BoardRoutes.Verbs, verb, (_, _) => { routed.Add(verb); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true,\"found\":false}")); });
         var runner = new Runner(Path.Combine(env.Dir, "no-such-dir", "factory.ps1")) { Routes = routes };
-        // what the composition does: the store made on the Runner's script path, its backend handed to the database backend as the legacy one
+        // what the composition does: the store made on the Runner's script path, its backend handed to the database backend as the read-only one
         var store = new TranscriptStore(runner.RunScriptAsync, "backend-tests-secret");
         Assert.NotNull(store.Backend);
         var database = new DatabaseTranscriptBackend(new MemoryRepository(), Home, () => true, store.Backend);
         Assert.Null(await database.Load("old-session"));   // a miss in the database, a miss in the ref store: the script was asked
-        await database.Prune(14);
+        await database.Prune(14);                          // the database only (V3.3, slice 6): no transcript-prune
         Assert.Empty(routed);
-        Assert.Equal(["transcript-load", "transcript-prune"], File.ReadAllLines(log));
+        Assert.Equal(["transcript-load"], File.ReadAllLines(log));
         // the same call through RunAsync is the route's (the mistake this pins): it never reaches the refs
         await runner.RunAsync("transcript-load", "{}", Time);
         Assert.Equal(["transcript-load"], routed);
-        Assert.Equal(2, File.ReadAllLines(log).Length);
+        Assert.Single(File.ReadAllLines(log));
     }
 
     [Fact]

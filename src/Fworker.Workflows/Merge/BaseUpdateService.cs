@@ -29,7 +29,7 @@ public interface IBaseUpdateGitHub
 /// <summary>The saga's facts for an item, and the QC record of one of its pull requests (a QC run for a head makes the head stale to move).</summary>
 public interface IBaseUpdateItems
 {
-    /// <summary>The facts of an item the saga owns, or null when it does not (the caller sends the item to the script).</summary>
+    /// <summary>The facts of an item the saga owns, or null when it does not.</summary>
     Task<BaseItemFacts?> FactsOf(int item, CancellationToken ct);
     /// <summary>The JSON of the QC record of the pull request, or null when there is none.</summary>
     Task<string?> QcRecord(int pullRequest, CancellationToken ct);
@@ -51,7 +51,7 @@ public sealed class BaseUpdateService(IBaseUpdateGitHub github, IBaseUpdateItems
         body["items"] is JsonArray a ? a.Select(x => x is JsonValue v && (v.TryGetValue<int>(out var i) || (v.TryGetValue<string>(out var s) && int.TryParse(s, out i))) ? i : 0).Take(50).ToList() : [];
 
     /// <summary>
-    /// <c>Verb_base_watch</c>. <paramref name="only"/> names the items this call answers for (the others are the script's); every other field of the body is read as the script reads it. The row of an item is
+    /// <c>Verb_base_watch</c>. <paramref name="only"/> names the items this call answers for (the saga's; the caller answers the others); every other field of the body is read as the script reads it. The row of an item is
     /// <c>skip</c> 'error' with the script's code when the saga has no such item after all.
     /// </summary>
     public async Task<VerbAnswer> Watch(JsonObject body, ISet<int> only, CancellationToken ct)
@@ -127,7 +127,7 @@ public sealed class BaseUpdateService(IBaseUpdateGitHub github, IBaseUpdateItems
 
     /// <summary>
     /// <c>Verb_base_update_branch</c> for an item the saga owns: the outcome is read fresh at the time of the call, because a verdict, a merge or a QC run may have started since the trigger. Null when the saga does not
-    /// know the item (the script's).
+    /// know the item.
     /// </summary>
     public async Task<VerbAnswer?> UpdateBranch(JsonObject body, CancellationToken ct)
     {

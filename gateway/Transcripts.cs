@@ -14,8 +14,8 @@ using System.Text.Json.Nodes;
 // public, so the message is ciphertext: gzip of the JSON, then AES-GCM with a key derived (HKDF) from the gateway's token secret, which the
 // environment's vault keeps across restarts and releases. Kept: the last MaxBytes of lines per session, sessions of the last Days days.
 // Saved at most every SaveSeconds while lines arrive, at once when the session ends, and at the stop of the process.
-// Durable store, v2 (W9.8, DatabaseTranscriptBackend): where the engine acts the sessions are rows of factory.Transcripts (Fworker.Workflows.Transcripts), in the clear, with the qualified item as a column;
-// a session the database does not have is read from the ref store once (the 14 days that were written there before the move) and saved to the database from then on.
+// Durable store, v2 (W9.8, DatabaseTranscriptBackend): where the engine acts the sessions are rows of factory.Transcripts (Fworker.Workflows.Transcripts), in the clear, with the qualified item as a column,
+// and a session the database does not have is read from the ref store, read-only, until 2026-11-13 (the sessions written there before the move; V3.3, slice 6 took out the prune of the refs).
 sealed class TranscriptStore
 {
     public int MaxBytes = 2 * 1024 * 1024, MaxLine = 2000, MaxBatchLines = 500, Days = 14, MaxSessions = 200;
@@ -43,7 +43,7 @@ sealed class TranscriptStore
         if (run != null && seal.Available) backend = new RuleScriptTranscriptBackend(run, seal);
     }
 
-    /// <summary>The rule-script backend this store was made with (null when it is in memory only): the fallback of the database backend.</summary>
+    /// <summary>The rule-script backend this store was made with (null when it is in memory only): the read-only fallback of the database backend until 2026-11-13.</summary>
     public ITranscriptBackend? Backend => backend;
 
     /// <summary>W9.8: from now on the sessions are saved with <paramref name="next"/> (the database), not the ref store.</summary>

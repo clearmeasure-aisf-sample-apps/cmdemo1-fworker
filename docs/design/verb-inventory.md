@@ -120,7 +120,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 |---|---|---|---|---|---|---|---|
 | base-watch-verbs | `gateway/BaseUpdate.cs` | 1 | by argument | router | W9.3 | - | BaseWatch runs base-watch and base-update-branch through the Runner (routed since #542; its own table is gone). |
 | base-journal | `gateway/BaseUpdate.cs` | 1 | journal | router | W9.8 | - | The journal line of a base update (#477). |
-| transcripts | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.8 | W9.11b | TranscriptStore: transcript-save, transcript-load and transcript-prune, the rule scripts of the ref store (RunScriptAsync). **exception until W9.11b.** |
+| transcripts | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.8 | W9.11b | TranscriptStore: transcript-save, transcript-load and transcript-prune, the rule scripts of the ref store (RunScriptAsync) where the engine does not act; transcript-load alone where it acts, until 2026-11-13. **exception until W9.11b.** |
 | plant-snapshot | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.10k | W9.11b | SnapshotCoordinator: plant-snapshot-save, -load, -clear and -await. **exception until W9.11b.** |
 | revocation-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | router | W9.7 | - | RevocationService calls the Runner (revocations, revoke-worker): v2's route where the engine acts. |
 | copilot-owner-verbs | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | router | W9.4 | - | CopilotOwnerVerbs: copilot-owner. |
@@ -136,7 +136,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | resettle-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | resettle-item | router | W9.2 | - | The resettle endpoint. |
 | metrics-calls | `gateway/Endpoints/MetricsEndpoints.cs` | 1 | metrics | router | W9.7 | - | The metrics endpoint calls the Runner: v2's route where the engine acts. |
 | operator-release-endpoint | `gateway/Endpoints/OperatorReleaseEndpoints.cs` | 1 | operator-release | router | W9.7 | - | The record-release endpoint calls the Runner: v2's route where the engine acts. |
-| ingest-event | `gateway/Endpoints/WebhookEndpoints.cs` | 1 | ingest-event | router | W9.8 | - | The webhook endpoint hands the event to the script. |
+| ingest-event | `gateway/Endpoints/WebhookEndpoints.cs` | 1 | ingest-event | router | W9.8 | - | The webhook endpoint hands the event to the router: `BoardVerbs.IngestEvent` where the engine acts, with no rule script behind it (V3.3, slice 6). |
 | leader-lease | `gateway/Leader.cs` | 5 | leader-lease | runner | W9.10b | W9.11b | The leader lease on the GitHub ref. **exception until W9.11b.** |
 | plant-claim-renew | `gateway/PlantHooks.cs` | 1 | claim-item | router | W9.2 | - | Claim renewal of an assigned item. |
 | plant-expire-claim | `gateway/PlantHooks.cs` | 1 | expire-claim | router | W9.2 | - | Claim expiry of an assigned item. |
@@ -153,18 +153,16 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 ### The fallbacks of verbs that have a v2 owner
 
-| Entry | Kind | File | Sites | Owner | Leaves | What it is |
-|---|---|---|---|---|---|---|
-| merge-peer-approved | merge-script | `src/Fworker.Workflows/Merge/MergeVerbService.cs` | 2 | W9.11b | W9.11b | A merge policy other than auto: the inspector's approval of the current head and the QC gate. **exception until W9.11b.** |
-| merge-hybrid-script | merge-script | `gateway/Verbs/MergeVerbs.cs` | 5 | W9.9b | W9.11b | The hybrid composition: the script answers merge, approve-pr, clear-hold and base-watch for an item the saga does not own. **exception until W9.11b.** |
+None. V3.3 (slice 6) removed the last ones: `merge-hybrid-script` (the five `Script(...)` calls of `gateway/Verbs/MergeVerbs.cs`: merge, approve-pr, clear-hold and base-watch for an item the saga
+does not own) and `merge-peer-approved` (`MergeVerbService`'s `if (!settings.Auto) return null;`, a merge policy other than auto), which the gateway now refuses (`not-owned`, `merge-policy`); and, outside this
+table, the script behind `ingest-event` without a translator and `journal` without a ledger (`BoardVerbs`), which now refuse (`config-missing`, `not-ready`), and the prune of the ref store by `DatabaseTranscriptBackend` (its
+read-only fallback of a load stays until 2026-11-13, below).
 
 ### Exceptions
 
 - **plant-snapshot** (until W9.11b): The snapshot is the hand-over between gateway processes and the rollback to v1 until W9.11b removes v1; the plant is in SQL from W9.10k.
-- **transcripts** (until W9.11b): The ref store of the sessions written before the move to the database. Where the engine acts the `DatabaseTranscriptBackend` reads it as the fallback of a load and prunes it with the database; both go through the rule script (`Runner.RunScriptAsync`), because the board routes answer `transcript-load` and `transcript-prune` from `factory.Transcripts` and would never reach the refs. It goes with v1 at W9.11b, after the 14 days the refs are kept.
+- **transcripts** (until W9.11b): The ref store is the durable store of the transcripts where the engine does not act (no route answers the transcript verbs there). Where it acts, `BoardWiring` replaces it with `factory.Transcripts` and keeps it as the read-only fallback of a load, through `Runner.RunScriptAsync` (the board routes answer `transcript-load` from the database and would never reach the refs), for the sessions written before the move of 2026-10-30. That read goes after 2026-11-13, when the last of them is past the 14 days; V3.3 (slice 6) already took out the prune of the refs. The rest goes with the Runner's script half.
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.
-- **merge-peer-approved** (until W9.11b): The peer-approved merge policy is dropped (decision 4 of 2026-10-30), not ported; its suites go with v1 (W9.11a). Every environment runs mergePolicy auto.
-- **merge-hybrid-script** (until W9.11b): The adoption (W9.9b) gives the saga every open item, and W9.11b deletes the branch with the router of v1.
 
 ## Labels that no verb reads
 

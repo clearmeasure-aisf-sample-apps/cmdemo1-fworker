@@ -9,7 +9,7 @@ namespace Fworker.Workflows.Merge;
 // state comment, the saga's state answers here: the PASS verdict is the saga on its Merge step with the head the PASS covers, a merge that happened is the merge commit, a hold or park is the saga's park.
 
 /// <summary>What the merge verbs read of config/instance.json.</summary>
-/// <param name="MergePolicy"><c>mergePolicy</c>: auto (the gateway merges a PASS by itself) or peer-approved (an inspector's approval, then the merge; stays on v1).</param>
+/// <param name="MergePolicy"><c>mergePolicy</c>: auto (the gateway merges a PASS by itself) or peer-approved (an inspector's approval, then the merge; not ported: the gateway refuses it, V3.3).</param>
 /// <param name="AutoMergeLabel"><c>autoMergeLabel</c>: only an item that carries it is merged under auto.</param>
 /// <param name="HoldLabels"><c>holdLabels</c> (hold:owner when the configuration names none): a person holds the item while one is on it.</param>
 /// <param name="ValidationColumn"><c>columns.validation</c>: the column a PASS is merged from.</param>
@@ -67,7 +67,7 @@ public static class MergeVerbRules
 
     /// <summary>
     /// <c>Verb_approve_pr</c> under merge policy auto: the arguments are checked first (the item, then the inspector's text), then the answer is the script's: no inspection is needed. Null under any other policy,
-    /// where the inspector's review of the pull request on GitHub is the script's (it stays on v1 with the rest of peer-approved, W6.2).
+    /// where the inspector's review of the pull request on GitHub was the script's (peer-approved is not ported, W6.2; the gateway refuses it, V3.3).
     /// </summary>
     public static VerbAnswer? ApprovePr(JsonObject body, MergeVerbSettings settings)
     {

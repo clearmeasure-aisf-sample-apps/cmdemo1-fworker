@@ -12,8 +12,8 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.3 (#355): the merge train verbs in the gateway (gateway/Verbs/Routes/Merge.cs, MergeVerbs.cs, Ports/MergeVerbPort.cs). The route file registers the five verbs where the engine acts; each verb is v2's for an item the
-/// saga owns and the rule script's for every other item (the hybrid composition); the GitHub adapters ask for the paths of BaseUpdate.ps1 and read the answers the script reads.
+/// W9.3 (#355): the merge train verbs in the gateway (gateway/Verbs/Routes/Merge.cs, MergeVerbs.cs, Ports/MergeVerbPort.cs). The route file registers the five verbs where the engine acts; each verb is v2's alone
+/// (V3.3, slice 6: an item the saga does not own, and a merge policy other than auto, are refused, not handed to the rule script); the GitHub adapters ask for the paths of BaseUpdate.ps1 and read the answers the script reads.
 /// </summary>
 public sealed class MergeVerbRoutesTests
 {
@@ -33,11 +33,16 @@ public sealed class MergeVerbRoutesTests
         Assert.Equal(["approve-pr", "base-update-branch", "base-watch", "clear-hold", "merge"], routes.Verbs.OrderBy(v => v));
     }
 
-    // ---- the handlers: v2 for the saga's items, the script for the rest -----------------------------------------------------------------
+    // ---- the handlers: v2 for the saga's items, a refusal for the rest -----------------------------------------------------------------
 
     sealed class Labels(params string[] names) : IItemLabels
     {
         public Task<IReadOnlyList<string>?> LabelsOf(ItemId item, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(names);
+    }
+
+    sealed class LabelsByItem(Dictionary<int, string[]> byItem) : IItemLabels
+    {
+        public Task<IReadOnlyList<string>?> LabelsOf(ItemId item, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(byItem.TryGetValue(item.Number, out var l) ? l : null);
     }
 
     sealed class Github : IBaseUpdateGitHub
@@ -64,22 +69,19 @@ public sealed class MergeVerbRoutesTests
     {
         public readonly InMemoryWorkItemStore Store = new();
         public readonly Github Gh = new();
-        public readonly List<(string Verb, string Stdin)> Script = [];
         public readonly List<MergeRetryDue> Published = [];
-        public Func<string, string>? ScriptAnswer;
         public MergeVerbHandlers Handlers;
 
         public Rig(string policy = "auto", bool parts = true, Fworker.Workflows.WorkItem.Verbs.IItemRefusals? refusals = null, IMergeMigrations? migrations = null, params string[] labels)
+            : this(policy, parts, refusals, migrations, null, "", labels) { }
+
+        public Rig(string policy, bool parts, Fworker.Workflows.WorkItem.Verbs.IItemRefusals? refusals, IMergeMigrations? migrations, IItemLabels? scopeLabels, string envLabel, params string[] labels)
         {
             var settings = new MergeVerbSettings(policy, "Auto Merge", ["hold:owner"], "Functional Testing", _ => null);
             var verbs = new MergeVerbService(Home, Store, new Labels(labels), m => { Published.Add(m); return Task.FromResult(true); }, settings, new MergeVerbWait(TimeSpan.Zero, 1), _ => Task.CompletedTask, migrations: migrations, refusals: refusals);
             var update = new BaseUpdateService(Gh, new Items(Store), new BackmergeSettings("factory-worker"), _ => Task.CompletedTask);
-            MergeVerbParts? p = parts ? new MergeVerbParts(verbs, update, Store, Home) : null;
-            Handlers = new MergeVerbHandlers(() => p, (verb, stdin, _) =>
-            {
-                Script.Add((verb, stdin));
-                return Task.FromResult(new VerbAnswer(0, ScriptAnswer?.Invoke(verb) ?? $"{{\"ok\":true,\"verb\":\"{verb}\",\"script\":true,\"exit\":0}}"));
-            });
+            MergeVerbParts? p = parts ? new MergeVerbParts(verbs, update, Store, Home, scopeLabels, envLabel) : null;
+            Handlers = new MergeVerbHandlers(() => p);
         }
 
         public async Task Own(int item, StepKind step = StepKind.Merge, string verdictHead = Head, string mergeCommit = "", int pr = 11)
@@ -92,34 +94,91 @@ public sealed class MergeVerbRoutesTests
 
     static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
 
+    static IEnumerable<(string Verb, Func<string, Task<VerbAnswer>> Call)> EveryVerb(MergeVerbHandlers h) =>
+    [
+        ("merge", s => h.Merge(s, Timeout)), ("approve-pr", s => h.ApprovePr(s, Timeout)), ("clear-hold", s => h.ClearHold(s, Timeout)),
+        ("base-watch", s => h.BaseWatch(s, Timeout)), ("base-update-branch", s => h.BaseUpdateBranch(s, Timeout)),
+    ];
+
     [Fact]
-    public async Task WithoutTheSagasParts_EveryVerbIsTheScripts()
+    public async Task WithoutTheSagasParts_EveryVerbIsRefused_ToBeTriedAgain()
     {
         var rig = new Rig(parts: false);
-        foreach (var (verb, call) in new (string, Func<string, Task<VerbAnswer>>)[] { ("merge", s => rig.Handlers.Merge(s, Timeout)), ("approve-pr", s => rig.Handlers.ApprovePr(s, Timeout)), ("clear-hold", s => rig.Handlers.ClearHold(s, Timeout)),
-            ("base-watch", s => rig.Handlers.BaseWatch(s, Timeout)), ("base-update-branch", s => rig.Handlers.BaseUpdateBranch(s, Timeout)) })
-            Assert.True(J((await call("{\"item\":7}")).Output)["script"]!.GetValue<bool>(), verb);
-        Assert.Equal(["merge", "approve-pr", "clear-hold", "base-watch", "base-update-branch"], rig.Script.Select(s => s.Verb));
+        foreach (var (verb, call) in EveryVerb(rig.Handlers))
+        {
+            var a = await call("{\"item\":7,\"pr\":11,\"expected\":\"h\",\"text\":\"x\"}");
+            var o = J(a.Output);
+            Assert.Equal((20, false, verb, "not-ready", 30), (a.Code, o["ok"]!.GetValue<bool>(), o["verb"]!.ToString(), o["code"]!.ToString(), o["retryAfterSeconds"]!.GetValue<int>()));
+        }
     }
 
     [Fact]
-    public async Task AnItemTheSagaDoesNotOwn_IsTheScriptsWithItsBodyUnchanged()
+    public async Task ABodyThatIsNoJsonObject_IsTheInternalError_OfEveryVerb()
     {
         var rig = new Rig();
-        const string body = "{\"item\":9,\"pr\":3}";
-        Assert.True(J((await rig.Handlers.Merge(body, Timeout)).Output)["script"]!.GetValue<bool>());
-        Assert.True(J((await rig.Handlers.ClearHold(body, Timeout)).Output)["script"]!.GetValue<bool>());
-        Assert.True(J((await rig.Handlers.BaseUpdateBranch("{\"item\":9,\"pr\":3,\"expected\":\"x\"}", Timeout)).Output)["script"]!.GetValue<bool>());
-        Assert.Equal(body, rig.Script[0].Stdin);
+        foreach (var (verb, call) in EveryVerb(rig.Handlers))
+        {
+            var a = await call("[1,2]");
+            Assert.Equal((20, "internal-error", verb), (a.Code, J(a.Output)["code"]!.ToString(), J(a.Output)["verb"]!.ToString()));
+        }
     }
 
     [Fact]
-    public async Task MergePolicyPeerApproved_IsTheScripts_EvenForAnItemTheSagaOwns()
+    public async Task AnItemTheSagaDoesNotOwn_IsRefusedNotOwned()
+    {
+        var rig = new Rig();
+        foreach (var (verb, answer) in new[] { ("merge", await rig.Handlers.Merge("{\"item\":9,\"pr\":3}", Timeout)), ("clear-hold", await rig.Handlers.ClearHold("{\"item\":9}", Timeout)),
+            ("base-update-branch", await rig.Handlers.BaseUpdateBranch("{\"item\":9,\"pr\":3,\"expected\":\"x\"}", Timeout)) })
+        {
+            var o = J(answer.Output);
+            Assert.Equal((10, false, verb, "not-owned"), (answer.Code, o["ok"]!.GetValue<bool>(), o["verb"]!.ToString(), o["code"]!.ToString()));
+            Assert.Contains("#9", o["reason"]!.ToString());
+        }
+        Assert.Empty(rig.Published);
+    }
+
+    [Fact]
+    public async Task WithTheEnvironmentScopeOn_AnotherEnvironmentsItem_IsRefusedOutOfScope_BeforeAnyOtherCheck()
+    {
+        var scope = new LabelsByItem(new() { [2] = ["factory worker", "env:uat"], [3] = ["factory worker"], [4] = ["env:tdd", "env:uat"], [7] = ["factory worker", "env:tdd", "Auto Merge"] });
+        var rig = new Rig("auto", true, null, null, scope, "env:tdd", "Auto Merge");
+        await rig.Own(2);   // (even an item the saga owned: the env: label decides first, as Get-ItemInfo did)
+        foreach (var n in new[] { 2, 3, 4 })
+            foreach (var (verb, answer) in new[] { ("merge", await rig.Handlers.Merge($"{{\"item\":{n},\"pr\":1}}", Timeout)), ("clear-hold", await rig.Handlers.ClearHold($"{{\"item\":{n}}}", Timeout)) })
+            {
+                var o = J(answer.Output);
+                Assert.Equal((10, false, verb, "out-of-scope"), (answer.Code, o["ok"]!.GetValue<bool>(), o["verb"]!.ToString(), o["code"]!.ToString()));
+                Assert.Contains("'env:tdd'", o["reason"]!.ToString());
+            }
+        Assert.Empty(rig.Published);
+        // an issue that is not there is the script's item-not-found; this environment's own item goes on to the saga's checks
+        Assert.Equal((12, "item-not-found"), ((await rig.Handlers.Merge("{\"item\":9}", Timeout)).Code, J((await rig.Handlers.Merge("{\"item\":9}", Timeout)).Output)["code"]!.ToString()));
+        await rig.Own(7, mergeCommit: "ccc3333333333333333333333333333333333333");
+        Assert.Equal("already-merged", J((await rig.Handlers.Merge("{\"item\":7,\"pr\":11}", Timeout)).Output)["outcome"]!.ToString());
+        // the other verbs are not scoped here (the script's approve-pr refused not-required first, its back-merge read no labels)
+        Assert.Equal("not-required", J((await rig.Handlers.ApprovePr("{\"item\":2,\"text\":\"x\"}", Timeout)).Output)["code"]!.ToString());
+    }
+
+    [Fact]
+    public async Task WithTheEnvironmentScopeOff_NoLabelIsReadForTheScope()
+    {
+        var rig = new Rig("auto", true, null, null, new LabelsByItem(new() { [2] = ["env:uat"] }), "", "Auto Merge");
+        Assert.Equal("not-owned", J((await rig.Handlers.Merge("{\"item\":2,\"pr\":1}", Timeout)).Output)["code"]!.ToString());
+    }
+
+    [Fact]
+    public async Task MergePolicyPeerApproved_IsRefused_EvenForAnItemTheSagaOwns()
     {
         var rig = new Rig(policy: "peer-approved", labels: "Auto Merge");
         await rig.Own(7);
-        Assert.True(J((await rig.Handlers.Merge("{\"item\":7}", Timeout)).Output)["script"]!.GetValue<bool>());
-        Assert.True(J((await rig.Handlers.ApprovePr("{\"item\":7,\"text\":\"x\"}", Timeout)).Output)["script"]!.GetValue<bool>());
+        foreach (var (verb, answer) in new[] { ("merge", await rig.Handlers.Merge("{\"item\":7}", Timeout)), ("approve-pr", await rig.Handlers.ApprovePr("{\"item\":7,\"text\":\"x\"}", Timeout)),
+            ("clear-hold", await rig.Handlers.ClearHold("{\"item\":7}", Timeout)) })
+        {
+            var o = J(answer.Output);
+            Assert.Equal((30, verb, "merge-policy"), (answer.Code, o["verb"]!.ToString(), o["code"]!.ToString()));
+            Assert.Contains("'peer-approved'", o["reason"]!.ToString());
+        }
+        Assert.Empty(rig.Published);
     }
 
     [Fact]
@@ -130,13 +189,11 @@ public sealed class MergeVerbRoutesTests
         var a = await rig.Handlers.Merge("{\"item\":7,\"pr\":11}", Timeout);
         Assert.Equal(0, a.Code);
         Assert.Equal(("already-merged", "ccc3333333333333333333333333333333333333"), (J(a.Output)["outcome"]!.ToString(), J(a.Output)["sha"]!.ToString()));
-        Assert.Empty(rig.Script);
         // approve-pr needs no item: under auto it is the script's refusal whatever the item
         a = await rig.Handlers.ApprovePr("{\"item\":7,\"text\":\"fine\"}", Timeout);
         Assert.Equal((10, "not-required"), (a.Code, J(a.Output)["code"]!.ToString()));
         a = await rig.Handlers.ClearHold("{\"item\":7}", Timeout);
         Assert.Equal((10, "not-held"), (a.Code, J(a.Output)["code"]!.ToString()));
-        Assert.Empty(rig.Script);
     }
 
     [Fact]
@@ -173,9 +230,8 @@ public sealed class MergeVerbRoutesTests
         Assert.Equal([7, 7], counted.Added);
         Assert.Equal(10, (await rig.Handlers.ClearHold("{\"item\":7}", Timeout)).Code);                   // not-held: clear-hold is no verb of the ladder
         Assert.Equal([7, 7], counted.Added);
-        // an item the saga does not own is the script's, which counts its own refusals (nothing is counted twice)
-        rig.ScriptAnswer = _ => "{\"ok\":false,\"verb\":\"merge\",\"code\":\"wrong-column\",\"exit\":10}";
-        await rig.Handlers.Merge("{\"item\":9}", Timeout);
+        // the refusal of an item the saga does not own is no answer of the merge check: it is not counted
+        Assert.Equal(10, (await rig.Handlers.Merge("{\"item\":9}", Timeout)).Code);
         Assert.Equal([7, 7], counted.Added);
     }
 
@@ -187,20 +243,18 @@ public sealed class MergeVerbRoutesTests
         await rig.Own(7);
         var a = await rig.Handlers.Merge("{\"item\":7,\"pr\":11}", Timeout);
         Assert.Equal((10, "migration-number-taken", "041"), (a.Code, J(a.Output)["code"]!.ToString(), J(a.Output)["next"]!.ToString()));
-        Assert.Equal([7], counted.Added); Assert.Empty(rig.Published); Assert.Empty(rig.Script);
+        Assert.Equal([7], counted.Added); Assert.Empty(rig.Published);
     }
 
     [Fact]
-    public async Task AFaultOfTheCall_IsTheScriptsInternalError_NotAnExceptionAndNotTheScript()
+    public async Task AFaultOfTheCall_IsTheScriptsInternalError_NotAnException()
     {
-        var rig = new Rig();
         var store = new ThrowingStore();
         var verbs = new MergeVerbService(Home, store, new Labels(), _ => Task.FromResult(true), new MergeVerbSettings("auto", "Auto Merge", [], "Functional Testing", _ => null));
-        var handlers = new MergeVerbHandlers(() => new MergeVerbParts(verbs, null, store, Home), (v, s, t) => { rig.Script.Add((v, s)); return Task.FromResult(new VerbAnswer(0, "{}")); });
+        var handlers = new MergeVerbHandlers(() => new MergeVerbParts(verbs, null, store, Home));
         var a = await handlers.Merge("{\"item\":7}", Timeout);
         Assert.Equal(20, a.Code);
         Assert.Equal(("internal-error", 30), (J(a.Output)["code"]!.ToString(), J(a.Output)["retryAfterSeconds"]!.GetValue<int>()));
-        Assert.Empty(rig.Script);
     }
 
     sealed class ThrowingStore : IWorkItemStore
@@ -212,36 +266,36 @@ public sealed class MergeVerbRoutesTests
         public Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct) => throw new NotSupportedException();
     }
 
-    // ---- base-watch: the saga's items here, the others by the script ----------------------------------------------------------------------
+    // ---- base-watch: the saga's items read, the others skipped ----------------------------------------------------------------------------
 
     [Fact]
-    public async Task BaseWatchWithNoItemOfTheSaga_IsTheScriptsCallAsItWas()
+    public async Task BaseWatchWithNoItemOfTheSaga_ReadsTheHead_AndSkipsEveryItemAsNotOwned()
     {
         var rig = new Rig();
-        const string body = "{\"known\":\"m0\",\"items\":[8,9],\"mergedPrs\":[]}";
-        var a = await rig.Handlers.BaseWatch(body, Timeout);
-        Assert.True(J(a.Output)["script"]!.GetValue<bool>());
-        Assert.Equal(("base-watch", body), rig.Script.Single());
-        Assert.Empty(rig.Gh.Calls);
+        var a = await rig.Handlers.BaseWatch("{\"known\":\"m0\",\"items\":[8,9],\"mergedPrs\":[]}", Timeout);
+        Assert.Equal(0, a.Code);
+        var o = J(a.Output);
+        Assert.Equal(("m1", true), (o["head"]!.ToString(), o["changed"]!.GetValue<bool>()));
+        var rows = o["rows"]!.AsArray();
+        Assert.Equal([8, 9], rows.Select(r => r!["item"]!.GetValue<int>()));
+        Assert.All(rows, r => Assert.Equal(("not-owned", 0, 0), (r!["skip"]!.ToString(), r["pr"]!.GetValue<int>(), r["behind"]!.GetValue<int>())));
+        Assert.Empty(rig.Gh.Calls);   // (no branch of an item the saga does not own is compared)
     }
 
     [Fact]
-    public async Task BaseWatchWithTheSagasItemsAndOthers_JoinsTheRowsInTheOrderOfTheCall()
+    public async Task BaseWatchWithTheSagasItemsAndOthers_KeepsTheOrderOfTheCall()
     {
         var rig = new Rig();
         await rig.Own(7, StepKind.Develop, verdictHead: "", pr: 11);
         await rig.Own(9, StepKind.Develop, verdictHead: "", pr: 13);
         rig.Gh.Open = [new BasePull(11, "open", "factory-worker/7-x", "h7", true, "clean"), new BasePull(13, "open", "factory-worker/9-x", "h9", true, "clean")];
-        rig.ScriptAnswer = _ => "{\"head\":\"m1\",\"known\":\"\",\"changed\":false,\"baseFiles\":0,\"rows\":[{\"item\":8,\"pr\":12,\"branch\":\"factory-worker/8-x\",\"head\":\"h8\",\"behind\":1,\"overlap\":[],\"skip\":\"\"}],\"ok\":true,\"verb\":\"base-watch\",\"exit\":0}";
         var a = await rig.Handlers.BaseWatch("{\"known\":\"\",\"items\":[7,8,9]}", Timeout);
         Assert.Equal(0, a.Code);
         var rows = J(a.Output)["rows"]!.AsArray();
         Assert.Equal([7, 8, 9], rows.Select(r => r!["item"]!.GetValue<int>()));
-        Assert.Equal([2, 1, 2], rows.Select(r => r!["behind"]!.GetValue<int>()));   // (7 and 9 read here, 8 by the script)
-        // the script was asked about the item that is not the saga's, and only that one; everything else of the body is as it was
-        var forScript = J(rig.Script.Single().Stdin);
-        Assert.Equal([8], forScript["items"]!.AsArray().Select(x => x!.GetValue<int>()));
-        Assert.Equal("", forScript["known"]!.ToString());
+        Assert.Equal(["", "not-owned", ""], rows.Select(r => r!["skip"]!.ToString()));
+        Assert.Equal([2, 0, 2], rows.Select(r => r!["behind"]!.GetValue<int>()));   // (7 and 9 read, 8 is not the saga's)
+        Assert.Equal(["behind factory-worker/7-x", "behind factory-worker/9-x"], rig.Gh.Calls);
     }
 
     [Fact]
@@ -250,7 +304,7 @@ public sealed class MergeVerbRoutesTests
         var rig = new Rig();
         var a = await rig.Handlers.BaseWatch("{\"known\":\"\",\"items\":[]}", Timeout);
         Assert.Equal("m1", J(a.Output)["head"]!.ToString());
-        Assert.Empty(rig.Script);
+        Assert.Empty(J(a.Output)["rows"]!.AsArray());
     }
 
     [Fact]
@@ -258,13 +312,13 @@ public sealed class MergeVerbRoutesTests
     {
         var rig = new Rig();
         var failing = new MergeVerbHandlers(() => new MergeVerbParts(new MergeVerbService(Home, new ThrowingStore(), new Labels(), _ => Task.FromResult(true), new MergeVerbSettings("auto", "Auto Merge", [], "x", _ => null)),
-            new BaseUpdateService(rig.Gh, new Items(rig.Store), new BackmergeSettings("factory-worker")), new ThrowingStore(), Home), (v, s, t) => Task.FromResult(new VerbAnswer(0, "{}")));
+            new BaseUpdateService(rig.Gh, new Items(rig.Store), new BackmergeSettings("factory-worker")), new ThrowingStore(), Home));
         var a = await failing.BaseWatch("{\"items\":[7]}", Timeout);
         Assert.Equal(20, a.Code);
         Assert.Equal("internal-error", J(a.Output)["code"]!.ToString());
     }
 
-    // ---- what the Runner does before it starts the script, done for the calls v2 answers --------------------------------------------------
+    // ---- what the Runner does before it starts a script, done for the calls v2 answers --------------------------------------------------
 
     [Fact]
     public async Task TheCallsThatCanWait_AreNotMadeWhileTheGitHubBudgetIsLow_AsTheRunnerDoesNotMakeThem()
@@ -296,12 +350,11 @@ public sealed class MergeVerbRoutesTests
     [Fact]
     public async Task AGuardThatRefuses_IsTheAnswer_AndMergeIsNeverGuarded()
     {
-        var calls = new List<string>();
-        var handlers = new MergeVerbHandlers(() => null, (v, s, t) => { calls.Add(v); return Task.FromResult(new VerbAnswer(0, "{\"script\":true}")); },
-            verb => verb is "base-watch" ? new VerbAnswer(20, "{\"code\":\"guarded\"}") : null);
+        var guarded = new List<string>();
+        var handlers = new MergeVerbHandlers(() => null, verb => { guarded.Add(verb); return verb is "base-watch" ? new VerbAnswer(20, "{\"code\":\"guarded\"}") : null; });
         Assert.Equal(new VerbAnswer(20, "{\"code\":\"guarded\"}"), await handlers.BaseWatch("{}", Timeout));
-        Assert.Equal(new VerbAnswer(0, "{\"script\":true}"), await handlers.Merge("{\"item\":7}", Timeout));
-        Assert.Equal(["merge"], calls);
+        Assert.Equal("not-ready", J((await handlers.Merge("{\"item\":7}", Timeout)).Output)["code"]!.ToString());   // (past the guard: no parts in this rig)
+        Assert.Equal(["base-watch", "merge"], guarded);
     }
 
     // ---- the QC record, on a real SQL Server (FACTORY_TEST_SQL; returns at once without one) -------------------------------------------
@@ -322,7 +375,7 @@ public sealed class MergeVerbRoutesTests
         Assert.Equal("{\"sha\":\"h7\"}", await items.QcRecord(11, default));
         Assert.Null(await items.QcRecord(12, default));
         Assert.Null(await new SagaBaseUpdateItems(store, Home, null).QcRecord(11, default));   // (no database: no record)
-        Assert.Null(await items.FactsOf(7, default));   // (the saga does not know the item: the script's)
+        Assert.Null(await items.FactsOf(7, default));   // (the saga does not know the item)
         await store.Save("acme/orders#7", new WorkItemState { Item = "acme/orders#7", Generation = 1, Step = StepKind.Merge, VerdictHead = "h7", PullRequest = 11 }, 0, default);
         Assert.Equal(new BaseItemFacts(true, true, false, true, 11, ""), await items.FactsOf(7, default));
     }

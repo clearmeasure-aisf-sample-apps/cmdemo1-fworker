@@ -53,8 +53,6 @@ public sealed class BoardVerbsTests
         public readonly MemoryJournal Journal = new();
         public readonly Lookups Lookups = new();
         public bool Ready = true;
-        public readonly List<string> Sweeps = [];
-        public (int Code, string Output) SweepAnswer = (0, """{"ok":true,"steps":{},"offers":[],"actions":[],"errors":[],"incremental":false,"exit":0}""");
         public BoardReconciler? Reconciler;
         public IItemLock? Locks;
         public readonly List<string> Published = [];
@@ -65,7 +63,6 @@ public sealed class BoardVerbsTests
             Translator = new WebhookEventTranslator(new WebhookTranslatorConfig("acme", "orders", "factory-worker", "master", "factory worker", ""), Lookups, () => T0),
             Ledger = () => new JournalLedger(Journal, new JournalSettings(30), () => T0.UtcDateTime, _ => { }, Locks),
             Reconciler = () => Reconciler, Now = () => T0,
-            RuleScript = (verb, stdin, _) => { Sweeps.Add(stdin); return Task.FromResult(SweepAnswer); },
         });
     }
 
@@ -200,20 +197,21 @@ public sealed class BoardVerbsTests
     }
 
     [Fact]
-    public async Task Journal_AndIngestEvent_WithoutWhatV2NeedsHere_AreTheRuleScripts()
+    public async Task Journal_AndIngestEvent_WithoutWhatV2NeedsHere_AreRefused_AndSayWhy()
     {
-        var seen = new List<string>();
-        var parts = new BoardVerbParts { RuleScript = (verb, stdin, _) => { seen.Add(verb + " " + stdin); return Task.FromResult((0, "{\"ok\":true,\"by\":\"script\"}")); } };   // no ledger, no translator
-        var verbs = new BoardVerbs(parts);
-        Assert.Equal("script", Parse(await verbs.Journal("""{"item":7,"event":"tier","fields":{}}""", Time))["by"]!.ToString());
-        Assert.Equal("script", Parse(await verbs.IngestEvent("""{"event":"push","payload":{}}""", Time))["by"]!.ToString());
-        Assert.Equal(["journal {\"item\":7,\"event\":\"tier\",\"fields\":{}}", "ingest-event {\"event\":\"push\",\"payload\":{}}"], seen);
-        // the refusals of the script are v2's too, so a malformed call never reaches it
+        var verbs = new BoardVerbs(new BoardVerbParts());   // no ledger, no translator
+        // the ledger is made with the Wolverine host: a line asked for before that is asked for again
+        var journal = await verbs.Journal("""{"item":7,"event":"tier","fields":{}}""", Time);
+        var j = Parse(journal);
+        Assert.Equal((20, false, "journal", "not-ready", 5), (journal.Code, (bool)j["ok"]!, j["verb"]!.ToString(), j["code"]!.ToString(), (int)j["retryAfterSeconds"]!));
+        // without the instance file's owner and repository no event can be named: for good
+        var ingest = await verbs.IngestEvent("""{"event":"push","payload":{}}""", Time);
+        var i = Parse(ingest);
+        Assert.Equal((30, false, "ingest-event", "config-missing"), (ingest.Code, (bool)i["ok"]!, i["verb"]!.ToString(), i["code"]!.ToString()));
+        Assert.Contains("owner and repository", i["reason"]!.ToString());
+        // a malformed call is refused as before, ahead of the missing part
         Assert.Equal(2, (await verbs.Journal("""{"item":7,"event":"no-such"}""", Time)).Code);
-        Assert.Equal(2, seen.Count(x => x.StartsWith("journal ") || x.StartsWith("ingest-event ")));
-        // and with no script either, the refusal says why
-        var bare = await new BoardVerbs(new BoardVerbParts()).Journal("""{"item":7,"event":"tier","fields":{}}""", Time);
-        Assert.Equal((30, "config-missing"), (bare.Code, Parse(bare)["code"]!.ToString()));
+        Assert.Equal(2, (await verbs.IngestEvent("""{"payload":{}}""", Time)).Code);
     }
 
     // ---- transcripts ----
@@ -327,7 +325,6 @@ public sealed class BoardVerbsTests
         var rig = new Rig(); rig.Reconciler = ReconcilerOver(rig, new BoardCard(Home, 5, "Doing", true, "a"), new BoardCard(Home, 6, "Todo", true, "b"));
         var a = await rig.Verbs().SyncBoard("""{"items":[5]}""", Time);
         Assert.Equal(0, a.Code);
-        Assert.Empty(rig.Sweeps);   // V3.2: v1's sweep is not run beside the engine
         var o = Parse(a);
         Assert.Equal((true, 0, "sync-board"), ((bool)o["ok"]!, (int)o["exit"]!, o["verb"]!.ToString()));
         var r = o["reconciler"]!;
@@ -337,7 +334,6 @@ public sealed class BoardVerbsTests
         var dry = Parse(await rig.Verbs().SyncBoard("""{"dry":true}""", Time))["reconciler"]!;
         Assert.Equal((1, true), ((int)dry["published"]!, (bool)dry["dry"]!));   // card 6 is still news
         Assert.Single(rig.Published);
-        Assert.Empty(rig.Sweeps);
     }
 
     [Fact]
@@ -347,7 +343,6 @@ public sealed class BoardVerbsTests
         var a = await rig.Verbs().SyncBoard("{}", Time);
         var o = Parse(a);
         Assert.Equal((30, false, "config-missing"), (a.Code, (bool)o["ok"]!, o["code"]!.ToString()));
-        Assert.Empty(rig.Sweeps);
     }
 
     [Fact]
@@ -358,7 +353,6 @@ public sealed class BoardVerbsTests
         var a = await rig.Verbs().SyncBoard("{}", Time);
         var o = Parse(a);
         Assert.Equal((20, "internal-error"), (a.Code, o["code"]!.ToString()));
-        Assert.Empty(rig.Sweeps);
     }
 
     [Fact]
