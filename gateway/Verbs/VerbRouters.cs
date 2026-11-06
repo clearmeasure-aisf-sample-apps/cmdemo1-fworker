@@ -24,40 +24,34 @@ static class VerbRouterFactory
     };
 }
 
-// Cutover review: what a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase) lets through. v2 cannot act and v1 must not take its place (no "v1-ran" marker can be written), so every verb that
-// changes anything is refused with code "database" and exit 20 (the caller retries later, as for a budget). Two places refuse: the router in front of the verb endpoint (InertVerbRouter) and, as the choke point of every call of the
-// rule script whoever makes it (the QC hub, the item admin endpoints, the demo endpoint, the webhook's ingest-event, the loops), Runner.RunScriptAsync.
+// V3.3: what an inert gateway (EngineOptions.Inert: the engine does not act in its environment) answers to a verb a caller sends: a refusal, whoever asks and whatever the verb. There is no v1 to run in v2's place (the rule
+// scripts of the server are gone, and with no database no "v1-ran" marker could be written either). Two places refuse: the router in front of the verb endpoint (InertVerbRouter) and, as the choke point of every
+// call of the rule script whoever makes it (the QC hub, the item admin endpoints, the demo endpoint, the webhook, the loops), Runner.RunScriptAsync.
 static class InertVerbs
 {
-    /// <summary>The verbs that write nothing at all (kebab-case, as on the wire). Not item-pr (it can retarget, rename, close and ready a pull request and saves state) and not wait-for-checks (it re-runs a job and saves the re-run).</summary>
-    public static readonly IReadOnlySet<string> ReadOnly = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "get-item", "my-items", "inspect-facts", "pr-checks", "metrics", "qc-view", "qc-list", "get-delivery", "backlog", "revocations", "operator-releases", "transcript-load",
-    };
-
-    /// <summary>The gateway's own housekeeping, which keeps the process alive and writes nothing about an item: the revocations (reading and revoking a worker: a credential action that writes no item), the operator's release record, the automatic promotion of uat and prod, the transcripts.</summary>
+    /// <summary>
+    /// The gateway's own housekeeping, the one thing an inert gateway still runs through the rule script (never a verb a caller sends: the verb endpoint refuses those): it keeps the credentials and the
+    /// records and writes nothing about an item. The revoked credentials are read, so a session credential is refused when it was revoked instead of waiting for a read that never comes; the operator can
+    /// revoke a name; the operator's release record is read and written; the transcripts are the ref store's.
+    /// </summary>
     public static readonly IReadOnlySet<string> Housekeeping = new HashSet<string>(StringComparer.Ordinal)
     {
         "revocations", "revoke-worker", "operator-releases", "operator-release", "transcript-save", "transcript-load", "transcript-prune",
     };
 
-    public static bool RunnerMayRun(string verb) => ReadOnly.Contains(verb) || Housekeeping.Contains(verb);
-
-    public static VerbAnswer Refusal(string verb) =>
-        BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 });
+    /// <summary>The refusal, exit 20 (HTTP 503 at every endpoint): code "database" where v2 is named and there is no database (the caller retries once there is one); code "inert" where v2Environments does not name the environment (nothing changes until the configuration does: an hour).</summary>
+    public static VerbAnswer Refusal(string verb, EngineOptions engine) => engine.NoDatabase
+        ? BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 })
+        : BoardVerbAnswer.Rejected(verb, 20, "inert", $"the v2 engine does not act in this environment (engine.v2Environments does not name '{engine.Environment}'): nothing acts here", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 3600 });
 }
 
-// The router in front of the verb endpoint of such a gateway: the verbs that only read pass through, every other is refused.
-sealed class InertVerbRouter(IVerbRouter below) : IVerbRouter
+// The router in front of the verb endpoint of an inert gateway: every verb is refused.
+sealed class InertVerbRouter(EngineOptions engine) : IVerbRouter
 {
-    /// <summary>The verbs that read and write nothing.</summary>
-    public static IReadOnlySet<string> ReadOnly => InertVerbs.ReadOnly;
-
-    public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) =>
-        InertVerbs.ReadOnly.Contains(verb) ? below.RunAsync(verb, stdin, timeout) : Task.FromResult(InertVerbs.Refusal(verb));
+    public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) => Task.FromResult(InertVerbs.Refusal(verb, engine));
 }
 
-// The leader lease as the loops of a gateway with no database see it: it is held (status, hand-over), but nothing may act.
+// The leader lease as the loops of an inert gateway see it: it is held (status, hand-over), but nothing may act.
 sealed class InertLeadership(ILeadership inner) : ILeadership
 {
     public bool On => inner.On;

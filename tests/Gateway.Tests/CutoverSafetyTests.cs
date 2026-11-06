@@ -65,6 +65,7 @@ public sealed class CutoverSafetyTests
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
         Cutover(env, database: true, environment: environment);
+        env.Set("FACTORY_TEST_STUB_SCRIPTS", null);   // (the real thing: an environment v2Environments does not name is inert)
         env.Apply(); WriteAnswer(env);
         using var host = new GatewayHost();
         _ = host.Server;
@@ -72,6 +73,57 @@ public sealed class CutoverSafetyTests
         Assert.Null(sweeper.V2);          // (no engine acts here; v1's sweep is gone, V3.2)
         await Task.Delay(TimeSpan.FromSeconds(6));
         Assert.Empty(SyncBoardCalls(env));
+    }
+
+    // V3.3: what an inert environment answers. An environment v2Environments does not name (fworker's uat and prod) runs no rule script for a caller and acts on nothing: every verb is refused "inert"
+    // (exit 20, HTTP 503), the loops that act on items may not act, /ready answers 503 "engine" for good, /health and /_build answer 200, the operator's status says inert. Only its housekeeping reaches a script.
+    [Theory]
+    [InlineData("uat")]
+    [InlineData("prod")]
+    public async Task AnEnvironmentTheEngineDoesNotName_IsInert_VerbsRefused_Ready503Engine_Health200(string environment)
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        Cutover(env, database: false, environment: environment);
+        env.Set("FACTORY_TEST_STUB_SCRIPTS", null);
+        env.Apply(); WriteAnswer(env);
+        using var host = new GatewayHost();
+        var started = Task.Run(() => host.Server);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(60)), "the gateway did not start");
+        var services = host.Services.GetServices<IHostedService>();
+        Assert.False(services.OfType<PlantTicker>().Single().MayAct!());
+        Assert.False(services.OfType<BaseWatch>().Single().MayAct!());
+        Assert.IsType<InertVerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
+        foreach (var verb in new[] { "get-item", "claim-item", "merge", "complete", "qc-request", "sync-board", "my-items" })
+        {
+            var a = await host.SendAsync("POST", $"/api/v1/verbs/{verb}", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken, "{\"item\":7}");
+            Assert.Equal((503, "inert", 20), (a.Status, a.Code, (int?)a.Json?["exit"] ?? -1));
+        }
+        Assert.Equal(200, (await host.SendAsync("GET", "/health", GatewayEnvironment.ApiPort)).Status);
+        Assert.Equal(200, (await host.SendAsync("GET", "/_build", GatewayEnvironment.ApiPort)).Status);
+        var ready = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        Assert.Equal((503, "engine", environment), (ready.Status, ready.Json?["waitingFor"]?.ToString(), ready.Json?["environment"]?.ToString()));
+        var status = await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
+        Assert.Equal(200, status.Status);
+        Assert.True(status.Json?["engine"]?["inert"]?.GetValue<bool>());
+        Assert.Equal("engine", status.Json?["engine"]?["waitingFor"]?.ToString());
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        // nothing reached the rule script but the gateway's own housekeeping
+        Assert.Empty(StubPwsh.Read(env.StubLog).Where(c => !InertVerbs.Housekeeping.Contains(c.Verb)));
+    }
+
+    [Fact]
+    public void TheTestStandIn_IsRefusedWithoutTheTestHooks()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"instance-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, "{\"messaging\":{\"testHooks\":false}}");
+        try
+        {
+            var cfg = InstanceConfig.Load(path, _ => null);
+            Assert.Throws<InvalidOperationException>(() => EngineOptions.From(cfg, "uat", n => n == "FACTORY_TEST_STUB_SCRIPTS" ? "1" : null));
+            Assert.True(EngineOptions.From(cfg, "uat", _ => null).Inert);
+        }
+        finally { File.Delete(path); }
     }
 
     // ---- 2. v2 configured, no database ----------------------------------------------------------------------------------------------------------------
@@ -130,48 +182,59 @@ public sealed class CutoverSafetyTests
         Assert.Equal([8], gate.Excluded().ToArray());
     }
 
-    sealed class Below : IVerbRouter
-    {
-        public readonly List<string> Calls = [];
-        public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) { Calls.Add(verb); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true}")); }
-    }
+    static EngineOptions NoDatabaseEngine() => new() { Environment = "tdd", Configured = EngineMode.V2, NoDatabase = true };
+    static EngineOptions UnnamedEngine() => new() { Environment = "uat", Configured = EngineMode.V1 };
 
     [Fact]
-    public async Task TheInertRouter_RefusesEveryVerbThatChangesAnything_AndLetsTheReadingOnesThrough()
+    public void AnEnvironmentTheEngineDoesNotAct_In_IsInert_AndSaysWhy()
     {
-        var below = new Below(); var router = new InertVerbRouter(below);
-        foreach (var verb in InertVerbRouter.ReadOnly) Assert.Equal(0, (await router.RunAsync(verb, "{}", TimeSpan.FromSeconds(1))).Code);
-        Assert.Equal(InertVerbRouter.ReadOnly.Count, below.Calls.Count);
-        // (item-pr retargets, renames, closes and readies a pull request; wait-for-checks re-runs a job and saves the re-run: neither is read-only)
-        foreach (var verb in new[] { "claim-item", "merge", "complete", "move-next", "approve-pr", "qc-request", "create-item", "park-item", "accept", "release", "item-pr", "wait-for-checks" })
-        {
-            var a = await router.RunAsync(verb, "{}", TimeSpan.FromSeconds(1));
-            Assert.Equal(20, a.Code); Assert.Equal("database", JsonNode.Parse(a.Output)!["code"]!.ToString());
-        }
-        Assert.Equal(InertVerbRouter.ReadOnly.Count, below.Calls.Count);   // (none of the refused reached v1)
+        Assert.True(NoDatabaseEngine().Inert); Assert.Equal("database", NoDatabaseEngine().InertReason);
+        Assert.True(UnnamedEngine().Inert); Assert.Equal("engine", UnnamedEngine().InertReason);
+        var acting = new EngineOptions { Environment = "tdd", Configured = EngineMode.V2 };
+        Assert.False(acting.Inert); Assert.Null(acting.InertReason);
+        Assert.Equal("engine", UnnamedEngine().Status()["waitingFor"]!.ToString());
+        Assert.True(UnnamedEngine().Reported);
+        Assert.False(new EngineOptions { Environment = "uat", Configured = EngineMode.V1, TestScripts = true }.Inert);   // (the unit tests' stand-in only)
     }
 
-    // The choke point: every call of the rule script, whoever makes it (QcHub.Ps, the item admin and demo endpoints, the webhook's ingest-event), goes through Runner. The runner here has no script at all: a call that reached v1 would throw.
+    // V3.3: an inert gateway refuses every verb, whatever it does: there is no v1 to run in v2's place
+    [Theory]
+    [InlineData("get-item")] [InlineData("my-items")] [InlineData("claim-item")] [InlineData("merge")] [InlineData("complete")] [InlineData("approve-pr")] [InlineData("qc-request")] [InlineData("revocations")] [InlineData("transcript-load")] [InlineData("sync-board")]
+    public async Task TheInertRouter_RefusesEveryVerb_DatabaseWhereV2IsNamed_InertWhereItIsNot(string verb)
+    {
+        var a = await new InertVerbRouter(NoDatabaseEngine()).RunAsync(verb, "{}", TimeSpan.FromSeconds(1));
+        Assert.Equal((20, "database"), (a.Code, JsonNode.Parse(a.Output)!["code"]!.ToString()));
+        var u = await new InertVerbRouter(UnnamedEngine()).RunAsync(verb, "{}", TimeSpan.FromSeconds(1));
+        var o = JsonNode.Parse(u.Output)!;
+        Assert.Equal((20, "inert", false, verb), (u.Code, o["code"]!.ToString(), (bool)o["ok"]!, o["verb"]!.ToString()));
+        Assert.Contains("'uat'", o["reason"]!.ToString());
+    }
+
+    // The choke point: every call of the rule script, whoever makes it (QcHub.Ps, the item admin and demo endpoints, the webhook's ingest-event), goes through Runner. The runner here has no script at all: a call that reached it would fail otherwise.
     [Theory]
     [InlineData("qc-report")] [InlineData("unpark-item")] [InlineData("resettle-item")] [InlineData("publish-demo")] [InlineData("ingest-event")] [InlineData("item-pr")] [InlineData("wait-for-checks")] [InlineData("sync-board")] [InlineData("merge")]
-    public async Task TheRunner_OfAnInertGateway_RefusesWhatChangesAnything_NeverStartingTheScript(string verb)
+    [InlineData("get-item")] [InlineData("journal")] [InlineData("approve-pr")]
+    public async Task TheRunner_OfAnInertGateway_RunsNoScriptButItsHousekeeping(string verb)
     {
-        var runner = new Runner("/nonexistent/factory.ps1") { Inert = () => true };
-        var (code, output) = await runner.RunAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
-        Assert.Equal(20, code); Assert.Equal("database", JsonNode.Parse(output)!["code"]!.ToString());
-        (code, output) = await runner.RunScriptAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
-        Assert.Equal(20, code); Assert.Equal("database", JsonNode.Parse(output)!["code"]!.ToString());
+        foreach (var (engine, exit, code) in new[] { (NoDatabaseEngine(), 20, "database"), (UnnamedEngine(), 20, "inert") })
+        {
+            var runner = new Runner("/nonexistent/rule.ps1") { Inert = () => engine };
+            var (c, output) = await runner.RunAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
+            Assert.Equal((exit, code), (c, JsonNode.Parse(output)!["code"]!.ToString()));
+            (c, output) = await runner.RunScriptAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
+            Assert.Equal((exit, code), (c, JsonNode.Parse(output)!["code"]!.ToString()));
+        }
     }
 
     [Theory]
-    [InlineData("revocations")] [InlineData("revoke-worker")] [InlineData("operator-release")] [InlineData("operator-releases")] [InlineData("transcript-save")] [InlineData("get-item")]
-    public async Task TheRunner_OfAnInertGateway_StillRunsTheHousekeepingAndTheReadingVerbs(string verb)
+    [InlineData("revocations")] [InlineData("revoke-worker")] [InlineData("operator-release")] [InlineData("operator-releases")] [InlineData("transcript-save")] [InlineData("transcript-load")]
+    public async Task TheRunner_OfAnInertGateway_StillRunsItsHousekeeping(string verb)
     {
-        // (the script is not there: the call gets as far as starting it, and the refusal "database" is not what comes back)
-        var runner = new Runner("/nonexistent/factory.ps1") { Inert = () => true };
+        // (the script is not there: the call gets as far as starting it, and the inert refusal is not what comes back)
+        var runner = new Runner("/nonexistent/rule.ps1") { Inert = () => UnnamedEngine() };
         string? code = null;
         try { var (_, output) = await runner.RunScriptAsync(verb, "{}", TimeSpan.FromSeconds(5)); code = JsonNode.Parse(output)?["code"]?.ToString(); } catch (Exception) { code = "started"; }
-        Assert.NotEqual("database", code);
+        Assert.NotEqual("inert", code);
     }
 
     [Fact]

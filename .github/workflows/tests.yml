@@ -17,8 +17,8 @@
 # exists; each Tier 1 job uploads its records as the artifact writes-<job>-<attempt> (tests/scenarios/golden/README.md says how to re-record).
 # The jobs unit (tests/Gateway.Tests, the gateway in process: routes and their guards, start and stop, in 4 shards) and src (the smoke test and the
 # test projects of src/) run the quick tests in minutes. SQL Server is a service of those two and of the Tier 1 shards: every Tier 1 process makes a database of its own on it.
-# The job "Image starts without a database" builds the image and starts it with no FACTORY_DB_CONNECTION two ways (uat; tdd with v2 configured): /ready must answer 200, 503 "database"
-# (v2 inert, up).
+# The job "Image starts without a database" builds the image and starts it with no FACTORY_DB_CONNECTION two ways, and both are inert and up (V3.3): uat, which engine.v2Environments
+# does not name, must answer /ready 503 "engine"; tdd with v2 configured 503 "database"; /health 200 throughout.
 name: Tests
 
 on:
@@ -460,42 +460,34 @@ jobs:
           }
           running() { [ "$(docker inspect --format '{{.State.Running}}' "$1")" = "true" ]; }
           fail() { echo "::error::$2"; docker logs "$1" 2>&1 | tail -n 80; exit 1; }
-          ready_200() {
-            local name="$1" code=000
+          # inert NAME REASON: /ready answers 503 waitingFor REASON within two minutes and goes on answering it for 30 seconds, /health 200, /_build answers
+          inert() {
+            local name="$1" reason="$2" code=000
             for i in $(seq 1 60); do
-              running "$name" || fail "$name" "the container stopped before it was ready"
+              running "$name" || fail "$name" "the container stopped: an inert gateway must stay up"
               code="$(curl -s -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' http://127.0.0.1:18080/ready || true)"
-              [ "$code" = "200" ] && break
+              if [ "$code" = "503" ] && grep -q "\"waitingFor\":\"$reason\"" "$RUNNER_TEMP/ready.json"; then break; fi
               sleep 2
             done
             echo "$name /ready: $code"; cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
-            [ "$code" = "200" ] || fail "$name" "/ready did not answer 200 within 2 minutes (last answer: $code)"
+            if [ "$code" != "503" ] || ! grep -q "\"waitingFor\":\"$reason\"" "$RUNNER_TEMP/ready.json"; then fail "$name" "/ready did not answer 503 waitingFor $reason (last answer: $code)"; fi
             curl -fsS http://127.0.0.1:18080/_build; echo
-            curl -fsS -o /dev/null http://127.0.0.1:18080/health
+            for i in $(seq 1 15); do
+              running "$name" || fail "$name" "the container stopped within 30 seconds of its start"
+              [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/health || true)" = "200" ] || fail "$name" "/health did not answer 200"
+              [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ready || true)" = "503" ] || fail "$name" "/ready stopped answering 503"
+              sleep 2
+            done
           }
 
-          echo "== 1. uat, no database"
+          echo "== 1. uat, which v2Environments does not name: inert (V3.3: no v1 runs there any more)"
           start fworker-start-uat -e FACTORY_ENVIRONMENT=uat
-          ready_200 fworker-start-uat
+          inert fworker-start-uat engine
           docker rm --force fworker-start-uat >/dev/null
 
           echo "== 2. tdd, v2 configured, no database: inert"
           start fworker-start-v2 -e FACTORY_ENVIRONMENT=tdd -v "$RUNNER_TEMP/instance.v2.json:/app/config/instance.v2.json:ro" -e FACTORY_CONFIG=/app/config/instance.v2.json
-          code=000
-          for i in $(seq 1 60); do   # (it answers within two minutes; then it must go on answering the same for 30 seconds)
-            running fworker-start-v2 || fail fworker-start-v2 "the container stopped: v2 with no database must stay up"
-            code="$(curl -s -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' http://127.0.0.1:18080/ready || true)"
-            if [ "$code" = "503" ] && grep -q '"waitingFor":"database"' "$RUNNER_TEMP/ready.json"; then break; fi
-            sleep 2
-          done
-          echo "/ready: $code"; cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
-          if [ "$code" != "503" ] || ! grep -q '"waitingFor":"database"' "$RUNNER_TEMP/ready.json"; then fail fworker-start-v2 "/ready did not answer 503 waitingFor database (last answer: $code)"; fi
-          for i in $(seq 1 15); do
-            running fworker-start-v2 || fail fworker-start-v2 "the container stopped within 30 seconds of its start"
-            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/health || true)" = "200" ] || fail fworker-start-v2 "/health did not answer 200"
-            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ready || true)" = "503" ] || fail fworker-start-v2 "/ready stopped answering 503"
-            sleep 2
-          done
+          inert fworker-start-v2 database
           docker rm --force fworker-start-v2 >/dev/null
 
       - name: Stop the containers

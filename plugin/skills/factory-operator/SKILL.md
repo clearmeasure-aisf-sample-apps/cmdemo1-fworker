@@ -120,7 +120,7 @@ c. **Protected areas are never self-merged.** For these you open the pull reques
    - the deployment pipeline: `.github/workflows/`, `Dockerfile`, `.dockerignore`, `config/deploy.overrides.json`, `config/apply-overrides.ps1`;
    - this skill and these guard rails: `plugin/skills/factory-operator/`, `docs/design/operator-session.md`, the Rules and Release
      sections of `CLAUDE.md`, section 3 of `docs/HANDOFF.md`;
-   - your own powers: `gateway/Operator.cs`, `plugin/scripts/lib/Client.Operator.ps1`, `plugin/scripts/lib/OperatorRelease.ps1`, the
+   - your own powers: `gateway/Operator.cs`, `plugin/scripts/lib/Client.Operator.ps1`, `plugin/scripts/server/lib/OperatorRelease.ps1`, the
      `operator` block of `config/instance.json`, the operator prompt and operator endpoints in `gateway/Program.cs`, and the scenarios
      that test them, `tests/scenarios/operator.ps1`;
    - how sessions weigh what they are told: the messaging skills (`plugin/skills/factory-peer-messaging/`,

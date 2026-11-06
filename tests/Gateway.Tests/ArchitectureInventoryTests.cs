@@ -194,7 +194,7 @@ public class ArchitectureInventoryTests
     // ---- the server scripts V3.3 deleted ----------------------------------------------------------------------------------------------------------
 
     /// <summary>The rule-script files V3.3 deleted: the GitHub-ref lease with the scripts' fencing (Leader.ps1) and the ref snapshot of the plant (PlantSnapshot.ps1; its transcript verbs live in Transcripts.ps1).</summary>
-    static readonly string[] DeletedScripts = ["plugin/scripts/lib/Leader.ps1", "plugin/scripts/lib/PlantSnapshot.ps1"];
+    static readonly string[] DeletedScripts = ["plugin/scripts/lib/Leader.ps1", "plugin/scripts/lib/PlantSnapshot.ps1", "plugin/scripts/lib/Metrics.ps1", "plugin/scripts/lib/Verbs.Manager.ps1", "plugin/scripts/lib/Replenish.ps1", "plugin/scripts/lib/Verbs.Keeper.ps1"];
 
     /// <summary>The verbs those scripts served: the inventory called them retired, no gateway path called them and the verb route refused them to every caller.</summary>
     static readonly string[] DeletedVerbs = ["leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-clear", "plant-snapshot-await"];
@@ -228,6 +228,57 @@ public class ArchitectureInventoryTests
         var list = Regex.Match(factory, @"\$ServerVerbs\s*=\s*@\((?<body>[^)]*)\)").Groups["body"].Value;
         foreach (var verb in DeletedVerbs) if (list.Contains($"'{verb}'", StringComparison.Ordinal)) problems.Add($"plugin/scripts/factory.ps1: $ServerVerbs names '{verb}' again");
         Assert.True(problems.Count == 0, "What V3.3 deleted of the server scripts is back (a decision: edit the lists of this test in the same pull request):\n  " + string.Join("\n  ", problems));
+    }
+
+    // ---- V3.3, the second part: the client is client only, the gateway's rule scripts are a fixed few ---------------------------------------------
+
+    /// <summary>What plugin/scripts/lib may hold: the client's files (a worker downloads them). A server library here again is a server mode of the client again.</summary>
+    static readonly string[] ClientLibs = ["Client.Build.ps1", "Client.Keeper.ps1", "Client.Manager.ps1", "Client.Messages.ps1", "Client.Operator.ps1", "Client.Own.ps1", "Client.Plugin.ps1",
+        "Client.Subscribe.ps1", "Config.ps1", "Models.ps1", "Paths.ps1", "Progress.ps1"];
+
+    /// <summary>The gateway's rule-script libraries (plugin/scripts/server/lib), what the verbs of rule.ps1 still reach. Metrics, Verbs.Manager, Verbs.Keeper and Replenish are gone: nothing left reaches them.</summary>
+    static readonly string[] ServerLibs = ["Apps.ps1", "BaseUpdate.ps1", "Board.ps1", "Checks.ps1", "Core.ps1", "Journal.ps1", "Models.ps1", "OperatorRelease.ps1", "Owner.ps1", "Prs.ps1", "Qc.ps1",
+        "Transcripts.ps1", "Verbs.Delivery.ps1", "Verbs.Inspect.ps1", "Verbs.Item.ps1", "Verbs.Merge.ps1", "Verbs.Pr.ps1", "Verbs.Sweep.ps1"];
+
+    /// <summary>The verbs a rule script still answers: the fallbacks of the routed verbs (the hybrid merge, the merge policy other than auto, the transcript ref store, ingest-event and journal without their parts) and the gateway's housekeeping, which an inert gateway still runs (InertVerbs.Housekeeping).</summary>
+    static readonly string[] ScriptVerbs = ["merge", "approve-pr", "clear-hold", "base-watch", "base-update-branch", "transcript-save", "transcript-load", "transcript-prune", "ingest-event", "journal",
+        "revocations", "revoke-worker", "operator-releases", "operator-release"];
+
+    static string[] FileNames(params string[] dir) => Directory.EnumerateFiles(Path.Combine([Root, .. dir]), "*.ps1").Select(f => Path.GetFileName(f)!).Order(StringComparer.Ordinal).ToArray();
+
+    [Fact]
+    public void TheClientHasNoServerMode_AndTheGatewaysRuleScriptsAreTheFixedFew()
+    {
+        var problems = new List<string>();
+        // the client
+        var factory = ScriptCode(File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "factory.ps1")));
+        if (Regex.IsMatch(factory, @"\$ServerVerbs\b|\$NoLockVerbs\b|Use-ItemLock|'Verb_'")) problems.Add("plugin/scripts/factory.ps1 has a server mode again ($ServerVerbs, the verb dispatch or the item lock)");
+        if (!factory.Contains("'no-server-mode'", StringComparison.Ordinal)) problems.Add("plugin/scripts/factory.ps1 no longer refuses --server (no-server-mode)");
+        foreach (var f in FileNames("plugin", "scripts", "lib").Except(ClientLibs)) problems.Add($"plugin/scripts/lib/{f}: not a client file (the server's libraries are plugin/scripts/server/lib)");
+        foreach (var f in Directory.EnumerateFiles(Path.Combine(Root, "plugin"), "*.ps1", SearchOption.AllDirectories).Where(f => !Rel(f).StartsWith("plugin/scripts/server/", StringComparison.Ordinal)))
+        {
+            var code = ScriptCode(File.ReadAllText(f));
+            if (Regex.IsMatch(code, @"server/lib|(?m)^function Verb_")) problems.Add($"{Rel(f)}: a client file loads a server library or defines a server verb");
+            // a client script that dot-sources a deleted library fails only when that path runs (worker-token loaded Core.ps1)
+            foreach (Match m in Regex.Matches(code, @"Join-Path\s+\$PSScriptRoot\s+['""]([^'""$]+\.ps1)['""]"))
+                if (!File.Exists(Path.Combine(Path.GetDirectoryName(f)!, m.Groups[1].Value))) problems.Add($"{Rel(f)}: loads {m.Groups[1].Value}, which is not there");
+        }
+        // the server
+        var server = FileNames("plugin", "scripts", "server", "lib");
+        if (!server.SequenceEqual(ServerLibs.Order(StringComparer.Ordinal))) problems.Add($"plugin/scripts/server/lib holds [{string.Join(", ", server)}], the test pins [{string.Join(", ", ServerLibs)}]");
+        var rule = File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "server", "rule.ps1"));
+        var verbs = Regex.Matches(Regex.Match(rule, @"\$ServerVerbs\s*=\s*@\((?<b>[^)]*)\)").Groups["b"].Value, @"'([a-z0-9-]+)'").Select(m => m.Groups[1].Value).ToArray();
+        if (!verbs.Order(StringComparer.Ordinal).SequenceEqual(ScriptVerbs.Order(StringComparer.Ordinal))) problems.Add($"server/rule.ps1 answers [{string.Join(", ", verbs)}], the test pins [{string.Join(", ", ScriptVerbs)}]");
+        foreach (var f in server)
+            foreach (Match m in Regex.Matches(File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "server", "lib", f)), @"(?m)^function Verb_([a-z0-9_]+)\b"))
+                if (!ScriptVerbs.Contains(m.Groups[1].Value.Replace('_', '-'))) problems.Add($"plugin/scripts/server/lib/{f}: Verb_{m.Groups[1].Value} is no verb of rule.ps1 (v2 answers it alone)");
+        // the inert gateway's housekeeping is what rule.ps1 answers of it, and the gateway runs rule.ps1, never the client
+        foreach (var v in InertVerbs.Housekeeping) if (!ScriptVerbs.Contains(v)) problems.Add($"InertVerbs.Housekeeping names '{v}', which no rule script answers");
+        var options = File.ReadAllText(Path.Combine(Root, "gateway", "Configuration", "GatewayOptions.cs"));
+        if (!options.Contains("Entry = Path.Combine(scriptsDir, \"server\", \"rule.ps1\")", StringComparison.Ordinal)) problems.Add("gateway/Configuration/GatewayOptions.cs: the Runner's entry is not plugin/scripts/server/rule.ps1");
+        // and what a worker downloads leaves the gateway's rule scripts out
+        if (PluginArchive.Files(Path.Combine(Root, "plugin")).Any(f => Rel(f).StartsWith("plugin/scripts/server/", StringComparison.Ordinal))) problems.Add("the plugin archive carries plugin/scripts/server/");
+        Assert.True(problems.Count == 0, "The client and the gateway's rule scripts (V3.3):\n  " + string.Join("\n  ", problems));
     }
 
     [Fact]

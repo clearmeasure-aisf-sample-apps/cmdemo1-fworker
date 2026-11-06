@@ -36,7 +36,7 @@ public sealed class BoardVerbParityTests : IDisposable
     async Task<(int Exit, JsonObject Answer)> Script(string verb, string stdin)
     {
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", Path.Combine(Root(), "plugin", "scripts", "factory.ps1"), "--server", verb }) psi.ArgumentList.Add(a);
+        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", Path.Combine(Root(), "plugin", "scripts", "server", "rule.ps1"), "--server", verb }) psi.ArgumentList.Add(a);
         psi.Environment["FACTORY_CONFIG"] = Path.Combine(Root(), "config", "instance.json");
         psi.Environment["FACTORY_STATE_DIR"] = Path.Combine(dir, "state"); psi.Environment["FACTORY_DATA_DIR"] = Path.Combine(dir, "data");
         psi.Environment["GH_TOKEN"] = "unset"; psi.Environment["FACTORY_ENV_SCOPE"] = "0"; psi.Environment["FACTORY_ENVIRONMENT"] = "tdd";

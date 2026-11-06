@@ -1,6 +1,5 @@
 # Core: configuration, rejection type, GitHub REST/GraphQL, per-item lock. Server side only: GH_TOKEN is read here and nowhere else.
 Set-StrictMode -Version Latest
-$script:Cfg = $null
 $script:ServerLogin = $null
 $script:AsToken = $null
 # The rate limit GitHub reported in this process, per resource (core, graphql): the latest answer's numbers. The server wrapper (factory.ps1) hands
@@ -8,11 +7,10 @@ $script:AsToken = $null
 $script:GhRate = @{}
 $script:GhCalls = 0; $script:OctoCalls = 0; $script:GhTrace = $null   # (requests made by this process, for a verb that reports what it read: auto-promote)
 # Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless the gateway runs with FACTORY_TEST_CAUSE_HEADER=1: the cause
-# id of the harness's call this rule-script run serves (factory.ps1 --server sets $script:FactoryCause from the "_cause" field the gateway adds),
+# id of the harness's call this rule-script run serves (server/rule.ps1 --server sets $script:FactoryCause from the "_cause" field the gateway adds),
 # sent as X-Fake-Cause with every write so the fake tells the writes the call caused from background work. $null when none, and when this file
 # was loaded without factory.ps1 (the smoke test): the read never fails under StrictMode.
 function Get-FactoryCause { $c = Get-Variable -Name FactoryCause -Scope Script -ValueOnly -ErrorAction SilentlyContinue; if ($c) { return "$c" }; return $null }
-
 
 class FactoryReject : System.Exception {
     [int]$Exit
@@ -26,22 +24,6 @@ class FactoryReject : System.Exception {
 # Exit codes: 0 ok, 2 usage, 10 gate refused, 11 stale, 12 not found, 20 retryable external, 21 accepted/pending, 30 config/secret, 40 claim held.
 function Reject([int]$Exit, [string]$Code, [string]$Reason, [hashtable]$Extra = @{}) {
     throw [FactoryReject]::new($Exit, $Code, $Reason, $Extra)
-}
-
-function Get-FactoryRoot { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
-
-function Get-Cfg {
-    if ($script:Cfg) { return $script:Cfg }
-    $path = $env:FACTORY_CONFIG
-    if (-not $path) { $path = Join-Path (Split-Path -Parent (Get-FactoryRoot)) 'config/instance.json' }
-    if (-not (Test-Path $path)) { Reject 30 'config-missing' "instance config not found: $path" }
-    $script:Cfg = Get-Content -Raw $path | ConvertFrom-Json -AsHashtable
-    # Test overrides: FACTORY_TIMING_<name>=value
-    foreach ($k in @($script:Cfg.timing.Keys)) {
-        $v = [Environment]::GetEnvironmentVariable("FACTORY_TIMING_$k")
-        if ($v) { $script:Cfg.timing[$k] = [double]$v }
-    }
-    return $script:Cfg
 }
 
 function Get-StateDir {
@@ -180,24 +162,4 @@ function Use-ItemLock([int]$Item, [scriptblock]$Body, [int]$WaitSeconds = 45) {
     try { & $Body } finally { $fs.Dispose() }
 }
 
-# Issue 411: the board intake. A verb that creates a work item (the keeper's New-KeeperItem) holds it from the new issue until its card is in its
-# column; the sweep's board guard places a card only under it. Without it a guard that listed the labelled issues in between found the card without
-# a column and placed it itself, so the verb's own move never happened. A lock of this machine, as the item lock (one gateway sweeps the board).
-# (The body's variables are the caller's: PowerShell scopes a script block dynamically, so this function's own names are unusual.)
-function Use-IntakeLock([scriptblock]$IntakeBody, [int]$IntakeWaitSeconds = 45) {
-    $intakeLockPath = Join-Path (Get-StateDir) 'board-intake.lock'
-    $intakeLockStream = $null
-    $intakeDeadline = (Get-Date).AddSeconds($IntakeWaitSeconds)
-    while ($true) {
-        try { $intakeLockStream = [IO.File]::Open($intakeLockPath, 'OpenOrCreate', 'ReadWrite', 'None'); break }
-        catch { if ((Get-Date) -gt $intakeDeadline) { Reject 20 'intake-busy' 'another work item is being put on the board' @{ retryAfterSeconds = 5 } }; Start-Sleep -Milliseconds 300 }
-    }
-    try { & $IntakeBody } finally { $intakeLockStream.Dispose() }
-}
-
 function Test-NameIn([string]$Name, $List) { foreach ($x in $List) { if ($x -ieq $Name) { return $true } }; return $false }
-function Get-ColumnIndex([string]$Name) {
-    $ai = (Get-Cfg).columns.ai
-    for ($i = 0; $i -lt $ai.Count; $i++) { if ($ai[$i] -ieq $Name) { return $i } }
-    return -1
-}

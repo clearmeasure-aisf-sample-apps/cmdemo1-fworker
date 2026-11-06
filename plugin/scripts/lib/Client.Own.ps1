@@ -73,8 +73,8 @@ function Invoke-WorkerToken($a) {
     if (-not $secret) { Write-Out @{ ok = $false; code = 'config'; reason = 'FACTORY_TOKEN_SECRET is not set on this host' } 30 }
     $name = "$($a.name)"
     if ($name -notmatch '^[A-Za-z0-9_-]{1,40}$') { Write-Out @{ ok = $false; code = 'usage'; reason = 'name may use letters, digits, - and _ (40 at most)' } 2 }
-    . (Join-Path $PSScriptRoot 'Core.ps1')
-    $cfg = try { Get-Cfg } catch [FactoryReject] { @{} }
+    . (Join-Path $PSScriptRoot 'Config.ps1')
+    $cfg = try { Get-Cfg } catch { @{} }
     $role = if ($a.ContainsKey('role')) { "$($a.role)" } else { 'worker' }
     $mgr = if ($cfg -is [System.Collections.IDictionary] -and $cfg.Contains('manager') -and $cfg.manager -is [System.Collections.IDictionary]) { $cfg.manager } else { @{} }
     $msg = if ($cfg -is [System.Collections.IDictionary] -and $cfg.Contains('messaging') -and $cfg.messaging -is [System.Collections.IDictionary]) { $cfg.messaging } else { @{} }

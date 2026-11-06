@@ -105,6 +105,7 @@ public sealed class GatewayEnvironment : IDisposable
         Set("FACTORY_DEV_TOKEN", AdminToken);
         Set("FACTORY_WEBHOOK_SECRET", new string('x', 40));
         Set("FACTORY_TEST_SKIP_REVOCATIONS", "1");
+        Set("FACTORY_TEST_STUB_SCRIPTS", "1");   // V3.3: an environment the engine does not act in is inert; the route fixtures run their verbs through the stub pwsh instead (EngineOptions.TestScripts)
         Set("FACTORY_SWEEP_SECONDS", "3600");
         Set("FACTORY_LEADER_LEASE", "0");
         Set("FACTORY_PLANT_SNAPSHOT", "0");

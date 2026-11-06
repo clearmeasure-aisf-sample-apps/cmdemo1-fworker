@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 // Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md: Caused and background writes); inert unless FACTORY_TEST_CAUSE_HEADER=1.
 // The harness tags each call of the scripted worker with a cause id, which the client sends as X-Fake-Cause. While the gateway serves that
 // request, the id is held in a request-scoped box (the middleware in Program.cs), and every rule-script run started meanwhile gets it as the
-// "_cause" field of its arguments (Runner.RunProcessAsync), which factory.ps1 --server takes out and sends as X-Fake-Cause with every write. So
+// "_cause" field of its arguments (Runner.RunProcessAsync), which the rule script (server/rule.ps1 --server) takes out and sends as X-Fake-Cause with every write. So
 // the fake tells the writes a call caused from the gateway's background work by where they came from, not by when.
 static class TestCause
 {

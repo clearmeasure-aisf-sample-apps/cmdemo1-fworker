@@ -28,7 +28,7 @@ sealed class GatewayOptions
         return new GatewayOptions
         {
             ScriptsDir = scriptsDir,
-            Entry = Path.Combine(scriptsDir, "factory.ps1"),
+            Entry = Path.Combine(scriptsDir, "server", "rule.ps1"),   // V3.3: the rule scripts the gateway still runs; factory.ps1 is the client
             ApiToken = apiToken,
             WebhookSecret = webhookSecret,
             SsePingSeconds = int.TryParse(env("FACTORY_SSE_PING_SECONDS"), out var sps) && sps > 0 ? sps : 25,

@@ -38,7 +38,7 @@ function Get-SecretRegexes {
     if ($script:SecretRegexes) { return $script:SecretRegexes }
     $list = @()
     try {
-        . (Join-Path $PSScriptRoot 'Core.ps1')
+        . (Join-Path $PSScriptRoot 'Config.ps1')
         $c = Get-Cfg
         if ($c.ContainsKey('secrets') -and $c.secrets.ContainsKey('patterns')) { $list = @($c.secrets.patterns | Where-Object { $_ }) }
     } catch { }

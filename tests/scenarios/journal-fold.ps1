@@ -1,9 +1,9 @@
-# The journal folds its repeats (plugin/scripts/lib/Journal.ps1, issue 93): a repeated matched, waiting or reassigned line edits the comment of its
+# The journal folds its repeats (plugin/scripts/server/lib/Journal.ps1, issue 93): a repeated matched, waiting or reassigned line edits the comment of its
 # kind, a line of another kind (offered aside) ends the folds, only new comments count against the cap of 30, and the state keeps per-kind counts.
 # Runs in the owner suite; the rule script journal is called directly (as the gateway calls it), on an item that is not factory work, so no sweep
 # touches it.
 
-function Jf-Journal([int]$n, [string]$Ev, [string]$Key, [hashtable]$Fields = @{}) { Pm-Server 'journal' @{ item = $n; event = $Ev; key = $Key; fields = $Fields } }
+function Jf-Journal([int]$n, [string]$Ev, [string]$Key, [hashtable]$Fields = @{}) { Sg-Server 'journal' @{ item = $n; event = $Ev; key = $Key; fields = $Fields } }
 # (written to the pipeline one by one: callers wrap them in @())
 function Jf-Comments([int]$n) { (Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=' } }
 function Jf-Events([int]$n) { Jf-Comments $n | ForEach-Object { [regex]::Match("$($_.body)", 'plant event=([a-z-]+)').Groups[1].Value } }

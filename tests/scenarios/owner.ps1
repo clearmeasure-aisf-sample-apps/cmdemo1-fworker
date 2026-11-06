@@ -606,7 +606,7 @@ $OwnerScenarios['owner: an item that waits for its pinned worker has matched fir
 # ---- the docs-only marker in the body counts only for items from before the cutoff (backlog d) ----
 $OwnerScenarios['docs-only: the body marker of an item without the state field counts only for items created before the cutoff [full]'] = {
     $lab = @('factory worker', 'worker:nobody-here')   # pinned to a session that does not exist: the plant offers these items to nobody
-    $get = { param($i) Qc-Server 'get-item' @{ item = $i } }
+    $get = { param($i) F 'w1' @('get-item', '--item', $i) }   # (V3.3: v2's get-item, the verb route; there is no rule script of it)
     # the docs-only marker in the body of an item without the state field: only for items created before the cutoff
     $mk = "x`n`n## Technical Design`n<!-- aisf:docs-only -->`n- a sentence."
     $d0 = (Fake 'issue' @{ title = 'Old docs item'; body = $mk; labels = $lab; column = 'Development'; createdAt = '2019-06-01T00:00:00Z' }).number
@@ -679,22 +679,6 @@ function Pm-ToValidation([string[]]$Labels = $OwnerLabels) {
     Do-DevComplete $n | Out-Null
     [void](Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Functional Testing' })
     return @{ n = $n; pr = $pr }
-}
-# The rule script run directly with a copy of the suite's config (as an older gateway, or one that stopped right after recording, would leave it).
-function Pm-Server([string]$Verb, $Body, [hashtable]$Cfg = @{}) {
-    $cfgObj = Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable; foreach ($k in $Cfg.Keys) { $cfgObj[$k] = $Cfg[$k] }
-    $path = Join-Path $script:Work "pm-$([guid]::NewGuid().ToString('N').Substring(0,6)).json"; $cfgObj | ConvertTo-Json -Depth 12 | Set-Content $path
-    $old = $env:FACTORY_CONFIG; $env:FACTORY_CONFIG = $path
-    try {
-        $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') --server $Verb 2>$null
-        $j = try { ($out -join "`n") | ConvertFrom-Json -AsHashtable } catch { @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = $LASTEXITCODE }; return $j
-    } finally { $env:FACTORY_CONFIG = $old }
-}
-# A PASS recorded by the rule script alone, with the gateway's merge off for that one call: nothing merged it, as after a session that stopped.
-function Pm-QuietPass($x) {
-    $r = F 'w1' @('claim-item', '--item', $x.n, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
-    $rv = F 'w1' @('record-review', '--item', $x.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "pmrv$($x.n).md" "Criteria exercised.`nREVIEW: COMPLETE"))
-    return Pm-Server 'validation-verdict' @{ item = $x.n; passed = $true; summary = 'Both criteria met.'; pr = $x.pr; review_ref = $rv.review_ref; holder = 'w1' } @{ gatewayMerge = $false }
 }
 function Pm-MergeComments([int]$n, [int]$pr) { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "squash-merged PR #$pr " }).Count }
 

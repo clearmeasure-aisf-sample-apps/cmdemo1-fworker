@@ -16,16 +16,6 @@ function Get-ProjectMeta {
     return $meta
 }
 
-function Get-BoardColumns { @((Get-ProjectMeta).options.Keys) }
-
-function Get-NextColumn([string]$Column) {
-    $cols = Get-BoardColumns
-    for ($i = 0; $i -lt $cols.Count; $i++) { if ($cols[$i] -ieq $Column) { if ($i + 1 -lt $cols.Count) { return $cols[$i + 1] } else { return $null } } }
-    return $null
-}
-
-function Get-LastColumn { $cols = Get-BoardColumns; $cols[$cols.Count - 1] }
-
 # Everything one verb needs to know about an issue and its card.
 function Get-ItemInfo([int]$Item) {
     $c = Get-Cfg
@@ -68,24 +58,6 @@ function Test-ItemInScope($Labels) {
     return ($envs.Count -eq 1 -and "$($envs[0])" -ieq $mine)
 }
 
-# Labels of an issue. GitHub creates a label that does not exist yet when it is added to an issue; removing one the issue does not carry is a 404,
-# which is no failure here.
-function Add-ItemLabels([int]$Item, [string[]]$Names) { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/labels" -Body @{ labels = @($Names) } | Out-Null }
-function Remove-ItemLabel([int]$Item, [string]$Name) { Invoke-Gh -Method DELETE -Path "$(Get-RepoPath)/issues/$Item/labels/$([uri]::EscapeDataString($Name))" -Allow 404 | Out-Null }
-
-# Priority (docs/design/plant-manager.md 10e): a label priority:top or priority:high (priorityLabels of the config) puts an item ahead of the others
-# when the plant offers work; no label is normal. Pins keep their place: a pinned item still takes its worker's slot first.
-function Get-PriorityLabels {
-    $c = Get-Cfg; $p = if (Test-Has $c 'priorityLabels') { $c.priorityLabels } else { @{} }
-    return @{ top = $(if (Test-Has $p 'top') { "$($p.top)" } else { 'priority:top' }); high = $(if (Test-Has $p 'high') { "$($p.high)" } else { 'priority:high' }) }
-}
-function Get-ItemPriority($Labels) {
-    $pl = Get-PriorityLabels
-    if (Test-NameIn $pl.top $Labels) { return 'top' }
-    if (Test-NameIn $pl.high $Labels) { return 'high' }
-    return ''
-}
-
 # Issue 109: the labels by which a person holds an item for themselves (holdLabels, default "hold:owner"). Honoured like the Demo label: no offer,
 # an open offer is dropped (the sweep no longer asks for it), claim-item is refused. Returns the first such label the item carries, or ''.
 function Get-HoldLabel($Labels) {
@@ -101,12 +73,6 @@ function Move-Card([hashtable]$Info, [string]$Column) {
     if (-not $Info.cardId) { Reject 10 'not-on-board' "issue #$($Info.number) is not on the board" }
     $m = 'mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }'
     Invoke-GhGraphQL $m @{ p = $meta.projectId; i = $Info.cardId; f = $meta.fieldId; o = $meta.options[$Column] } | Out-Null
-}
-
-function Add-ToBoard([string]$IssueNodeId) {
-    $meta = Get-ProjectMeta
-    $m = 'mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }'
-    (Invoke-GhGraphQL $m @{ p = $meta.projectId; c = $IssueNodeId }).addProjectV2ItemById.item.id
 }
 
 # All cards on the board with their issue facts: one paged query per sweep.
@@ -137,10 +103,6 @@ query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(numbe
         $after = $items.pageInfo.endCursor
     } while ($items.pageInfo.hasNextPage)
     return $out
-}
-
-function Close-Issue([int]$Item) {
-    Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/$Item" -Body @{ state = 'closed'; state_reason = 'completed' } | Out-Null
 }
 
 # The last line of a comment written for an AI session's verb: "AI session: [<name>](<url>)", the name alone without a page; '' when the gateway
@@ -279,17 +241,6 @@ function Limit-StateBudget($S, [scriptblock]$Measure) {
     return @{ trimmed = ($dropped.Count -gt 0); before = $before; after = $len; dropped = $dropped }
 }
 
-# Reads the state, applies $Mutate (called with the holder), saves; on a state-conflict it reads again and applies again, up to $Tries times, then the
-# conflict is thrown. $Mutate must be repeatable: it runs on a fresh read each time. Returns the holder that was saved.
-function Update-State([int]$Item, [scriptblock]$Mutate, [int]$Tries = 3) {
-    for ($i = 1; ; $i++) {
-        $f = Get-State $Item
-        & $Mutate $f
-        try { Save-State $Item $f; return $f }
-        catch [FactoryReject] { if ($_.Exception.Code -ne 'state-conflict' -or $i -ge $Tries) { throw } }
-    }
-}
-
 # Writes the state comment. Refused (FactoryReject 11 'state-conflict') when the comment changed since it was read: it is read again right before the
 # PATCH and its rev compared with the one the holder was read at. The caller reads the state again and retries (Update-State), or reports. GitHub has
 # no conditional PATCH for comments, so this narrows the window of a stale write; it cannot close it.
@@ -334,8 +285,3 @@ function Set-Park($State, [string]$Reason, [double]$Minutes) {
     $State.park = @{ reason = $Reason; at = ConvertTo-Iso (Get-UtcNow); until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($Minutes)) }
 }
 
-function Test-ClaimLive($State) {
-    if (-not (Test-Has $State 'claim')) { return $false }
-    $u = ConvertFrom-Iso $State.claim.lease_until
-    return ($u -and $u -gt (Get-UtcNow))
-}

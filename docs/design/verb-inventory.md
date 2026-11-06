@@ -7,7 +7,7 @@ fails when the three disagree: the `$ServerVerbs` list of `factory.ps1`, the JSO
 `gateway/Policies/VerbPolicy.cs`, and the `$NoLockVerbs` list and `UseEndpointReason` for the two flags of the JSON). Adding or removing a verb
 means a row here and an entry in the JSON in the same pull request.
 
-**Count: 68.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan; the five `retired` verbs (`plant-snapshot-save`, `-load`, `-clear`, `-await` and `leader-lease`, `lib/PlantSnapshot.ps1` and `lib/Leader.ps1`) left in V3.3: the plant is kept in SQL and the SQL lock is the only lease, no gateway path called them and the verb route refused them to every caller. The transcript verbs moved to `lib/Transcripts.ps1`.
+**Count: 68.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan; the five `retired` verbs (`plant-snapshot-save`, `-load`, `-clear`, `-await` and `leader-lease`, `lib/PlantSnapshot.ps1` and `lib/Leader.ps1`) left in V3.3: the plant is kept in SQL and the SQL lock is the only lease, no gateway path called them and the verb route refused them to every caller. The transcript verbs moved to `lib/Transcripts.ps1`. In slice 5 the rule scripts moved to `server/rule.ps1` and `server/lib/` and keep only 14 verbs (the routed verbs' fallbacks and the housekeeping); the other 54 have no script (`script: none`) and an environment the engine does not act in refuses them (`code: inert`).
 
 ## Columns
 
@@ -26,71 +26,71 @@ means a row here and an entry in the JSON in the same pull request.
 
 | Verb | v1 script | Owner | Destination | Callers |
 |---|---|---|---|---|
-| `get-item` | `Verbs.Item.ps1` | WorkItemSaga | saga | owner,inspector,manager,keeper,qc |
-| `append-body` | `Verbs.Item.ps1` | WorkItemSaga | saga | owner |
-| `comment` | `Verbs.Item.ps1` | WorkItemSaga | saga | owner |
-| `claim-item` | `Verbs.Item.ps1` | WorkItemSaga | saga | owner |
-| `accept` | `Owner.ps1` | WorkItemSaga | saga | owner,inspector,qc |
-| `release` | `Owner.ps1` | WorkItemSaga | saga | owner |
-| `my-items` | `Owner.ps1` | WorkItemSaga | saga | worker |
-| `record-review` | `Verbs.Item.ps1` | WorkItemSaga | saga | owner |
-| `move-next` | `Verbs.Item.ps1` | WorkItemSaga | saga | admin only |
-| `complete` | `Verbs.Item.ps1` | WorkItemSaga | saga | owner |
-| `validation-verdict` | `Verbs.Pr.ps1` | WorkItemSaga | saga | owner |
-| `open-pr` | `Verbs.Pr.ps1` | WorkItemSaga | saga | owner |
-| `update-pr` | `Verbs.Pr.ps1` | WorkItemSaga | saga | owner |
-| `item-pr` | `Verbs.Pr.ps1` | WorkItemSaga | saga | admin only |
-| `park-item` | `Verbs.Item.ps1` | WorkItemSaga | saga | admin only |
-| `unpark-item` | `Verbs.Item.ps1` | WorkItemSaga | saga | admin only |
-| `resettle-item` | `Verbs.Item.ps1` | WorkItemSaga | saga | admin only |
-| `expire-claim` | `Owner.ps1` | WorkItemSaga | saga | admin only |
-| `pr-checks` | `Verbs.Pr.ps1` | ChecksReadModel | handler | owner,inspector,manager,keeper |
-| `wait-for-checks` | `Verbs.Pr.ps1` | ChecksReadModel | handler | owner |
-| `inspect-facts` | `Verbs.Inspect.ps1` | ChecksReadModel | handler | inspector |
-| `get-delivery` | `Verbs.Delivery.ps1` | DeliveryReadModel | handler | owner,manager |
-| `model-tier` | `Models.ps1` | ModelTierReadModel | handler | owner,inspector |
-| `check-secrets` | `Verbs.Sweep.ps1` | SecretsReadModel | handler | admin only |
+| `get-item` | none | WorkItemSaga | saga | owner,inspector,manager,keeper,qc |
+| `append-body` | none | WorkItemSaga | saga | owner |
+| `comment` | none | WorkItemSaga | saga | owner |
+| `claim-item` | none | WorkItemSaga | saga | owner |
+| `accept` | none | WorkItemSaga | saga | owner,inspector,qc |
+| `release` | none | WorkItemSaga | saga | owner |
+| `my-items` | none | WorkItemSaga | saga | worker |
+| `record-review` | none | WorkItemSaga | saga | owner |
+| `move-next` | none | WorkItemSaga | saga | admin only |
+| `complete` | none | WorkItemSaga | saga | owner |
+| `validation-verdict` | none | WorkItemSaga | saga | owner |
+| `open-pr` | none | WorkItemSaga | saga | owner |
+| `update-pr` | none | WorkItemSaga | saga | owner |
+| `item-pr` | none | WorkItemSaga | saga | admin only |
+| `park-item` | none | WorkItemSaga | saga | admin only |
+| `unpark-item` | none | WorkItemSaga | saga | admin only |
+| `resettle-item` | none | WorkItemSaga | saga | admin only |
+| `expire-claim` | none | WorkItemSaga | saga | admin only |
+| `pr-checks` | none | ChecksReadModel | handler | owner,inspector,manager,keeper |
+| `wait-for-checks` | none | ChecksReadModel | handler | owner |
+| `inspect-facts` | none | ChecksReadModel | handler | inspector |
+| `get-delivery` | none | DeliveryReadModel | handler | owner,manager |
+| `model-tier` | none | ModelTierReadModel | handler | owner,inspector |
+| `check-secrets` | none | SecretsReadModel | handler | admin only |
 | `approve-pr` | `Verbs.Inspect.ps1` | MergeTrainSaga | saga | inspector |
 | `merge` | `Verbs.Merge.ps1` | MergeTrainSaga | saga | owner |
 | `clear-hold` | `Verbs.Inspect.ps1` | MergeTrainSaga | saga | admin only |
 | `base-watch` | `BaseUpdate.ps1` | MergeTrainSaga | saga | admin only |
 | `base-update-branch` | `BaseUpdate.ps1` | MergeTrainSaga | saga | admin only |
-| `settle` | `Verbs.Delivery.ps1` | DeliveryTrainSaga | saga | admin only |
-| `publish-demo` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | owner |
-| `ci-release` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | admin only |
-| `copilot-settle` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | admin only |
-| `copilot-owner` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | admin only |
-| `private-build` | `Verbs.Pr.ps1` | DeliveryTrainSaga | saga | owner |
-| `sync-board` | `Verbs.Sweep.ps1` | BoardReconciler | coordinator | admin only |
+| `settle` | none | DeliveryTrainSaga | saga | admin only |
+| `publish-demo` | none | DeliveryTrainSaga | saga | owner |
+| `ci-release` | none | DeliveryTrainSaga | saga | admin only |
+| `copilot-settle` | none | DeliveryTrainSaga | saga | admin only |
+| `copilot-owner` | none | DeliveryTrainSaga | saga | admin only |
+| `private-build` | none | DeliveryTrainSaga | saga | owner |
+| `sync-board` | none | BoardReconciler | coordinator | admin only |
 | `ingest-event` | `Verbs.Sweep.ps1` | S3EventIngress | coordinator | admin only |
 | `journal` | `Journal.ps1` | HistoryProjection | handler | admin only |
-| `qc-sync` | `Qc.ps1` | QcService | saga | admin only |
-| `qc-link` | `Qc.ps1` | QcService | saga | admin only |
-| `qc-view` | `Qc.ps1` | QcService | saga | qc-click |
-| `qc-request` | `Qc.ps1` | QcService | saga | qc-click |
-| `qc-reset` | `Qc.ps1` | QcService | saga | qc-click |
-| `qc-teardown` | `Qc.ps1` | QcService | saga | qc-click |
-| `qc-list` | `Qc.ps1` | QcService | saga | admin only |
-| `qc-job` | `Qc.ps1` | QcService | saga | qc |
-| `qc-progress` | `Qc.ps1` | QcService | saga | qc |
-| `qc-report` | `Qc.ps1` | QcService | saga | qc |
-| `qc-fail` | `Qc.ps1` | QcService | saga | qc |
-| `qc-stopped` | `Qc.ps1` | QcService | saga | qc |
-| `qc-transition` | `Qc.ps1` | QcService | saga | admin only |
-| `qc-approval` | `Qc.ps1` | QcService | saga | admin only |
-| `backlog` | `Verbs.Keeper.ps1` | KeeperCommands | handler | keeper |
-| `amend-criteria` | `Verbs.Keeper.ps1` | KeeperCommands | handler | keeper |
-| `split-item` | `Verbs.Keeper.ps1` | KeeperCommands | handler | keeper |
-| `create-item` | `Verbs.Keeper.ps1` | KeeperCommands | handler | keeper |
-| `set-priority` | `Verbs.Keeper.ps1` | KeeperCommands | handler | keeper |
-| `link-dependency` | `Verbs.Keeper.ps1` | KeeperCommands | handler | keeper |
-| `manager-action` | `Verbs.Manager.ps1` | ManagerCommands | handler | manager |
+| `qc-sync` | none | QcService | saga | admin only |
+| `qc-link` | none | QcService | saga | admin only |
+| `qc-view` | none | QcService | saga | qc-click |
+| `qc-request` | none | QcService | saga | qc-click |
+| `qc-reset` | none | QcService | saga | qc-click |
+| `qc-teardown` | none | QcService | saga | qc-click |
+| `qc-list` | none | QcService | saga | admin only |
+| `qc-job` | none | QcService | saga | qc |
+| `qc-progress` | none | QcService | saga | qc |
+| `qc-report` | none | QcService | saga | qc |
+| `qc-fail` | none | QcService | saga | qc |
+| `qc-stopped` | none | QcService | saga | qc |
+| `qc-transition` | none | QcService | saga | admin only |
+| `qc-approval` | none | QcService | saga | admin only |
+| `backlog` | none | KeeperCommands | handler | keeper |
+| `amend-criteria` | none | KeeperCommands | handler | keeper |
+| `split-item` | none | KeeperCommands | handler | keeper |
+| `create-item` | none | KeeperCommands | handler | keeper |
+| `set-priority` | none | KeeperCommands | handler | keeper |
+| `link-dependency` | none | KeeperCommands | handler | keeper |
+| `manager-action` | none | ManagerCommands | handler | manager |
 | `revocations` | `Owner.ps1` | RevocationService | handler | admin only |
 | `revoke-worker` | `Owner.ps1` | RevocationService | handler | admin only |
-| `git-credential` | `Apps.ps1` | GitCredentialService | handler | owner-runtime |
+| `git-credential` | none | GitCredentialService | handler | owner-runtime |
 | `operator-releases` | `OperatorRelease.ps1` | OperatorReleaseService | handler | admin only |
 | `operator-release` | `OperatorRelease.ps1` | OperatorReleaseService | handler | admin only |
-| `metrics` | `Metrics.ps1` | MetricsReadModel | handler | admin only |
+| `metrics` | none | MetricsReadModel | handler | admin only |
 | `transcript-save` | `Transcripts.ps1` | TranscriptService | handler | admin only |
 | `transcript-load` | `Transcripts.ps1` | TranscriptService | handler | admin only |
 | `transcript-prune` | `Transcripts.ps1` | TranscriptService | handler | admin only |

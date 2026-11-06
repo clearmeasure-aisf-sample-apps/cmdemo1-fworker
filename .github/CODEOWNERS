@@ -23,7 +23,7 @@
 /gateway/Operator.cs                          @jeffreypalermo
 /plugin/skills/factory-operator/              @jeffreypalermo
 /plugin/scripts/lib/Client.Operator.ps1       @jeffreypalermo
-/plugin/scripts/lib/OperatorRelease.ps1       @jeffreypalermo
+/plugin/scripts/server/lib/OperatorRelease.ps1 @jeffreypalermo
 /docs/design/operator-session.md              @jeffreypalermo
 /tests/scenarios/operator.ps1                 @jeffreypalermo
 

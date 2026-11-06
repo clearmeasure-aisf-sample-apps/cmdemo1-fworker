@@ -6,7 +6,7 @@ param([Parameter(Mandatory)][ValidateSet('reviewer', 'testperson')] [string] $Ki
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $env:FACTORY_CONFIG) { $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json' }
-foreach ($f in 'Core', 'Apps') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+. (Join-Path $root 'plugin/scripts/lib/Paths.ps1'); . (Join-Path $root 'plugin/scripts/lib/Config.ps1'); foreach ($f in 'Core', 'Apps') { . (Join-Path $root "plugin/scripts/server/lib/$f.ps1") }   # (V3.3: the gateway's rule scripts)
 $c = Get-Cfg
 $tok = Get-AppToken $Kind
 $h = @{ Authorization = "Bearer $tok"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'factory-worker-test-actor' }

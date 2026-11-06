@@ -91,8 +91,8 @@ static class EndpointModuleExtensions
             }
             // W9.0: the verbs a route file registered are answered by v2 and never reach v1; with none registered the router is what it was
             router = c.Engine.V2Acts && sp.GetRequiredService<V2VerbRoutes>() is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router;
-            // cutover review: v2 configured and no database: the gateway is inert, every verb that changes anything is refused (v1 must not act in v2's place)
-            return c.Engine.NoDatabase ? new InertVerbRouter(router) : router;
+            // V3.3: the engine does not act here (v2Environments does not name the environment, or there is no database): the gateway is inert, every verb is refused
+            return c.Engine.Inert ? new InertVerbRouter(c.Engine) : router;
         });
         services.AddSingleton(sp => new VerbPipeline(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(), sp.GetRequiredService<KeeperSettings>(),
             sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<IVerbRouter>(), sp.GetRequiredService<IEventIngress>(),
