@@ -8,9 +8,10 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.8: v2's answers against the rule scripts they replace. The real plugin/scripts/factory.ps1 is run (pwsh, `--server &lt;verb&gt;`, the instance file of the repository, no GitHub credential) on the same inputs as the
-/// C# verbs, and the answers are compared whole: every field, the exit code, the events of a webhook (but their time). Only the inputs that need no network are here: the translation of the payloads that read nothing, the
-/// refusals of the journal and the transcript verbs, and the read of a card, which in both is the refusal "GH_TOKEN is not set". The tests return at once on a machine without pwsh.
+/// W9.8: v2's answers against the rule scripts they replace, compared whole: every field, the exit code, the events of a webhook (but their time). Only the inputs that need no network are here: the translation of the
+/// payloads that read nothing, the refusals of the journal and the transcript verbs, and the read of a card, which in both is the refusal "GH_TOKEN is not set". The transcript verbs' script is still the gateway's
+/// (plugin/scripts/server/rule.ps1 `--server &lt;verb&gt;`, the instance file of the repository, no GitHub credential): it is run, and those tests return at once on a machine without pwsh. ingest-event and journal have no
+/// script since V3.3: their answers were recorded from the real scripts before they were deleted (golden/board-verbs-v1-answers.json).
 /// </summary>
 public sealed class BoardVerbParityTests : IDisposable
 {
@@ -48,6 +49,14 @@ public sealed class BoardVerbParityTests : IDisposable
         await p.WaitForExitAsync(cts.Token);
         var text = (await output).Trim();
         return (p.ExitCode, (JsonObject)JsonNode.Parse(text.Split('\n')[^1])!);
+    }
+
+    // the answer the deleted rule script gave to the same input (verb and stdin), recorded once from the real script
+    static (int Exit, JsonNode Answer) Recorded(string verb, string stdin)
+    {
+        var all = (JsonArray)JsonNode.Parse(File.ReadAllText(Path.Combine(Root(), "tests", "Gateway.Tests", "golden", "board-verbs-v1-answers.json")))!["answers"]!;
+        var r = all.Single(x => x!["verb"]!.ToString() == verb && x["stdin"]!.ToString() == stdin)!;
+        return (r["exit"]!.GetValue<int>(), r["answer"]!);
     }
 
     static BoardVerbs Verbs(IWebhookLookups? lookups = null)
@@ -112,10 +121,9 @@ public sealed class BoardVerbParityTests : IDisposable
 
     [Theory]
     [MemberData(nameof(IngestCases))]
-    public async Task IngestEvent_AnswersWhatTheRuleScriptAnswers(string stdin)
+    public async Task IngestEvent_AnswersWhatTheRuleScriptAnswered(string stdin)
     {
-        if (!HasPwsh()) return;
-        var (exit, v1) = await Script("ingest-event", stdin);
+        var (exit, v1) = Recorded("ingest-event", stdin);
         var v2 = await Verbs().IngestEvent(stdin, Time);
         Assert.Equal(exit, v2.Code);
         Assert.Equal(Canon(v1), Canon(JsonNode.Parse(v2.Output)));
@@ -131,10 +139,9 @@ public sealed class BoardVerbParityTests : IDisposable
 
     [Theory]
     [MemberData(nameof(JournalCases))]
-    public async Task Journal_RefusesWhatTheRuleScriptRefuses(string _, string stdin)
+    public async Task Journal_RefusesWhatTheRuleScriptRefused(string _, string stdin)
     {
-        if (!HasPwsh()) return;
-        var (exit, v1) = await Script("journal", stdin);
+        var (exit, v1) = Recorded("journal", stdin);
         var v2 = await Verbs().Journal(stdin, Time);
         Assert.Equal(exit, v2.Code);
         Assert.Equal(Canon(v1), Canon(JsonNode.Parse(v2.Output)));

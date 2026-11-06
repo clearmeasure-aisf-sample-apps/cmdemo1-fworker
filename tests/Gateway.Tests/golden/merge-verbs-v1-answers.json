@@ -1,0 +1,774 @@
+{
+ "comment": "V3.3: what the rule scripts of the merge train verbs (plugin/scripts/server/lib/Verbs.Merge.ps1, Verbs.Inspect.ps1, BaseUpdate.ps1, run by tests/Gateway.Tests/parity/merge-verbs-parity.ps1) answered to each case of MergeVerbParityTests, recorded on master 62da476c before the scripts were deleted. The answer is canonical (keys sorted). MergeVerbParityTests compares v2's answer with it; never edit it by hand.",
+ "answers": [
+  {
+   "name": "watch: the first look has the head and no rows",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "",
+    "ok": true,
+    "rows": [],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: master moved, the overlap and the behind count",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 2,
+    "changed": true,
+    "exit": 0,
+    "head": "m2",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 3,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [
+       "src/b.cs"
+      ],
+      "pr": 11,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: master did not move",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 1,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a range GitHub does not have",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": true,
+    "exit": 0,
+    "head": "m2",
+    "known": "gone",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a PASS waiting for its merge is skipped",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": "pass-unmerged"
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a merge being settled is skipped",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": "merged"
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a pull request that is gone and an item without a branch",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "",
+      "head": "",
+      "item": 8,
+      "overlap": [],
+      "pr": 0,
+      "skip": "pr-closed"
+     },
+     {
+      "behind": 0,
+      "branch": "",
+      "head": "",
+      "item": 9,
+      "overlap": [],
+      "pr": 0,
+      "skip": "no-branch"
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: an item in Functional Testing is not moved",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": "in-validation"
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a QC run for the head is not moved",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": "qc-for-head"
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a QC run for another head is no hold",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 2,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a pull request the webhook saw merged is skipped",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": "merged"
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: a copilot branch belongs to the item that recorded the pull request",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 4,
+      "branch": "copilot/fix-it",
+      "head": "h21",
+      "item": 7,
+      "overlap": [],
+      "pr": 21,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: the conflict modes read each pull request, reuse a known answer and wait for GitHub's computing",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": 0,
+      "branch": "factory-worker/7-x",
+      "conflict": true,
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": ""
+     },
+     {
+      "behind": 0,
+      "branch": "factory-worker/8-x",
+      "conflict": false,
+      "head": "h8",
+      "item": 8,
+      "overlap": [],
+      "pr": 12,
+      "skip": ""
+     },
+     {
+      "behind": 0,
+      "branch": "factory-worker/9-x",
+      "conflict": false,
+      "head": "h9",
+      "item": 9,
+      "overlap": [],
+      "pr": 13,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "watch: GitHub that cannot tell how far behind",
+   "verb": "base-watch",
+   "exit": 0,
+   "answer": {
+    "baseFiles": 0,
+    "changed": false,
+    "exit": 0,
+    "head": "m1",
+    "known": "m1",
+    "ok": true,
+    "rows": [
+     {
+      "behind": -1,
+      "branch": "factory-worker/7-x",
+      "head": "h7",
+      "item": 7,
+      "overlap": [],
+      "pr": 11,
+      "skip": ""
+     }
+    ],
+    "verb": "base-watch"
+   }
+  },
+  {
+   "name": "update: a pull request that is closed",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "not-open",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a head that moved",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "head-moved",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a verdict on record",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "skip",
+    "pr": 11,
+    "reason": "verdict-recorded",
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a merge on record",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "skip",
+    "pr": 11,
+    "reason": "verdict-recorded",
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: in Functional Testing",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "skip",
+    "pr": 11,
+    "reason": "in-validation",
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a QC run for the head",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "skip",
+    "pr": 11,
+    "reason": "qc-for-head",
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a conflict",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "conflict",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: mergeability not computed",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "unknown",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: computed after a look",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "behind": 2,
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "updated",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a branch that is current",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "current",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: a branch that is behind is updated",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "behind": 4,
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "updated",
+    "pr": 11,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: GitHub refuses with 409",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "refused",
+    "pr": 11,
+    "status": 409,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: GitHub refuses with 422",
+   "verb": "base-update-branch",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "item": 7,
+    "ok": true,
+    "outcome": "refused",
+    "pr": 11,
+    "status": 422,
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: the expected head is required",
+   "verb": "base-update-branch",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: expected",
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "update: the pull request is required",
+   "verb": "base-update-branch",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: pr",
+    "verb": "base-update-branch"
+   }
+  },
+  {
+   "name": "merge: the item is required",
+   "verb": "merge",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: item",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: a column that is not the validation column",
+   "verb": "merge",
+   "exit": 10,
+   "answer": {
+    "code": "wrong-column",
+    "exit": 10,
+    "ok": false,
+    "reason": "merging happens only from 'Functional Testing'; the item is in 'Technical Design'",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: no PASS recorded",
+   "verb": "merge",
+   "exit": 10,
+   "answer": {
+    "code": "no-pass-verdict",
+    "exit": 10,
+    "ok": false,
+    "reason": "no unprocessed PASS verdict is recorded for this item",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: a hold label comes before everything else",
+   "verb": "merge",
+   "exit": 10,
+   "answer": {
+    "code": "held-by-label",
+    "exit": 10,
+    "label": "hold:owner",
+    "ok": false,
+    "reason": "item carries the 'hold:owner' label: a person holds it; the PASS is not merged until the label is removed",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: the hold label, in any case",
+   "verb": "merge",
+   "exit": 10,
+   "answer": {
+    "code": "held-by-label",
+    "exit": 10,
+    "label": "hold:owner",
+    "ok": false,
+    "reason": "item carries the 'hold:owner' label: a person holds it; the PASS is not merged until the label is removed",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: another pull request than the verdict's",
+   "verb": "merge",
+   "exit": 10,
+   "answer": {
+    "code": "pr-mismatch",
+    "exit": 10,
+    "ok": false,
+    "reason": "the verdict names PR #11, not #99",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: no Auto Merge label",
+   "verb": "merge",
+   "exit": 10,
+   "answer": {
+    "code": "no-auto-merge-label",
+    "exit": 10,
+    "ok": false,
+    "reason": "item does not carry 'Auto Merge'",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: already merged",
+   "verb": "merge",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "id": 7,
+    "ok": true,
+    "outcome": "already-merged",
+    "sha": "ccc3333",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: already merged, naming its pull request",
+   "verb": "merge",
+   "exit": 0,
+   "answer": {
+    "exit": 0,
+    "id": 7,
+    "ok": true,
+    "outcome": "already-merged",
+    "sha": "ccc3333",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "merge: an issue that is closed",
+   "verb": "merge",
+   "exit": 11,
+   "answer": {
+    "code": "item-closed",
+    "exit": 11,
+    "ok": false,
+    "reason": "issue #7 is closed",
+    "verb": "merge"
+   }
+  },
+  {
+   "name": "approve-pr: the item is required",
+   "verb": "approve-pr",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: item",
+    "verb": "approve-pr"
+   }
+  },
+  {
+   "name": "approve-pr: the text is required",
+   "verb": "approve-pr",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: text",
+    "verb": "approve-pr"
+   }
+  },
+  {
+   "name": "approve-pr: no inspection under auto",
+   "verb": "approve-pr",
+   "exit": 10,
+   "answer": {
+    "code": "not-required",
+    "exit": 10,
+    "ok": false,
+    "reason": "merge policy is 'auto'; no inspection is needed",
+    "verb": "approve-pr"
+   }
+  },
+  {
+   "name": "clear-hold: the item is required",
+   "verb": "clear-hold",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: item",
+    "verb": "clear-hold"
+   }
+  },
+  {
+   "name": "clear-hold: no hold of the inspector",
+   "verb": "clear-hold",
+   "exit": 10,
+   "answer": {
+    "code": "not-held",
+    "exit": 10,
+    "ok": false,
+    "reason": "the item is not held by the inspector",
+    "verb": "clear-hold"
+   }
+  },
+  {
+   "name": "clear-hold: a closed issue",
+   "verb": "clear-hold",
+   "exit": 11,
+   "answer": {
+    "code": "item-closed",
+    "exit": 11,
+    "ok": false,
+    "reason": "issue #7 is closed",
+    "verb": "clear-hold"
+   }
+  }
+ ]
+}

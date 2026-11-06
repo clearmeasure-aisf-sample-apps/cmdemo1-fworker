@@ -7,7 +7,7 @@ fails when the three disagree: the `$ServerVerbs` list of `factory.ps1`, the JSO
 `gateway/Policies/VerbPolicy.cs`, and the `$NoLockVerbs` list and `UseEndpointReason` for the two flags of the JSON). Adding or removing a verb
 means a row here and an entry in the JSON in the same pull request.
 
-**Count: 68.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan; the five `retired` verbs (`plant-snapshot-save`, `-load`, `-clear`, `-await` and `leader-lease`, `lib/PlantSnapshot.ps1` and `lib/Leader.ps1`) left in V3.3: the plant is kept in SQL and the SQL lock is the only lease, no gateway path called them and the verb route refused them to every caller. The transcript verbs moved to `lib/Transcripts.ps1`. In slice 5 the rule scripts moved to `server/rule.ps1` and `server/lib/` and keep only 14 verbs (the routed verbs' fallbacks and the housekeeping); the other 54 have no script (`script: none`) and an environment the engine does not act in refuses them (`code: inert`).
+**Count: 68.** `auto-promote` (v1's automatic promotion, `lib/Verbs.Promote.ps1`) left with the AutoPromoter in V3.2/V3.3 of the v2-only plan; the five `retired` verbs (`plant-snapshot-save`, `-load`, `-clear`, `-await` and `leader-lease`, `lib/PlantSnapshot.ps1` and `lib/Leader.ps1`) left in V3.3: the plant is kept in SQL and the SQL lock is the only lease, no gateway path called them and the verb route refused them to every caller. The transcript verbs moved to `lib/Transcripts.ps1`. In slice 5 the rule scripts moved to `server/rule.ps1` and `server/lib/` and kept 14 verbs (the routed verbs' fallbacks and the housekeeping). Slice 6 removed the fallbacks and slice 7 deleted their scripts (`merge`, `approve-pr`, `clear-hold`, `base-watch`, `base-update-branch`, `ingest-event`, `journal`: `Verbs.Merge.ps1`, `Verbs.Inspect.ps1`, `BaseUpdate.ps1`, `Verbs.Sweep.ps1`, `Journal.ps1` and the libraries only they reached). The rule scripts keep the 7 verbs of the gateway's housekeeping (`InertVerbs.Housekeeping`: `revocations`, `revoke-worker`, `operator-releases`, `operator-release`, `transcript-save`, `-load`, `-prune`); the other 61 have no script (`script: none`) and an environment the engine does not act in refuses them (`code: inert`).
 
 ## Columns
 
@@ -50,11 +50,11 @@ means a row here and an entry in the JSON in the same pull request.
 | `get-delivery` | none | DeliveryReadModel | handler | owner,manager |
 | `model-tier` | none | ModelTierReadModel | handler | owner,inspector |
 | `check-secrets` | none | SecretsReadModel | handler | admin only |
-| `approve-pr` | `Verbs.Inspect.ps1` | MergeTrainSaga | saga | inspector |
-| `merge` | `Verbs.Merge.ps1` | MergeTrainSaga | saga | owner |
-| `clear-hold` | `Verbs.Inspect.ps1` | MergeTrainSaga | saga | admin only |
-| `base-watch` | `BaseUpdate.ps1` | MergeTrainSaga | saga | admin only |
-| `base-update-branch` | `BaseUpdate.ps1` | MergeTrainSaga | saga | admin only |
+| `approve-pr` | none | MergeTrainSaga | saga | inspector |
+| `merge` | none | MergeTrainSaga | saga | owner |
+| `clear-hold` | none | MergeTrainSaga | saga | admin only |
+| `base-watch` | none | MergeTrainSaga | saga | admin only |
+| `base-update-branch` | none | MergeTrainSaga | saga | admin only |
 | `settle` | none | DeliveryTrainSaga | saga | admin only |
 | `publish-demo` | none | DeliveryTrainSaga | saga | owner |
 | `ci-release` | none | DeliveryTrainSaga | saga | admin only |
@@ -62,8 +62,8 @@ means a row here and an entry in the JSON in the same pull request.
 | `copilot-owner` | none | DeliveryTrainSaga | saga | admin only |
 | `private-build` | none | DeliveryTrainSaga | saga | owner |
 | `sync-board` | none | BoardReconciler | coordinator | admin only |
-| `ingest-event` | `Verbs.Sweep.ps1` | S3EventIngress | coordinator | admin only |
-| `journal` | `Journal.ps1` | HistoryProjection | handler | admin only |
+| `ingest-event` | none | S3EventIngress | coordinator | admin only |
+| `journal` | none | HistoryProjection | handler | admin only |
 | `qc-sync` | none | QcService | saga | admin only |
 | `qc-link` | none | QcService | saga | admin only |
 | `qc-view` | none | QcService | saga | qc-click |

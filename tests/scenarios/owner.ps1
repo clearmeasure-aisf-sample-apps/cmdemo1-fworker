@@ -1116,7 +1116,7 @@ $OwnerScenarios['owner: stream sidecar: the launcher runs the session''s stream 
 # A barrier leans on no worker and no state that an earlier scenario left behind (it stops every session it did not start itself, or starts only its
 # own, or restarts the gateway), and no scenario after it leans on one before it, so its group passes alone on a fresh gateway. The first scenario of
 # the suite starts group 0 whatever this list says. The names are matched with or without their " [full]" tag; a name that is not in the suite (the
-# scenarios of checks.ps1, cirule.ps1, budget.ps1, baseupdate.ps1, runner-gate.ps1, leader.ps1 and journal-fold.ps1 join it later) is only a cut
+# scenarios of checks.ps1, cirule.ps1, budget.ps1, baseupdate.ps1, runner-gate.ps1 and leader.ps1 join it later) is only a cut
 # point that does not exist. Before adding one, run its group alone: run.ps1 -Suite owner -Groups n -Group g.
 $OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
 @(

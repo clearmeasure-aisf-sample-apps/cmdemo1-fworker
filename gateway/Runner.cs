@@ -46,8 +46,8 @@ sealed class Runner(string entry)
     // the shared GitHub budget (GitHubBudget.cs, issue 92): every answer's _github field is recorded there and taken out of the answer
     public GitHubBudget? Budget { get; set; }
     // W9.9a: where the engine acts, the verbs that have a v2 route are answered there, whoever asks: a session (the verb endpoint reaches the same routes first) or the gateway itself (the plant's hooks, the
-    // sweep, the endpoints, the runtimes, QcHub, BaseWatch, the journal lines of the ticker). Set once when the table is built (V2VerbRoutes.Build); null where the engine does not act (tdd today, uat,
-    // prod), so there every call is the rule script, as before. A verb with no route is the script's in both cases.
+    // sweep, the endpoints, the runtimes, QcHub, BaseWatch, the journal lines of the ticker). Set once when the table is built (V2VerbRoutes.Build); null where the engine does not act (uat, prod), where
+    // RunScriptAsync refuses every verb but the housekeeping (InertVerbs). A verb with no route is the script's in both cases, and rule.ps1 answers only the housekeeping (V3.3).
     public V2VerbRoutes? Routes { get; set; }
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
     {
@@ -79,7 +79,7 @@ sealed class Runner(string entry)
     /// <summary>V3.3: the engine options while the gateway is inert (EngineOptions.Inert), null where it acts; set by the composition. An inert gateway runs no rule script (<see cref="InertVerbs"/>).</summary>
     public Func<EngineOptions?>? Inert { get; set; }
 
-    /// <summary>The rule script, whatever v2 answers: what a v2 route that cannot answer (no ledger, no translator, a merge for an item the saga does not own) falls back to. A route must call this and never <see cref="RunAsync"/>, which would ask the route again.</summary>
+    /// <summary>The rule script, whatever v2 answers: the gateway's housekeeping (InertVerbs.Housekeeping), and where the engine acts the read-only load of a transcript from the ref store (DatabaseTranscriptBackend, until 2026-11-13). No other route falls back to it (V3.3). A caller of the script must call this and never <see cref="RunAsync"/>, which would ask the route again.</summary>
     public async Task<(int Code, string Output)> RunScriptAsync(string verb, string stdin, TimeSpan timeout)
     {
         // V3.3: an inert gateway (the engine does not act in its environment) runs its own housekeeping only (InertVerbs.Housekeeping), whoever asks

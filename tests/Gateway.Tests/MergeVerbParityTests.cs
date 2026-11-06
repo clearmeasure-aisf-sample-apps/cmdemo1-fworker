@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 using Fworker.Workflows.Merge;
@@ -8,9 +7,9 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.3 (#355): the parity of the merge train verbs on v2 with the rule scripts. The same cases run twice: the REAL scripts (Verbs.Merge.ps1, Verbs.Inspect.ps1, BaseUpdate.ps1) under PowerShell with a scripted GitHub and a
-/// scripted item state (parity/merge-verbs-parity.ps1), and the C# verbs with the saga state that is the same situation. The answers must be the same JSON: every field, the exit code, and the texts of the refusals. A case
-/// is one situation: its `v1` half is what the state comment, the labels and the card say, its `saga` half what the WorkItemSaga holds for it. The test returns at once where there is no pwsh.
+/// W9.3 (#355): the parity of the merge train verbs on v2 with the rule scripts. Each case is one situation: its `v1` half is what the state comment, the labels and the card said to the REAL scripts (Verbs.Merge.ps1,
+/// Verbs.Inspect.ps1, BaseUpdate.ps1, under PowerShell with a scripted GitHub and a scripted item state), its `saga` half what the WorkItemSaga holds for it. The scripts' answers were recorded before V3.3 deleted them
+/// (golden/merge-verbs-v1-answers.json); the C# verbs must give the same JSON: every field, the exit code, and the texts of the refusals.
 /// </summary>
 public sealed class MergeVerbParityTests
 {
@@ -226,45 +225,27 @@ public sealed class MergeVerbParityTests
         _ => n.ToJsonString(),
     };
 
-    static async Task<JsonArray?> RunScripts(List<JsonObject> cases, string dir)
-    {
-        var casesPath = Path.Combine(dir, "cases.json"); var outPath = Path.Combine(dir, "answers.json");
-        await File.WriteAllTextAsync(casesPath, new JsonArray(cases.Select(c => (JsonNode)c.DeepClone()).ToArray()).ToJsonString());
-        var script = Path.Combine(Root(), "tests", "Gateway.Tests", "parity", "merge-verbs-parity.ps1");
-        var psi = new ProcessStartInfo("pwsh") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", script, "-Cases", casesPath, "-Out", outPath }) psi.ArgumentList.Add(a);
-        Process p;
-        try { p = Process.Start(psi)!; } catch (System.ComponentModel.Win32Exception) { return null; }
-        var stdout = p.StandardOutput.ReadToEndAsync(); var stderr = p.StandardError.ReadToEndAsync();
-        if (!p.WaitForExit(TimeSpan.FromMinutes(3))) { p.Kill(true); throw new TimeoutException("the rule scripts did not finish: " + await stdout + await stderr); }
-        Assert.True(p.ExitCode == 0, $"the parity script failed ({p.ExitCode}): {await stdout}\n{await stderr}");
-        return (JsonArray)JsonNode.Parse(await File.ReadAllTextAsync(outPath))!;
-    }
+    // the rule scripts' answers, recorded once from the real scripts (V3.3: the scripts are gone, their answers are the reference)
+    static JsonArray Recorded() => (JsonArray)JsonNode.Parse(File.ReadAllText(Path.Combine(Root(), "tests", "Gateway.Tests", "golden", "merge-verbs-v1-answers.json")))!["answers"]!;
 
     [Fact]
-    public async Task EveryCase_IsAnsweredByV2_AsTheRuleScriptAnswersIt()
+    public async Task EveryCase_IsAnsweredByV2_AsTheRuleScriptAnsweredIt()
     {
-        var dir = Directory.CreateTempSubdirectory("merge-parity-").FullName;
-        try
+        var cases = Cases();
+        var scripts = Recorded();
+        Assert.Equal(cases.Count, scripts.Count);
+        var differences = new List<string>();
+        for (var i = 0; i < cases.Count; i++)
         {
-            var cases = Cases();
-            var scripts = await RunScripts(cases, dir);
-            if (scripts is null) return;   // (no pwsh here)
-            Assert.Equal(cases.Count, scripts.Count);
-            var differences = new List<string>();
-            for (var i = 0; i < cases.Count; i++)
-            {
-                var name = cases[i]["name"]!.ToString();
-                var (exit, v2) = await RunV2(cases[i]);
-                var script = (JsonObject)scripts[i]!;
-                Assert.Equal(name, script["name"]!.ToString());
-                var v1 = (JsonObject)script["answer"]!;
-                var scriptExit = script["exit"]!.GetValue<int>();
-                if (exit != scriptExit || Canon(v1) != Canon(v2)) differences.Add($"{name}\n    script (exit {scriptExit}): {Canon(v1)}\n    v2     (exit {exit}): {Canon(v2)}\n    the script asked GitHub: {string.Join("; ", ((JsonArray)script["calls"]!).Select(x => x!.ToString()))}");
-            }
-            Assert.True(differences.Count == 0, "v2 answers differently from the rule script:\n" + string.Join("\n", differences));
+            var name = cases[i]["name"]!.ToString();
+            var (exit, v2) = await RunV2(cases[i]);
+            var script = (JsonObject)scripts[i]!;
+            Assert.Equal(name, script["name"]!.ToString());
+            var v1 = (JsonObject)script["answer"]!;
+            var scriptExit = script["exit"]!.GetValue<int>();
+            if (exit != scriptExit || Canon(v1) != Canon(v2)) differences.Add($"{name}\n    script (exit {scriptExit}): {Canon(v1)}\n    v2     (exit {exit}): {Canon(v2)}");
         }
-        finally { try { Directory.Delete(dir, true); } catch { } }
+        Assert.True(differences.Count == 0, "v2 answers differently from the rule script:\n" + string.Join("\n", differences));
     }
 
     [Fact]

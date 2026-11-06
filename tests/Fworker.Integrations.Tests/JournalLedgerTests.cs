@@ -12,7 +12,7 @@ namespace Fworker.Integrations.Tests;
 
 /// <summary>
 /// W3.2: the journal ledger in C# against a fake of the issue-comment endpoints of GitHub (the same paging, ids and 404s as tests/FakeGitHub). The expected values are the
-/// ones plugin/scripts/lib/Journal.ps1 produces: the scenarios of tests/scenarios/journal-fold.ps1 are replayed step by step (same lines, same keys, same asserts), and
+/// ones plugin/scripts/lib/Journal.ps1 produced (deleted in V3.3): the scenarios of tests/scenarios/journal-fold.ps1 (deleted with it) are replayed step by step (same lines, same keys, same asserts), and
 /// the order of the GitHub calls is pinned to the order of Add-Journal and Save-State (list the comments, post the line, read the state comment's revision, patch it).
 /// </summary>
 public sealed class JournalLedgerTests

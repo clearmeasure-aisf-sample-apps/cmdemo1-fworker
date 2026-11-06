@@ -196,12 +196,22 @@ public class ArchitectureInventoryTests
     /// <summary>The rule-script files V3.3 deleted: the GitHub-ref lease with the scripts' fencing (Leader.ps1) and the ref snapshot of the plant (PlantSnapshot.ps1; its transcript verbs live in Transcripts.ps1).</summary>
     static readonly string[] DeletedScripts = ["plugin/scripts/lib/Leader.ps1", "plugin/scripts/lib/PlantSnapshot.ps1", "plugin/scripts/lib/Metrics.ps1", "plugin/scripts/lib/Verbs.Manager.ps1", "plugin/scripts/lib/Replenish.ps1", "plugin/scripts/lib/Verbs.Keeper.ps1"];
 
-    /// <summary>The verbs those scripts served: the inventory called them retired, no gateway path called them and the verb route refused them to every caller.</summary>
-    static readonly string[] DeletedVerbs = ["leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-clear", "plant-snapshot-await"];
+    /// <summary>
+    /// The gateway's rule-script libraries slice 7 of V3.3 deleted (plugin/scripts/server/lib): what the scripts of the routed verbs reached once slice 6 left them no caller (merge, approve-pr, clear-hold, base-watch,
+    /// base-update-branch, ingest-event, journal) and nothing else did. A library is named by its file name only where a server library is meant (a path with server/lib, or rule.ps1's list of libraries): the
+    /// client has a Models.ps1 of its own.
+    /// </summary>
+    static readonly string[] DeletedServerLibs = ["BaseUpdate", "Board", "Checks", "Journal", "Models", "Prs", "Qc", "Verbs.Delivery", "Verbs.Inspect", "Verbs.Merge", "Verbs.Pr", "Verbs.Sweep"];
+
+    /// <summary>The verbs those scripts served: the inventory called them retired, no gateway path called them and the verb route refused them to every caller. Slice 7's verbs keep their v2 routes; their scripts are gone.</summary>
+    static readonly string[] DeletedVerbs = ["leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-clear", "plant-snapshot-await",
+        "merge", "approve-pr", "clear-hold", "base-watch", "base-update-branch", "ingest-event", "journal"];
 
     /// <summary>Their functions, and the fence state every write of a script once checked: none may be defined or used again anywhere in the plugin.</summary>
     static readonly string[] DeletedFunctions = ["Verb_leader_lease", "Verb_plant_snapshot_save", "Verb_plant_snapshot_load", "Verb_plant_snapshot_clear", "Verb_plant_snapshot_await",
-        "Read-LeaderLease", "Write-LeaderLease", "Get-LeaderRefPath", "Get-PlantSnapshotRefPath", "Set-LeaseFence", "Test-LeaseHeld", "Assert-LeaseHeld", "Get-LeaseFenceInfo", "Test-FencedWrite", "LeaseFence"];
+        "Read-LeaderLease", "Write-LeaderLease", "Get-LeaderRefPath", "Get-PlantSnapshotRefPath", "Set-LeaseFence", "Test-LeaseHeld", "Assert-LeaseHeld", "Get-LeaseFenceInfo", "Test-FencedWrite", "LeaseFence",
+        // slice 7: every function of the deleted server libraries, and those of Apps.ps1, Core.ps1, Owner.ps1 and Verbs.Item.ps1 that no verb left reaches
+        "Add-Comment", "Add-FlowStamp", "Add-Journal", "Add-JournalKind", "Add-Refusal", "Add-SessionFooter", "Assert-Open", "Close-JournalFolds", "ConvertFrom-Iso", "ConvertTo-Iso", "Find-HumanApproval", "Format-JournalFold", "Get-BackmergeHold", "Get-BaseFailures", "Get-BaseHead", "Get-BaseHistory", "Get-BaseUpdateMode", "Get-BehindBy", "Get-BoardList", "Get-CheckBaseline", "Get-ChecksFor", "Get-CkProp", "Get-Comments", "Get-EnvLabel", "Get-FlakyMatches", "Get-HoldLabel", "Get-InspectFacts", "Get-ItemInfo", "Get-ItemNumber", "Get-JournalSessionLink", "Get-JournalStamp", "Get-JournalText", "Get-LatestReviews", "Get-LegacyCutoff", "Get-MergeWaitText", "Get-MigrationCollision", "Get-Park", "Get-Pr", "Get-PrFiles", "Get-ProjectMeta", "Get-Prop", "Get-PublicChecks", "Get-QcGate", "Get-QcRec", "Get-RedCauses", "Get-RedHeadRuling", "Get-RefPath", "Get-RefusalFile", "Get-ServerLogin", "Get-SessionFooter", "Get-Stamp", "Get-State", "Get-StateEntryCount", "Get-StateMarker", "Get-StateRev", "Get-VerdictState", "Invoke-ClearHoldIfApproved", "Invoke-Demote", "Invoke-GhGraphQL", "Invoke-GhOptional", "Limit-JournalLine", "Limit-StateBudget", "Move-Card", "Move-OwnerTo", "New-Event", "New-Ruling", "Protect-JournalText", "Read-Refusals", "Register-MasterDefect", "Remove-ClaimRef", "Remove-OldestStateEntry", "Resolve-RedBeforeMerge", "Restore-Settle", "Save-State", "Set-Park", "Set-PrReady", "Test-DocsOnlyFiles", "Test-GatewayMerge", "Test-GatewayUpdateHead", "Test-GitHubApproval", "Test-ItemDocsOnly", "Test-ItemInScope", "Test-Label", "Test-NameIn", "Test-OwnedClaim", "Test-OwnerMode", "Test-PrBelongs", "Test-QcEnabled", "Test-QcGateActive", "Use-GhAs", "Verb_approve_pr", "Verb_base_update_branch", "Verb_base_watch", "Verb_clear_hold", "Verb_ingest_event", "Verb_journal", "Verb_merge", "Wait-HeadChange"];
 
     /// <summary>The script's code with its comment lines and the trailing comments of its lines blanked (a word in a comment is no use of it).</summary>
     static string ScriptCode(string text) => string.Join('\n', text.Split('\n').Select(l => Regex.Replace(l.TrimStart().StartsWith('#') ? "" : l, @"\s#\s.*$", "")));
@@ -213,6 +223,10 @@ public class ArchitectureInventoryTests
             if (Regex.IsMatch(code, $@"(?<![\w-]){Regex.Escape(name)}(?![\w-])")) found.Add($"{path}: {name}");
         foreach (var file in DeletedScripts)
             if (code.Contains(Path.GetFileName(file), StringComparison.Ordinal) || code.Contains($"'{Path.GetFileNameWithoutExtension(file)}'", StringComparison.Ordinal)) found.Add($"{path}: {file}");
+        // a server library: its path, or its name in a list of a file that loads server libraries (rule.ps1 loads "lib/$f.ps1" beside itself; the others name server/lib)
+        var loadsServerLibs = path.StartsWith("plugin/scripts/server/", StringComparison.Ordinal) || code.Contains("server/lib", StringComparison.Ordinal);
+        foreach (var lib in DeletedServerLibs)
+            if (code.Contains($"server/lib/{lib}.ps1", StringComparison.Ordinal) || (loadsServerLibs && code.Contains($"'{lib}'", StringComparison.Ordinal))) found.Add($"{path}: plugin/scripts/server/lib/{lib}.ps1");
         return found;
     }
 
@@ -221,12 +235,24 @@ public class ArchitectureInventoryTests
     {
         var problems = new List<string>();
         foreach (var file in DeletedScripts) if (File.Exists(Path.Combine(Root, file))) problems.Add($"{file} exists again");
+        foreach (var lib in DeletedServerLibs) if (File.Exists(Path.Combine(Root, "plugin", "scripts", "server", "lib", lib + ".ps1"))) problems.Add($"plugin/scripts/server/lib/{lib}.ps1 exists again");
         foreach (var f in Directory.EnumerateFiles(Path.Combine(Root, "plugin"), "*.ps1", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
             problems.AddRange(DeletedScriptUses(Rel(f), ScriptCode(File.ReadAllText(f))));
-        // and no server verb of factory.ps1 is one of them (the verb inventory follows $ServerVerbs, VerbInventoryTests)
-        var factory = File.ReadAllText(Path.Combine(Root, "plugin", "scripts", "factory.ps1"));
-        var list = Regex.Match(factory, @"\$ServerVerbs\s*=\s*@\((?<body>[^)]*)\)").Groups["body"].Value;
-        foreach (var verb in DeletedVerbs) if (list.Contains($"'{verb}'", StringComparison.Ordinal)) problems.Add($"plugin/scripts/factory.ps1: $ServerVerbs names '{verb}' again");
+        // the tests and tools load no deleted server library either (smoke.ps1, the parity harness, the live actors once did)
+        foreach (var dir in new[] { "tests", "tools", "docs/deploy" }.Select(d => Path.Combine(Root, d)).Where(Directory.Exists))
+            foreach (var f in Directory.EnumerateFiles(dir, "*.ps1", SearchOption.AllDirectories).Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")).OrderBy(f => f, StringComparer.Ordinal))
+            {
+                var code = ScriptCode(File.ReadAllText(f));
+                if (!code.Contains("server/lib", StringComparison.Ordinal)) continue;
+                problems.AddRange(DeletedScriptUses(Rel(f), code).Where(u => u.Contains("server/lib/", StringComparison.Ordinal)));
+            }
+        // and no server verb of factory.ps1 or rule.ps1 is one of them (the verb inventory follows $ServerVerbs, VerbInventoryTests)
+        foreach (var script in new[] { "factory.ps1", Path.Combine("server", "rule.ps1") })
+        {
+            var text = File.ReadAllText(Path.Combine(Root, "plugin", "scripts", script));
+            var list = Regex.Match(text, @"\$ServerVerbs\s*=\s*@\((?<body>[^)]*)\)").Groups["body"].Value;
+            foreach (var verb in DeletedVerbs) if (list.Contains($"'{verb}'", StringComparison.Ordinal)) problems.Add($"plugin/scripts/{script.Replace('\\', '/')}: $ServerVerbs names '{verb}' again");
+        }
         Assert.True(problems.Count == 0, "What V3.3 deleted of the server scripts is back (a decision: edit the lists of this test in the same pull request):\n  " + string.Join("\n  ", problems));
     }
 
@@ -236,13 +262,11 @@ public class ArchitectureInventoryTests
     static readonly string[] ClientLibs = ["Client.Build.ps1", "Client.Keeper.ps1", "Client.Manager.ps1", "Client.Messages.ps1", "Client.Operator.ps1", "Client.Own.ps1", "Client.Plugin.ps1",
         "Client.Subscribe.ps1", "Config.ps1", "Models.ps1", "Paths.ps1", "Progress.ps1"];
 
-    /// <summary>The gateway's rule-script libraries (plugin/scripts/server/lib), what the verbs of rule.ps1 still reach. Metrics, Verbs.Manager, Verbs.Keeper and Replenish are gone: nothing left reaches them.</summary>
-    static readonly string[] ServerLibs = ["Apps.ps1", "BaseUpdate.ps1", "Board.ps1", "Checks.ps1", "Core.ps1", "Journal.ps1", "Models.ps1", "OperatorRelease.ps1", "Owner.ps1", "Prs.ps1", "Qc.ps1",
-        "Transcripts.ps1", "Verbs.Delivery.ps1", "Verbs.Inspect.ps1", "Verbs.Item.ps1", "Verbs.Merge.ps1", "Verbs.Pr.ps1", "Verbs.Sweep.ps1"];
+    /// <summary>The gateway's rule-script libraries (plugin/scripts/server/lib), what the verbs of rule.ps1 still reach (and Apps.ps1 for the operator's test actors, tests/live and tests/fullrun). The rest is gone: nothing left reaches it (DeletedServerLibs).</summary>
+    static readonly string[] ServerLibs = ["Apps.ps1", "Core.ps1", "OperatorRelease.ps1", "Owner.ps1", "Transcripts.ps1", "Verbs.Item.ps1"];
 
-    /// <summary>The verbs a rule script still answers: the fallbacks of the routed verbs (the hybrid merge, the merge policy other than auto, the transcript ref store, ingest-event and journal without their parts) and the gateway's housekeeping, which an inert gateway still runs (InertVerbs.Housekeeping).</summary>
-    static readonly string[] ScriptVerbs = ["merge", "approve-pr", "clear-hold", "base-watch", "base-update-branch", "transcript-save", "transcript-load", "transcript-prune", "ingest-event", "journal",
-        "revocations", "revoke-worker", "operator-releases", "operator-release"];
+    /// <summary>The verbs a rule script still answers: the gateway's housekeeping, which an inert gateway still runs (InertVerbs.Housekeeping), the transcript ref store among it (also the read-only load of the database's transcripts until 2026-11-13). No routed verb falls back to a script (slice 6).</summary>
+    static readonly string[] ScriptVerbs = ["transcript-save", "transcript-load", "transcript-prune", "revocations", "revoke-worker", "operator-releases", "operator-release"];
 
     static string[] FileNames(params string[] dir) => Directory.EnumerateFiles(Path.Combine([Root, .. dir]), "*.ps1").Select(f => Path.GetFileName(f)!).Order(StringComparer.Ordinal).ToArray();
 
@@ -274,6 +298,8 @@ public class ArchitectureInventoryTests
                 if (!ScriptVerbs.Contains(m.Groups[1].Value.Replace('_', '-'))) problems.Add($"plugin/scripts/server/lib/{f}: Verb_{m.Groups[1].Value} is no verb of rule.ps1 (v2 answers it alone)");
         // the inert gateway's housekeeping is what rule.ps1 answers of it, and the gateway runs rule.ps1, never the client
         foreach (var v in InertVerbs.Housekeeping) if (!ScriptVerbs.Contains(v)) problems.Add($"InertVerbs.Housekeeping names '{v}', which no rule script answers");
+        // and a rule-script verb that is no housekeeping has no caller: an inert gateway refuses it and where the engine acts its route answers with no script behind it
+        foreach (var v in ScriptVerbs) if (!InertVerbs.Housekeeping.Contains(v)) problems.Add($"server/rule.ps1 answers '{v}', which is no housekeeping of InertVerbs: nothing would run its script");
         var options = File.ReadAllText(Path.Combine(Root, "gateway", "Configuration", "GatewayOptions.cs"));
         if (!options.Contains("Entry = Path.Combine(scriptsDir, \"server\", \"rule.ps1\")", StringComparison.Ordinal)) problems.Add("gateway/Configuration/GatewayOptions.cs: the Runner's entry is not plugin/scripts/server/rule.ps1");
         // and what a worker downloads leaves the gateway's rule scripts out
@@ -288,6 +314,14 @@ public class ArchitectureInventoryTests
         Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode("    if ($script:LeaseFence -and (Test-FencedWrite $Method $Path $Body)) { Assert-LeaseHeld 'x' }")));
         Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode(". (Join-Path $here 'lib/Leader.ps1')")));
         Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode("foreach ($f in 'Core', 'PlantSnapshot') { . (Join-Path $here \"lib/$f.ps1\") }")));
+        // slice 7: a deleted server library loaded by rule.ps1's list or by its path, and a function of one
+        Assert.NotEmpty(DeletedScriptUses("plugin/scripts/server/rule.ps1", ScriptCode("foreach ($f in 'Core', 'Board', 'Transcripts') { . (Join-Path $here \"lib/$f.ps1\") }")));
+        Assert.NotEmpty(DeletedScriptUses("tests/x.ps1", ScriptCode("foreach ($f in 'Core', 'Journal') { . (Join-Path $root \"plugin/scripts/server/lib/$f.ps1\") }")));
+        Assert.NotEmpty(DeletedScriptUses("tests/x.ps1", ScriptCode(". (Join-Path $root 'plugin/scripts/server/lib/Verbs.Merge.ps1')")));
+        Assert.NotEmpty(DeletedScriptUses("x.ps1", ScriptCode("function Verb_merge($a) { $s = Get-State $a.item; Save-State $a.item $s }")));
+        // the client's own Models.ps1 is no server library, and a live name that contains a deleted one is no use of it
+        Assert.Empty(DeletedScriptUses("plugin/scripts/factory.ps1", ScriptCode(". (Join-Path $PSScriptRoot 'lib/Models.ps1'); foreach ($f in 'Models', 'Paths') { }")));
+        Assert.Empty(DeletedScriptUses("plugin/scripts/server/rule.ps1", ScriptCode("foreach ($f in 'Core', 'Verbs.Item', 'Apps', 'Owner', 'OperatorRelease', 'Transcripts') { }\n$x = Get-StateDir; Get-RevokedRefs")));
         // a comment that names them, and a live name that contains one of the words, are no use
         Assert.Empty(DeletedScriptUses("x.ps1", ScriptCode("# Assert-LeaseHeld and lib/Leader.ps1 are gone (V3.3)\n$x = Get-TranscriptRefs   # not Set-LeaseFence")));
     }

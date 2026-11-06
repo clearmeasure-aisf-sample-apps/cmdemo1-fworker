@@ -8,7 +8,7 @@ needed to build, test, change and release it is here. Project state, environment
 
 A gateway (ASP.NET Core minimal API, .NET 10) that holds the GitHub and Octopus credentials, runs the v2 engine (Wolverine sagas over SQL Server) where
 `engine.v2Environments` names its environment (every other environment is inert), keeps the board of `clearmeasure-aisf-sample-apps/cmdemo1-workorders` and hands work items to
-AI sessions (workers) that connect with a prompt from its dashboard. A few PowerShell rule scripts are left for the fallbacks of the routed verbs and its housekeeping (`pwsh plugin/scripts/server/rule.ps1 --server <verb>`). It ships as one container image, deployable `fworker` of the cmdemo1
+AI sessions (workers) that connect with a prompt from its dashboard. A few PowerShell rule scripts are left for its own housekeeping: the revoked credentials, the operator's release record and the transcript ref store (`pwsh plugin/scripts/server/rule.ps1 --server <verb>`, `InertVerbs.Housekeeping`). It ships as one container image, deployable `fworker` of the cmdemo1
 demo system.
 
 ## Layout

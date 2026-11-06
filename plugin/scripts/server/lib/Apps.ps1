@@ -1,4 +1,5 @@
-# The GitHub identities other than the gateway's own token: the reviewer App (the factory inspector's approvals) and the test-person App.
+# The GitHub App identities: the author App of a cloud gateway (FACTORY_AUTHOR_APP=1, Get-GhToken), and the reviewer and test-person Apps of the
+# operator's test actors (tests/live/as-app.ps1, tests/fullrun/preflight.ps1).
 # Server side only. A private key is read from the keyring by secret-tool, used to sign a short-lived JWT, and never printed or logged.
 # In Tier 1 tests (FACTORY_FAKE_APPS=1) no key exists: the token is the literal 'fake-<kind>', which the fake GitHub maps to the App's bot login.
 
@@ -52,10 +53,3 @@ function Get-AppToken([string]$Kind) {
     } catch { }
     return $r.token
 }
-
-# Run a block with GitHub calls made as an App. Nothing leaks past the block.
-function Use-GhAs([string]$Kind, [scriptblock]$Body) {
-    $script:AsToken = Get-AppToken $Kind
-    try { & $Body } finally { $script:AsToken = $null }
-}
-
