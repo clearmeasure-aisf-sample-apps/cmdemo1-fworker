@@ -708,16 +708,22 @@ function Get-ItemState([int]$Item) {
 }
 # Holds the rule scripts' item lock (Use-ItemLock, plugin/scripts/server/lib/Core.ps1) the way a verb does: the item's lock file in the gateway's state
 # directory, opened exclusively; the caller disposes it. The directory is created first: a scenario that runs first in its group can come before
-# anything has written there (issue 405: "Could not find a part of the path" on item-1.lock).
-function Lock-ItemFile([int]$Item) {
-    [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)
-    return [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$Item.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
-}
+# anything has written there (issue 405: "Could not find a part of the path" on item-1.lock). Like a verb it waits for the lock (300 ms steps, 45 s at most):
+# the gateway holds an item's lock for a moment of its own, e.g. while the admission starts the saga of a card just created, and a single attempt then met
+# a sharing violation (PR 644: a scenario that ran first in its group created #1 in the very pass that admitted it).
+function Lock-ItemFile([int]$Item) { Lock-StateFile "item-$Item.lock" }
 # Holds the board-intake lock (Use-IntakeLock, the rule scripts' former plugin/scripts/lib/Core.ps1) the way a verb that creates a work item does (issue 411); the caller
 # disposes it.
-function Lock-IntakeFile {
+function Lock-IntakeFile { Lock-StateFile 'board-intake.lock' }
+# A lock file of the gateway's state directory, opened exclusively as Use-ItemLock and FileItemLock open it: retried while another holder has it, the last error thrown after 45 s.
+function Lock-StateFile([string]$Name, [int]$WaitSeconds = 45) {
     [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)
-    return [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR 'board-intake.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+    $path = Join-Path $env:FACTORY_STATE_DIR $Name
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    while ($true) {
+        try { return [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'None') }
+        catch [System.IO.IOException] { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Milliseconds 300 }
+    }
 }
 function Expire-Claim([int]$Item, [string]$TakenBack = '') {
     Set-ItemState $Item { param($st) $st.claim.lease_until = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'); if ($TakenBack) { $st.claim.taken_back = $TakenBack } }
