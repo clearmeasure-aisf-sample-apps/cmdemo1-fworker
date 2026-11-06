@@ -1,7 +1,5 @@
-# Core: configuration, rejection type, GitHub REST/GraphQL, per-item lock. Server side only: GH_TOKEN is read here and nowhere else.
+# Core: rejection type, GitHub REST, per-item lock. Server side only: GH_TOKEN is read here and nowhere else.
 Set-StrictMode -Version Latest
-$script:ServerLogin = $null
-$script:AsToken = $null
 # The rate limit GitHub reported in this process, per resource (core, graphql): the latest answer's numbers. The server wrapper (factory.ps1) hands
 # them to the gateway in the field _github of its answer; the gateway keeps the shared budget (gateway/GitHubBudget.cs, issue 92).
 $script:GhRate = @{}
@@ -31,15 +29,13 @@ function Get-StateDir {
 }
 
 function Get-UtcNow { [DateTime]::UtcNow }
-function ConvertTo-Iso([DateTime]$d) { $d.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
-function ConvertFrom-Iso($s) { if ($null -eq $s -or "$s" -eq '') { return $null }; if ($s -is [DateTime]) { return $s.ToUniversalTime() }; [DateTime]::Parse("$s", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal) }
 
 function Test-Has($h, [string]$k) { ($h -is [System.Collections.IDictionary]) -and $h.Contains($k) -and $null -ne $h[$k] }
 
 function Get-RepoPath { $c = Get-Cfg; "repos/$($c.owner)/$($c.repo)" }
 
 function Get-GhToken {
-    $tok = if ($script:AsToken) { $script:AsToken } elseif ($env:FACTORY_AUTHOR_APP -eq '1') { Get-AppToken 'author' } elseif ($env:GH_TOKEN -ne 'unset') { $env:GH_TOKEN } else { $null }
+    $tok = if ($env:FACTORY_AUTHOR_APP -eq '1') { Get-AppToken 'author' } elseif ($env:GH_TOKEN -ne 'unset') { $env:GH_TOKEN } else { $null }
     if (-not $tok) { Reject 30 'secret-missing' 'GH_TOKEN is not set on the gateway' }
     return $tok
 }
@@ -78,8 +74,6 @@ function Get-GhHeader($Headers, [string]$Name) {
 }
 # Records the rate limit an answer reports (x-ratelimit-*): the latest numbers of each resource, unless an earlier answer of the same window said less
 function Add-GhRate($Headers) {
-    # only the gateway's own identity: a call made as another App (Use-GhAs, the reviewer's approval) spends that App's budget, not this one
-    if ($script:AsToken) { return }
     $rem = Get-GhHeader $Headers 'x-ratelimit-remaining'; if ($null -eq $rem -or "$rem" -notmatch '^\d+$') { return }
     $res = Get-GhHeader $Headers 'x-ratelimit-resource'; if (-not $res -or $res -notmatch '^[a-z_]{1,30}$') { $res = 'core' }
     $o = @{ remaining = [int]$rem; limit = $(if ("$(Get-GhHeader $Headers 'x-ratelimit-limit')" -match '^\d+$') { [int](Get-GhHeader $Headers 'x-ratelimit-limit') } else { $null })
@@ -126,30 +120,6 @@ function Invoke-Gh {
     }
 }
 
-function Invoke-GhGraphQL([string]$Query, [hashtable]$Variables = @{}) {
-    $r = Invoke-GhRaw -Method POST -Path 'graphql' -Body @{ query = $Query; variables = $Variables }
-    if ($r.status -ne 200) { Reject 20 'github-graphql-error' "GraphQL HTTP $($r.status)" @{ retryAfterSeconds = 30 } }
-    if ($r.body.PSObject.Properties['errors'] -and $r.body.errors) {
-        $msg = ($r.body.errors | ForEach-Object { $_.message }) -join '; '
-        # GraphQL answers its own rate limit with 200 and an error of type RATE_LIMITED
-        if (@($r.body.errors | Where-Object { $_.PSObject.Properties['type'] -and "$($_.type)" -eq 'RATE_LIMITED' }).Count -gt 0) {
-            $reset = Get-GhHeader $r.headers 'x-ratelimit-reset'
-            $wait = if ($reset -match '^\d+$') { [int][Math]::Max(1, [long]$reset - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) } else { 60 }
-            $x = @{ retryAfterSeconds = $wait }; if ($reset -match '^\d+$') { $x.resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$reset).UtcDateTime.ToString('o') }
-            Reject 20 'github-rate-limited' $msg $x
-        }
-        Reject 20 'github-graphql-error' $msg @{ retryAfterSeconds = 30 }
-    }
-    return $r.body.data
-}
-
-function Get-ServerLogin {
-    if ($script:ServerLogin) { return $script:ServerLogin }
-    # An App installation token cannot ask GitHub who it is (GET /user is 403 for it): the login of an App is <slug>[bot].
-    $script:ServerLogin = if ($env:FACTORY_AUTHOR_APP -eq '1') { "$((Get-AppInfo 'author').slug)[bot]" } else { (Invoke-Gh -Path 'user').login }
-    return $script:ServerLogin
-}
-
 # One verb at a time per item on this machine. Cross-machine exclusion is the claim ref, not this lock.
 function Use-ItemLock([int]$Item, [scriptblock]$Body, [int]$WaitSeconds = 45) {
     $f = Join-Path (Get-StateDir) "item-$Item.lock"
@@ -161,5 +131,3 @@ function Use-ItemLock([int]$Item, [scriptblock]$Body, [int]$WaitSeconds = 45) {
     }
     try { & $Body } finally { $fs.Dispose() }
 }
-
-function Test-NameIn([string]$Name, $List) { foreach ($x in $List) { if ($x -ieq $Name) { return $true } }; return $false }

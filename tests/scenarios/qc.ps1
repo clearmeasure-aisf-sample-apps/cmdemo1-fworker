@@ -94,7 +94,12 @@ function Qc-Hook($Event, $Payload) {
     $resp = Invoke-WebRequest "http://127.0.0.1:$($script:HookPort)/webhooks/github" -Method POST -Body $raw -ContentType 'application/json' -Headers @{ 'X-GitHub-Event' = $Event; 'X-GitHub-Delivery' = [guid]::NewGuid().ToString(); 'X-Hub-Signature-256' = $sig } -SkipHttpErrorCheck
     return [int]$resp.StatusCode
 }
-# Runs a rule script directly (as the gateway does), for the checks that do not need the gateway.
+# One verb of the gateway with the operator token (POST /api/v1/verbs/<verb>), the parsed answer: what the gateway answers whoever calls it (V3.3: ingest-event has no rule script left).
+function Qc-AdminVerb([string]$Verb, $Body) {
+    $r = Invoke-WebRequest "$(Qc-Base)/api/v1/verbs/$Verb" -Method POST -Body ($Body | ConvertTo-Json -Depth 8 -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck -TimeoutSec 120
+    $j = try { "$($r.Content)" | ConvertFrom-Json -AsHashtable } catch { @{} }; if ($j -isnot [System.Collections.IDictionary]) { $j = @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = -1; $j.http = [int]$r.StatusCode }; return $j
+}
+# Runs a rule script directly (as the gateway does: the housekeeping verbs left, e.g. revocations), for the checks that do not need the gateway.
 function Qc-Server([string]$Verb, $Body, [hashtable]$Env = @{}) {
     $old = @{}; foreach ($k in $Env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $Env[$k]) }
     try {
@@ -677,24 +682,24 @@ $QcScenarios = [ordered]@{
     $c = (Get-Content -Raw (Join-Path $script:Root 'config/instance.json') | ConvertFrom-Json -AsHashtable)
     $repo = @{ full_name = "$($c.owner)/$($c.repo)" }
     $pull = { param($act, $sha, $merged) @{ action = $act; repository = $repo; sender = @{ login = 'someone' }; pull_request = @{ number = 77; merged = $merged; head = @{ ref = 'factory-worker/12-development'; sha = $sha; repo = $repo } } } }
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request'; delivery = 'd1'; payload = (& $pull 'synchronize' ('a' * 40) $false) }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request'; delivery = 'd1'; payload = (& $pull 'synchronize' ('a' * 40) $false) }).events
     Check 'synchronize: pr.head_changed for item 12 with the sha and the sender' (@($e).Count -eq 1 -and $e[0].event -eq 'pr.head_changed' -and $e[0].item -eq 12 -and $e[0].sha -eq ('a' * 40) -and $e[0].login -eq 'someone')
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request'; delivery = 'd2'; payload = (& $pull 'closed' ('b' * 40) $true) }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request'; delivery = 'd2'; payload = (& $pull 'closed' ('b' * 40) $true) }).events
     Check 'closed and merged: pr.merged' (@($e).Count -eq 1 -and $e[0].event -eq 'pr.merged')
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request'; delivery = 'd3'; payload = (& $pull 'closed' ('b' * 40) $false) }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request'; delivery = 'd3'; payload = (& $pull 'closed' ('b' * 40) $false) }).events
     Check 'closed not merged: pr.closed' (@($e).Count -eq 1 -and $e[0].event -eq 'pr.closed')
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request'; delivery = 'd4'; payload = (& $pull 'opened' ('c' * 40) $false) }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request'; delivery = 'd4'; payload = (& $pull 'opened' ('c' * 40) $false) }).events
     Check 'opened: pr.opened' (@($e).Count -eq 1 -and $e[0].event -eq 'pr.opened')
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request'; delivery = 'd5'; payload = (& $pull 'converted_to_draft' ('c' * 40) $false) }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request'; delivery = 'd5'; payload = (& $pull 'converted_to_draft' ('c' * 40) $false) }).events
     Check 'converted to draft: pr.drafted' (@($e).Count -eq 1 -and $e[0].event -eq 'pr.drafted')
     $fork = & $pull 'synchronize' ('d' * 40) $false; $fork.pull_request.head.repo = @{ full_name = 'evil/fork' }
-    $res = Qc-Server 'ingest-event' @{ event = 'pull_request'; delivery = 'd6'; payload = $fork }
+    $res = Qc-AdminVerb 'ingest-event' @{ event = 'pull_request'; delivery = 'd6'; payload = $fork }
     Check 'a fork pull request is ignored' (@($res.events).Count -eq 0 -and $res.dropped -eq 'pr.fork')
     $rv = @{ action = 'submitted'; repository = $repo; review = @{ state = 'approved'; commit_id = ('e' * 40); user = @{ login = 'jeffreypalermo' } }; pull_request = @{ number = 77; head = @{ ref = 'factory-worker/12-development'; sha = ('e' * 40) } } }
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request_review'; delivery = 'd7'; payload = $rv }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request_review'; delivery = 'd7'; payload = $rv }).events
     Check 'review submitted: pr.reviewed with login, state and commit' (@($e).Count -eq 1 -and $e[0].event -eq 'pr.reviewed' -and $e[0].login -eq 'jeffreypalermo' -and $e[0].state -eq 'APPROVED' -and $e[0].commit_id -eq ('e' * 40))
     $rv.action = 'dismissed'
-    $e = (Qc-Server 'ingest-event' @{ event = 'pull_request_review'; delivery = 'd8'; payload = $rv }).events
+    $e = (Qc-AdminVerb 'ingest-event' @{ event = 'pull_request_review'; delivery = 'd8'; payload = $rv }).events
     Check 'review dismissed: pr.reviewed with action dismissed' (@($e).Count -eq 1 -and $e[0].action -eq 'dismissed')
     Check 'a signed pull_request delivery to the webhook port is accepted' ((Qc-Hook 'pull_request' (& $pull 'opened' ('c' * 40) $false)) -eq 202)
     Check 'a signed pull_request_review delivery is accepted' ((Qc-Hook 'pull_request_review' $rv) -eq 202)

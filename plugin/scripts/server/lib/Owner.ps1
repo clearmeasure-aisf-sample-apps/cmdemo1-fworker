@@ -1,35 +1,5 @@
-# Owner sessions: one worker session owns a work item from its first assignment to the merge. The claim is per item and spans columns; a bot job
-# (the inspector) holds a separate lease on the same item and never the owner's claim. Design: docs/design/plant-manager.md sections 2, 4 and 7.
-
-function Test-OwnerMode { $c = Get-Cfg; (Test-Has $c 'ownerSessions') -and [bool]$c.ownerSessions }
-function Test-OwnedClaim($s) { (Test-Has $s 'claim') -and (Test-Has $s.claim 'owner') -and [bool]$s.claim.owner }
-
-# The owner finishes a stage and keeps the item: the claim moves to the new column with a fresh lease; reviews of the new column start empty.
-# Flow metrics (W0.8, delivery-speed.md 13): the state's `flow` is one small entry per stage the item entered, oldest first: @{ c = column; at = ISO }.
-# Only the last FlowKeep entries are kept (about 3 rounds of the board's 5 columns), so it stays small inside the state budget; Limit-StateBudget
-# trims it oldest-first as well when the whole state is over the budget. An entry for the column the item is already in is not added again
-# (a claim taken again in the same stage is not a new stage). The `metrics` verb turns the entries into the time spent per stage.
-$script:FlowKeep = 15
-function Add-FlowStamp($s, [string]$Column) {
-    if (-not $Column) { return }
-    $prev = @(if (Test-Has $s 'flow') { $s.flow })
-    if ($prev.Count -gt 0 -and "$($prev[-1].c)" -eq $Column) { return }
-    $s.flow = @($prev + @(@{ c = $Column; at = (ConvertTo-Iso (Get-UtcNow)) }) | Select-Object -Last $script:FlowKeep)
-}
-
-function Move-OwnerTo([int]$n, $s, [string]$Column) {
-    $t = (Get-Cfg).timing
-    Add-FlowStamp $s $Column
-    $s.claim.column = $Column; $s.claim.heartbeat = ConvertTo-Iso (Get-UtcNow); $s.claim.lease_until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($t.leaseMinutes))
-    if (-not (Test-Has $s 'dispatched_at')) { $s.dispatched_at = @{} }
-    $s.dispatched_at[$Column] = ConvertTo-Iso (Get-UtcNow)
-    if (Test-Has $s 'reviews') { $s.reviews.Remove($Column) }
-    # a stage finished is progress: the run of session take-backs (issue 91) starts again, and a take-back mark of an earlier session goes
-    foreach ($k in 'session_launches', 'taken_back') { if (Test-Has $s.claim $k) { $s.claim.Remove($k) } }
-}
-
-# ---- revoked worker names (gateway/Auth.cs). The gateway keeps one generation per name and nothing on its own disk, so the generation lives in
-# GitHub as a ref beside the claim refs: refs/factory/<instance>/revoked/<name>/<generation>. Admin verbs, called by the gateway only. ----
+# Revoked worker names (gateway/Auth.cs). The gateway keeps one generation per name and nothing on its own disk, so the generation lives in
+# GitHub as a ref beside the claim refs: refs/factory/<instance>/revoked/<name>/<generation>. Admin verbs, called by the gateway only.
 function Get-RevokedRefPath { "factory/$((Get-Cfg).name)/revoked" }
 
 # Every ref under a prefix of the revoked tree, all pages: the read goes on until a page comes back empty, so neither a page smaller than the one
