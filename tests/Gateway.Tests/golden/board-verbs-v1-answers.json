@@ -1,0 +1,605 @@
+{
+ "comment": "V3.3: what the rule scripts ingest-event (plugin/scripts/server/lib/Verbs.Sweep.ps1) and journal (Journal.ps1) answered to each case of BoardVerbParityTests, recorded on master 62da476c before the scripts were deleted (no GitHub credential, the repository's instance file). The answer is canonical (keys sorted, the times of the events left out). BoardVerbParityTests compares v2's answer with it; never edit it by hand.",
+ "answers": [
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"closed\",\"sender\":{\"login\":\"bob\"},\"pull_request\":{\"number\":40,\"merged\":true,\"merge_commit_sha\":\"m1\",\"head\":{\"ref\":\"factory-worker/12-x\",\"sha\":\"h1\",\"repo\":{\"full_name\":\"clearmeasure-aisf-sample-apps/cmdemo1-workorders\"}},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "base.merged",
+      "item": null,
+      "pr": 40,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "m1"
+     },
+     {
+      "column": null,
+      "event": "pr.merged",
+      "item": 12,
+      "login": "bob",
+      "pr": 40,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h1"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"payload\":{}}",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: event",
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"push\",\"delivery\":\"d-parity\",\"payload\":{\"ref\":\"refs/heads/master\"}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"closed\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"bug\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"labeled\",\"pull_request\":{\"number\":45,\"head\":{\"ref\":\"factory-worker/15-w\",\"sha\":\"h5\"}}}}",
+   "exit": 0,
+   "answer": {
+    "dropped": "pr.fork",
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"reopened\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"factory worker\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "item.reopened",
+      "item": 3,
+      "provider": "github",
+      "ref": "d-parity"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"opened\",\"pull_request\":{\"number\":45,\"head\":{\"ref\":\"factory-worker/15-w\",\"sha\":\"h5\"},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "dropped": "pr.fork",
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request_review\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"edited\",\"pull_request\":{\"number\":40,\"head\":{\"ref\":\"factory-worker/12-x\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"projects_v2_item\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"edited\",\"projects_v2_item\":{\"content_node_id\":\"I_5\"},\"changes\":{\"field_value\":{\"field_name\":\"Status\",\"to\":{\"name\":\"Development\"}}}}}",
+   "exit": 30,
+   "answer": {
+    "code": "secret-missing",
+    "exit": 30,
+    "ok": false,
+    "reason": "GH_TOKEN is not set on the gateway",
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"projects_v2_item\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"created\",\"projects_v2_item\":{\"content_node_id\":\"I_5\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"workflow_run\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"completed\",\"workflow_run\":{\"head_branch\":\"MASTER\",\"head_sha\":\"def\",\"conclusion\":\"failure\",\"name\":\"Build\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "conclusion": "failure",
+      "event": "build.master_completed",
+      "item": null,
+      "provider": "github",
+      "ref": "d-parity",
+      "run_attempt": null,
+      "run_id": null,
+      "sha": "def",
+      "workflow": "Build"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d\",\"payload\":{\"action\":\"closed\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"factory worker\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "item.closed",
+      "item": 3,
+      "provider": "github",
+      "ref": "d"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"closed\",\"pull_request\":{\"number\":44,\"merged\":true,\"merge_commit_sha\":\"m3\",\"head\":{\"ref\":\"factory-worker/15-w\",\"sha\":\"h5\",\"repo\":{\"full_name\":\"mallory/orders\"}},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "dropped": "pr.fork",
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"closed\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"Factory Worker\"},{\"name\":\"bug\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "item.closed",
+      "item": 3,
+      "provider": "github",
+      "ref": "d-parity"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"closed\",\"pull_request\":{\"number\":41,\"merged\":false,\"head\":{\"ref\":\"factory-worker/13-y\",\"sha\":\"h2\",\"repo\":{\"full_name\":\"clearmeasure-aisf-sample-apps/cmdemo1-workorders\"}},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "pr.closed",
+      "item": 13,
+      "login": "",
+      "pr": 41,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h2"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"labeled\",\"issue\":{\"number\":7,\"labels\":[{\"name\":\"factory worker\"}]},\"label\":{\"name\":\"factory worker\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "item.labeled",
+      "item": 7,
+      "provider": "github",
+      "ref": "d-parity"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"edited\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"factory worker\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"closed\",\"pull_request\":{\"number\":43,\"merged\":true,\"merge_commit_sha\":\"m2\",\"head\":{\"ref\":\"dependabot/npm/x\",\"sha\":\"h4\"},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "base.merged",
+      "item": null,
+      "pr": 43,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "m2"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request_review\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"dismissed\",\"review\":{\"user\":{\"login\":\"bob\"},\"state\":\"dismissed\",\"commit_id\":\"c1\"},\"pull_request\":{\"number\":40,\"head\":{\"ref\":\"factory-worker/12-x\",\"sha\":\"h1\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "action": "dismissed",
+      "column": null,
+      "commit_id": "c1",
+      "event": "pr.reviewed",
+      "item": 12,
+      "login": "bob",
+      "pr": 40,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h1",
+      "state": "DISMISSED"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"labeled\",\"issue\":{\"number\":7,\"labels\":[{\"name\":\"factory worker\"}]},\"label\":{\"name\":\"bug\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"opened\",\"sender\":{\"login\":\"alice\"},\"pull_request\":{\"number\":40,\"head\":{\"ref\":\"factory-worker/12-x\",\"sha\":\"h1\",\"repo\":{\"full_name\":\"clearmeasure-aisf-sample-apps/cmdemo1-workorders\"}},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "pr.opened",
+      "item": 12,
+      "login": "alice",
+      "pr": 40,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h1"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"synchronize\",\"pull_request\":{\"number\":40,\"head\":{\"ref\":\"factory-worker/12-x\",\"sha\":\"h2\",\"repo\":{\"full_name\":\"CLEARMEASURE-AISF-SAMPLE-APPS/CMDEMO1-WORKORDERS\"}},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "pr.head_changed",
+      "item": 12,
+      "login": "",
+      "pr": 40,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h2"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"workflow_run\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"completed\",\"workflow_run\":{\"head_branch\":\"feature/x\",\"head_sha\":\"d\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"repository\":{\"full_name\":\"acme/other\"},\"action\":\"closed\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"factory worker\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "dropped": "other-repository",
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"workflow_run\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"completed\",\"workflow_run\":{\"head_branch\":\"factory-worker/12-add-thing\",\"head_sha\":\"abc\",\"conclusion\":\"success\",\"name\":\"Build\",\"id\":99,\"run_attempt\":2}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "conclusion": "success",
+      "event": "build.branch_completed",
+      "item": 12,
+      "provider": "github",
+      "ref": "d-parity",
+      "run_attempt": 2,
+      "run_id": 99,
+      "sha": "abc",
+      "workflow": "Build"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"workflow_run\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"requested\",\"workflow_run\":{\"head_branch\":\"master\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"workflow_run\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"in_progress\",\"workflow_run\":{\"head_branch\":\"Factory-Worker/12-add-thing\",\"head_sha\":\"abc\",\"conclusion\":null,\"name\":\"Build\"}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "conclusion": null,
+      "event": "build.branch_started",
+      "item": 12,
+      "provider": "github",
+      "ref": "d-parity",
+      "run_attempt": null,
+      "run_id": null,
+      "sha": "abc",
+      "workflow": "Build"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"converted_to_draft\",\"pull_request\":{\"number\":42,\"head\":{\"ref\":\"factory-worker/14-z\",\"sha\":\"h3\",\"repo\":{\"full_name\":\"clearmeasure-aisf-sample-apps/cmdemo1-workorders\"}},\"base\":{\"ref\":\"master\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "pr.drafted",
+      "item": 14,
+      "login": "",
+      "pr": 42,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h3"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"issues\",\"delivery\":\"d-parity\",\"payload\":{\"repository\":{\"full_name\":\"clearmeasure-aisf-sample-apps/cmdemo1-workorders\"},\"action\":\"closed\",\"issue\":{\"number\":3,\"labels\":[{\"name\":\"factory worker\"}]}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "event": "item.closed",
+      "item": 3,
+      "provider": "github",
+      "ref": "d-parity"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"pull_request_review\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"submitted\",\"review\":{\"user\":{\"login\":\"bob\"},\"state\":\"approved\",\"commit_id\":\"c1\"},\"pull_request\":{\"number\":40,\"head\":{\"ref\":\"factory-worker/12-x\",\"sha\":\"h1\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "action": "submitted",
+      "column": null,
+      "commit_id": "c1",
+      "event": "pr.reviewed",
+      "item": 12,
+      "login": "bob",
+      "pr": 40,
+      "provider": "github",
+      "ref": "d-parity",
+      "sha": "h1",
+      "state": "APPROVED"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"workflow_run\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"completed\",\"workflow_run\":{\"head_branch\":\"master\",\"head_sha\":\"def\",\"conclusion\":\"failure\",\"name\":\"Build\",\"id\":7}}}",
+   "exit": 0,
+   "answer": {
+    "events": [
+     {
+      "column": null,
+      "conclusion": "failure",
+      "event": "build.master_completed",
+      "item": null,
+      "provider": "github",
+      "ref": "d-parity",
+      "run_attempt": null,
+      "run_id": 7,
+      "sha": "def",
+      "workflow": "Build"
+     }
+    ],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "ingest-event",
+   "stdin": "{\"event\":\"projects_v2_item\",\"delivery\":\"d-parity\",\"payload\":{\"action\":\"edited\",\"projects_v2_item\":{\"content_node_id\":\"I_5\"},\"changes\":{\"field_value\":{\"field_name\":\"Priority\"}}}}",
+   "exit": 0,
+   "answer": {
+    "events": [],
+    "exit": 0,
+    "ok": true,
+    "verb": "ingest-event"
+   }
+  },
+  {
+   "verb": "journal",
+   "stdin": "{\"item\":7,\"event\":\"no-such-event\"}",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "unknown journal event 'no-such-event'",
+    "verb": "journal"
+   }
+  },
+  {
+   "verb": "journal",
+   "stdin": "{\"item\":7}",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: event",
+    "verb": "journal"
+   }
+  },
+  {
+   "verb": "journal",
+   "stdin": "{}",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: item",
+    "verb": "journal"
+   }
+  },
+  {
+   "verb": "journal",
+   "stdin": "{\"event\":\"tier\"}",
+   "exit": 2,
+   "answer": {
+    "code": "usage",
+    "exit": 2,
+    "ok": false,
+    "reason": "missing argument: item",
+    "verb": "journal"
+   }
+  }
+ ]
+}
