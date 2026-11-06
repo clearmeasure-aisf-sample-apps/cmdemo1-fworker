@@ -15,9 +15,10 @@ using Fworker.Workflows.WorkItem;
 //   clear-hold        under auto the refusal "not-held" (a hold exists only under peer-approved)
 //   base-watch        the head of the default branch and a row per item: the saga's open items are read, every other item is a row skipped as "not-owned"
 //   base-update-branch  the back-merge of one pull request of an item the saga owns
-// What the saga's verbs leave unanswered is refused: "merge-policy" (exit 30) under a policy other than auto, "not-owned" (exit 10) for an item the saga does not own.
-/// <summary>The saga's parts the merge verbs run on: the merge verbs, the back-merge verbs, the saga's store and the home repository.</summary>
-sealed record MergeVerbParts(MergeVerbService Verbs, BaseUpdateService? Base, IWorkItemStore Store, RepoId Home);
+// What the saga's verbs leave unanswered is refused: "merge-policy" (exit 30) under a policy other than auto, "not-owned" (exit 10) for an item the saga does not own. Before any of it, merge and clear-hold refuse another
+// environment's item "out-of-scope" (exit 10) where the environment scope is on, as the script's Get-ItemInfo did first (the saga never owns such an item: its admission takes the environment's items only).
+/// <summary>The saga's parts the merge verbs run on: the merge verbs, the back-merge verbs, the saga's store, the home repository, and the item labels with this environment's env: label ("" while the scope is off).</summary>
+sealed record MergeVerbParts(MergeVerbService Verbs, BaseUpdateService? Base, IWorkItemStore Store, RepoId Home, IItemLabels? Labels = null, string EnvLabel = "");
 
 sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, VerbAnswer?>? guard = null)
 {
@@ -67,9 +68,10 @@ sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, VerbAnsw
         // W9.10q: the migration-number collision of the script's merge, and the model ladder's refusal count (the file the rule scripts and the item verbs count in)
         var dir = RuleStateDirectory.Resolve(Environment.GetEnvironmentVariable);
         Directory.CreateDirectory(dir);
-        var verbs = new MergeVerbService(home, saga.Store, new GitHubItemLabels(clients), m => host.PublishAsync(m), settings, migrations: new GitHubMergeMigrations(clients, home, instance.DefaultBranch), refusals: new ItemVerbsRefusals(dir));
+        var labels = new GitHubItemLabels(clients);
+        var verbs = new MergeVerbService(home, saga.Store, labels, m => host.PublishAsync(m), settings, migrations: new GitHubMergeMigrations(clients, home, instance.DefaultBranch), refusals: new ItemVerbsRefusals(dir));
         var update = new BaseUpdateService(new GitHubBaseUpdate(clients, home, instance.DefaultBranch), new SagaBaseUpdateItems(saga.Store, home, open), new BackmergeSettings(name));
-        return new MergeVerbParts(verbs, update, saga.Store, home);
+        return new MergeVerbParts(verbs, update, saga.Store, home, labels, BoardWiring.EnvLabel(instance.Root, Environment.GetEnvironmentVariable));
     }
 
     static JsonObject? Body(string stdin) { try { return string.IsNullOrWhiteSpace(stdin) ? new JsonObject() : JsonNode.Parse(stdin) as JsonObject; } catch { return null; } }
@@ -85,16 +87,26 @@ sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, VerbAnsw
         ? MergeVerbReplies.Reject(verb, 30, "merge-policy", $"merge policy '{p.Verbs.Settings.MergePolicy}' is not supported: the gateway merges under merge policy 'auto' only")
         : MergeVerbReplies.Reject(verb, 10, "not-owned", $"item #{body["item"]} is not an item the work item saga owns");
 
+    // Test-ItemInScope behind Get-ItemInfo: with the scope on, the item carries exactly one env: label and it is this environment's; an issue that is not there is the script's item-not-found
+    static async Task<VerbAnswer?> OutOfScope(string verb, MergeVerbParts p, JsonObject body)
+    {
+        if (p.EnvLabel.Length == 0 || p.Labels is null || !MergeVerbReplies.ItemNumber(verb, body, out var item, out _)) return null;
+        if (await p.Labels.LabelsOf(new ItemId(p.Home, item), CancellationToken.None) is not { } labels) return MergeVerbReplies.Reject(verb, 12, "item-not-found", $"issue #{item} not found");
+        var envs = labels.Where(l => l.StartsWith("env:", StringComparison.OrdinalIgnoreCase)).ToList();
+        return envs.Count == 1 && string.Equals(envs[0], p.EnvLabel, StringComparison.OrdinalIgnoreCase) ? null
+            : MergeVerbReplies.Reject(verb, 10, "out-of-scope", $"issue #{item} is outside this gateway's scope: it does not carry exactly one env: label, '{p.EnvLabel}'");
+    }
+
     static JsonObject NotOwnedRow(int item) => new() { ["item"] = item, ["pr"] = 0, ["branch"] = "", ["head"] = "", ["behind"] = 0, ["overlap"] = new JsonArray(), ["skip"] = "not-owned" };
 
-    async Task<VerbAnswer> Run(string verb, string stdin, Func<MergeVerbParts, JsonObject, Task<VerbAnswer?>> v2)
+    async Task<VerbAnswer> Run(string verb, string stdin, Func<MergeVerbParts, JsonObject, Task<VerbAnswer?>> v2, bool scoped = false)
     {
         var body = Body(stdin);
         if (guard?.Invoke(verb) is { } refused) return refused;
         if (body is null) return NotAnObject(verb);
         if (find() is not { } p) return NotReady(verb);
         VerbAnswer? answer;
-        try { answer = await v2(p, body); }
+        try { answer = (scoped ? await OutOfScope(verb, p, body) : null) ?? await v2(p, body); }
         catch (Exception e) when (e is not OperationCanceledException)
         {
             Console.Error.WriteLine($"merge verb {verb} on v2: {e.GetType().Name}: {e.Message}");
@@ -106,11 +118,11 @@ sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, VerbAnsw
         return v2Answer;
     }
 
-    public Task<VerbAnswer> Merge(string stdin, TimeSpan timeout) => Run("merge", stdin, async (p, body) => await p.Verbs.Merge(body, CancellationToken.None));
+    public Task<VerbAnswer> Merge(string stdin, TimeSpan timeout) => Run("merge", stdin, async (p, body) => await p.Verbs.Merge(body, CancellationToken.None), scoped: true);
 
     public Task<VerbAnswer> ApprovePr(string stdin, TimeSpan timeout) => Run("approve-pr", stdin, (p, body) => Task.FromResult(p.Verbs.ApprovePr(body)));
 
-    public Task<VerbAnswer> ClearHold(string stdin, TimeSpan timeout) => Run("clear-hold", stdin, async (p, body) => await p.Verbs.ClearHold(body, CancellationToken.None));
+    public Task<VerbAnswer> ClearHold(string stdin, TimeSpan timeout) => Run("clear-hold", stdin, async (p, body) => await p.Verbs.ClearHold(body, CancellationToken.None), scoped: true);
 
     public Task<VerbAnswer> BaseUpdateBranch(string stdin, TimeSpan timeout) =>
         Run("base-update-branch", stdin, async (p, body) => p.Base is null ? null : await p.Base.UpdateBranch(body, CancellationToken.None));

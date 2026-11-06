@@ -40,6 +40,11 @@ public sealed class MergeVerbRoutesTests
         public Task<IReadOnlyList<string>?> LabelsOf(ItemId item, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(names);
     }
 
+    sealed class LabelsByItem(Dictionary<int, string[]> byItem) : IItemLabels
+    {
+        public Task<IReadOnlyList<string>?> LabelsOf(ItemId item, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(byItem.TryGetValue(item.Number, out var l) ? l : null);
+    }
+
     sealed class Github : IBaseUpdateGitHub
     {
         public List<BasePull> Open = [];
@@ -68,11 +73,14 @@ public sealed class MergeVerbRoutesTests
         public MergeVerbHandlers Handlers;
 
         public Rig(string policy = "auto", bool parts = true, Fworker.Workflows.WorkItem.Verbs.IItemRefusals? refusals = null, IMergeMigrations? migrations = null, params string[] labels)
+            : this(policy, parts, refusals, migrations, null, "", labels) { }
+
+        public Rig(string policy, bool parts, Fworker.Workflows.WorkItem.Verbs.IItemRefusals? refusals, IMergeMigrations? migrations, IItemLabels? scopeLabels, string envLabel, params string[] labels)
         {
             var settings = new MergeVerbSettings(policy, "Auto Merge", ["hold:owner"], "Functional Testing", _ => null);
             var verbs = new MergeVerbService(Home, Store, new Labels(labels), m => { Published.Add(m); return Task.FromResult(true); }, settings, new MergeVerbWait(TimeSpan.Zero, 1), _ => Task.CompletedTask, migrations: migrations, refusals: refusals);
             var update = new BaseUpdateService(Gh, new Items(Store), new BackmergeSettings("factory-worker"), _ => Task.CompletedTask);
-            MergeVerbParts? p = parts ? new MergeVerbParts(verbs, update, Store, Home) : null;
+            MergeVerbParts? p = parts ? new MergeVerbParts(verbs, update, Store, Home, scopeLabels, envLabel) : null;
             Handlers = new MergeVerbHandlers(() => p);
         }
 
@@ -127,6 +135,35 @@ public sealed class MergeVerbRoutesTests
             Assert.Contains("#9", o["reason"]!.ToString());
         }
         Assert.Empty(rig.Published);
+    }
+
+    [Fact]
+    public async Task WithTheEnvironmentScopeOn_AnotherEnvironmentsItem_IsRefusedOutOfScope_BeforeAnyOtherCheck()
+    {
+        var scope = new LabelsByItem(new() { [2] = ["factory worker", "env:uat"], [3] = ["factory worker"], [4] = ["env:tdd", "env:uat"], [7] = ["factory worker", "env:tdd", "Auto Merge"] });
+        var rig = new Rig("auto", true, null, null, scope, "env:tdd", "Auto Merge");
+        await rig.Own(2);   // (even an item the saga owned: the env: label decides first, as Get-ItemInfo did)
+        foreach (var n in new[] { 2, 3, 4 })
+            foreach (var (verb, answer) in new[] { ("merge", await rig.Handlers.Merge($"{{\"item\":{n},\"pr\":1}}", Timeout)), ("clear-hold", await rig.Handlers.ClearHold($"{{\"item\":{n}}}", Timeout)) })
+            {
+                var o = J(answer.Output);
+                Assert.Equal((10, false, verb, "out-of-scope"), (answer.Code, o["ok"]!.GetValue<bool>(), o["verb"]!.ToString(), o["code"]!.ToString()));
+                Assert.Contains("'env:tdd'", o["reason"]!.ToString());
+            }
+        Assert.Empty(rig.Published);
+        // an issue that is not there is the script's item-not-found; this environment's own item goes on to the saga's checks
+        Assert.Equal((12, "item-not-found"), ((await rig.Handlers.Merge("{\"item\":9}", Timeout)).Code, J((await rig.Handlers.Merge("{\"item\":9}", Timeout)).Output)["code"]!.ToString()));
+        await rig.Own(7, mergeCommit: "ccc3333333333333333333333333333333333333");
+        Assert.Equal("already-merged", J((await rig.Handlers.Merge("{\"item\":7,\"pr\":11}", Timeout)).Output)["outcome"]!.ToString());
+        // the other verbs are not scoped here (the script's approve-pr refused not-required first, its back-merge read no labels)
+        Assert.Equal("not-required", J((await rig.Handlers.ApprovePr("{\"item\":2,\"text\":\"x\"}", Timeout)).Output)["code"]!.ToString());
+    }
+
+    [Fact]
+    public async Task WithTheEnvironmentScopeOff_NoLabelIsReadForTheScope()
+    {
+        var rig = new Rig("auto", true, null, null, new LabelsByItem(new() { [2] = ["env:uat"] }), "", "Auto Merge");
+        Assert.Equal("not-owned", J((await rig.Handlers.Merge("{\"item\":2,\"pr\":1}", Timeout)).Output)["code"]!.ToString());
     }
 
     [Fact]
