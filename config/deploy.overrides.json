@@ -48,7 +48,7 @@
     "healthPath": "/_healthcheck/detailed"
   },
   "delivery": {
-    "autoPromote": { "enabled": true, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd" },
+    "autoPromote": { "enabled": false, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd" },
     "finalEnvironment": "tdd"
   },
   "api": {

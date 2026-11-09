@@ -9,6 +9,7 @@ namespace Fworker.Workflows.WorkItem;
 // it; this job does the same repair from outside and also covers a crash of the process that Wolverine's outbox would not (the message that was never produced). It publishes again, for each open item that is not parked:
 //  - a timer that is overdue by more than OverdueGrace (the durable timers poll every few seconds, so a timer that late is lost): the timer's message itself, which the saga takes as the timer would have been (a lease that
 //    ran out, a merge retry, the end of the settle window, the end of a park, the master-green wait that ran out; a timer that already fired is Stale or a repeated key, and does nothing);
+//  - the settle timer of an item already held for prod, at once, when this gateway no longer promotes prod (WorkItemPolicy.HoldsForProd is false): the cap is otherwise up to 14 days out, and nothing else looks at the item until then;
 //  - the commands of the item's last transition (the slot request, the end of a session, the merge call), when the item has not changed for SilentFor and the transition asked for any: every one of them is idempotent by
 //    its key (the scheduler and the merge line answer a repeat as they answered the first), and the next input of the item empties the list.
 
@@ -50,6 +51,12 @@ public sealed class WorkItemRearm(IWorkItemAges ages, WorkItemPolicy policy, Fun
             // SessionStartRequested or MergeRequested of that generation would act on the old state. Every row is silent after a break, so without this the re-arm would send them all. The adoption releases the item (its row
             // is then the new generation, or was found to stand) and the next run repairs what is still missing.
             if (awaitsReadoption is not null && awaitsReadoption(s.Item)) { held++; continue; }
+            // a hold for a promoter this gateway no longer is: the cap's timer is still in the future, so publish the settle message now and the saga completes the item (SettleEnded, the first branch)
+            if (s.Status == WorkItemStatus.Settling && s.SettleHeld && !policy.HoldsForProd)
+            {
+                foreach (var t in WorkItemSaga.TimersOf(s).Where(t => t.Message is SettleWindowElapsed && t.Due > now - OverdueGrace))
+                    if (await Send(t.Message)) timers++; else failed++;
+            }
             if (s.Parked)
             {
                 // W9.10f: a parked item has the timers of its park (its end, the owner's patience): a lost one would leave it parked for ever

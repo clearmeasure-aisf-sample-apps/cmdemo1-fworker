@@ -1,5 +1,7 @@
 # Automatic promotion of cmdemo1-ui (owner decision 2026-10-23)
 
+**Status (Jeffrey Palermo, 2026-11-09):** the tdd gateway does not promote. `config/deploy.overrides.json` sets `delivery.autoPromote.enabled` to `false`. cmdemo1-system's `ui-auto-promote` workflow is the only promoter of the Octopus project `cmdemo1-ui` to uat and prod (cmdemo1-system pull request 536). The incident rollback of the app in tdd stays with this gateway. The text below is the design of the promoter, which runs only while `delivery.autoPromote.enabled` is true and `gatewayEnvironment` names this gateway.
+
 The acting gateway promotes a release of `octopus.project` (cmdemo1-ui) from tdd to uat, then to prod, by itself: "gated by checks", no AI
 session and no person in the loop. Code: `plugin/scripts/lib/Verbs.Promote.ps1` (the verb `auto-promote`, `Invoke-AutoPromote`), run by the
 gateway's own loop (`gateway/AutoPromoter.cs`; REMOVED in V2.3, 2026-11-01: the delivery train now promotes and this text describes the v1 design the train reproduces) every `timing.promoteSeconds` (60) with
@@ -28,9 +30,9 @@ journal lines are the same as before; only repeated reads are gone. Labels come 
 
 | Setting | Default (`config/instance.json`) | tdd gateway (`config/deploy.overrides.json`) |
 |---|---|---|
-| `delivery.autoPromote.enabled` | `false` | `true` |
+| `delivery.autoPromote.enabled` | `false` | `false` (2026-11-09; was `true`) |
 | `delivery.autoPromote.environments` | `["uat", "prod"]` | same |
-| `delivery.autoPromote.gatewayEnvironment` | `""`: nobody promotes (fail closed) | `"tdd"`: only the gateway with `FACTORY_ENVIRONMENT=tdd` promotes (the same image runs in uat and prod) |
+| `delivery.autoPromote.gatewayEnvironment` | `""`: nobody promotes (fail closed) | `"tdd"` in the file; ignored while `enabled` is false |
 | `octopus.tddUrl`, `octopus.uatUrl` | `""`: the release waits ("no health URL") | the cmdemo1-ui app URLs of tdd and uat |
 | `octopus.healthPath`, `octopus.health` | `/_healthcheck/detailed`; spacing 5, settle 10 min, 3 retries 20 s | same |
 
@@ -103,5 +105,5 @@ The account needs, on project cmdemo1-ui (environments tdd, uat, prod unless not
 | `InterruptionSubmit` (uat, prod) | taking responsibility and answering Proceed or Abort |
 
 If the Sign-off step is restricted to a team (the step's "responsible teams"), the account must be a member of that team as well.
-The grant is an owner action. When the gate is live, cmdemo1-system's `ui-auto-promote.yml` (Octopus user cmdemo1-github) stops promoting
-ui, so the two never both promote.
+The grant is an owner action. As of 2026-11-09 the gateway's switch is off and cmdemo1-system's `ui-auto-promote.yml` is the promoter of
+cmdemo1-ui, so the two do not both promote.

@@ -75,8 +75,11 @@ public sealed class EngineOptionsTests : IDisposable
         // #437 option A: the Copilot and Cursor runtimes are off for the measured batch
         Assert.False(merged["api"]!["cursor"]!["enabled"]!.GetValue<bool>());
         Assert.False(merged["api"]!["copilot"]!["environments"]!["tdd"]!["enabled"]!.GetValue<bool>());
-        // V2.3: v1's promoter is gone, so the train promotes uat and prod with no switch; the merge strategy is the default's
+        // the gateway does not promote cmdemo1-ui (owner, 2026-11-09): enabled is false, and there is no trainActs switch; the merge strategy is the default's
         var overrides = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")))!;
+        Assert.False(overrides["delivery"]!["autoPromote"]!["enabled"]!.GetValue<bool>());
+        Assert.Equal(new[] { "uat", "prod" }, Strings(overrides["delivery"]!["autoPromote"]!["environments"]));
+        Assert.Equal("tdd", overrides["delivery"]!["autoPromote"]!["gatewayEnvironment"]!.GetValue<string>());
         Assert.Null(overrides["delivery"]!["autoPromote"]!["trainActs"]);
         Assert.Null(overrides["mergeStrategy"]);
     }
