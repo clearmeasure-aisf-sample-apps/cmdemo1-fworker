@@ -56,10 +56,10 @@ public sealed record WorkItemPolicy(
     public TimeSpan Settle => SettleWindow ?? TimeSpan.FromHours(24);
 
     /// <summary>
-    /// <see cref="V1PromotesProd" /> says that v1's AutoPromoter promotes prod from this gateway (delivery.autoPromote enabled, prod among its environments, gatewayEnvironment this one); a gateway where nothing does never holds.
-    /// Where the final environment is before prod (tdd: v2 delivers there), v1's AutoPromoter still promotes the release on to uat and prod, and it takes its items from the Release Queue (the state's merge.awaiting
+    /// <see cref="V1PromotesProd" /> says that this gateway promotes prod (delivery.autoPromote enabled, prod among its environments, gatewayEnvironment this one); a gateway where nothing does never holds.
+    /// Where the final environment is before prod (tdd: v2 delivers there) and this gateway still promotes the release on to uat and prod, it takes its items from the Release Queue (the state's merge.awaiting
     /// release-queue, which the projection writes only while the item is Settling). So the settle window does not complete an item whose release has not reached prod: it holds, until the DeliveredTo(prod) of the
-    /// prod train or until <see cref="SettleCap"/> after the delivery.
+    /// prod train or until <see cref="SettleCap"/> after the delivery. When the switch is turned off, an item already held is released by the saga re-arm (<see cref="WorkItemRearm"/>) instead of waiting out the cap.
     /// </summary>
     public bool HoldsForProd => V1PromotesProd && !string.Equals(FinalEnvironment, "prod", StringComparison.OrdinalIgnoreCase);
 

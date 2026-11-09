@@ -320,6 +320,26 @@ public class WorkItemSagaTests
     }
 
     [Fact]
+    public async Task AHoldForProd_EndsWhenThisGatewayNoLongerPromotes_AndTheIssueCloses()
+    {
+        var fx = new SagaFixture(AtTdd);
+        await fx.Start(); await fx.Merged();
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
+        fx.Now = T0.AddHours(25);
+        var held = await fx.Send(window);
+        var cap = Assert.IsType<SettleWindowElapsed>(Assert.Single(held.Timers).Message);
+        Assert.True(fx.State.SettleHeld);
+        // the same row, read by a gateway whose policy no longer promotes prod: the cap's timer completes the item now, and the issue closes (the cap's own reason would not)
+        var released = new WorkItemService(fx.Store, new WorkItemSaga(fx.Docs, WorkItemPolicy.Default with { FinalEnvironment = "tdd" }), () => fx.Now);
+        var end = await released.Handle(cap);
+        var completed = Assert.Single(end.Decisions);
+        Assert.Equal(WorkItemActions.Completed, completed.Action);
+        Assert.Equal("this gateway no longer promotes to prod, so the settle hold ends", completed.Reasons[0]);
+        Assert.NotNull(WorkItemIssueClose.For(completed, carriesFeature: true));
+        Assert.Equal((WorkItemStatus.Completed, false), (fx.State.Status, fx.State.SettleHeld));
+    }
+
+    [Fact]
     public async Task WhereNothingPromotesProd_TheWindowCompletesTheItemAtTdd()
     {
         var fx = new SagaFixture(WorkItemPolicy.Default with { FinalEnvironment = "tdd" });

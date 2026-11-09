@@ -6,6 +6,7 @@ using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
 using Fworker.Domain;
 using Fworker.Workflows.Delivery;
+using Fworker.Workflows.Incident;
 using Xunit;
 
 namespace Gateway.Tests;
@@ -95,6 +96,34 @@ public sealed class DeliveryShadowPortTests
         var cfg = InstanceConfig.Load(Path.Combine(root, "config", "instance.json"), _ => null);
         Assert.True(cfg.DependenciesDelivered);
         // (the source defaults name no Octopus project, so there is no train to give the setting to; the settings of a deployed gateway do)
+    }
+
+    [Fact]
+    public void TheDeployedImage_DoesNotPromoteUi_AndStillRollsBackTdd()
+    {
+        // owner, 2026-11-09: cmdemo1-system's ui-auto-promote is the only promoter of cmdemo1-ui to uat and prod; the tdd incident rollback stays here
+        var root = AppContext.BaseDirectory;
+        for (var d = new DirectoryInfo(root); d is not null; d = d.Parent)
+            if (File.Exists(Path.Combine(d.FullName, "config", "instance.json"))) { root = d.FullName; break; }
+        var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(root, "config", "instance.json")), File.ReadAllText(Path.Combine(root, "config", "deploy.overrides.json")));
+        var cfg = Config(merged.ToJsonString());
+        Assert.False(cfg.AutoPromoteHere);
+        var settings = DeliveryShadowSettings.From(cfg, engineActs: true)!;
+        Assert.Equal("cmdemo1-ui", settings.Project);
+        Assert.Empty(settings.Environments!);
+        Assert.Contains("scripts/Update/", settings.MigrationPaths!);
+        Assert.Equal(RollbackMode.Automatic, IncidentSettings.From(merged).RollbackOf("tdd"));
+        Assert.False(DocsPlanSettingsReader.From(merged, n => n == "FACTORY_ENVIRONMENT" ? "tdd" : null).Policy.HoldsForProd);
+
+        var home = cfg.Home!.Value;
+        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, home.Owner, home, null, [new RepositoryEntry(home, [new DeployableEntry("ui", home, null, null, null, null, false)])], []);
+        var trains = new CatalogDeliveryPolicies(() => snapshot, DeliveryShadowSettings.For(cfg, () => snapshot, engineActs: true)).All();
+        var tdd = Assert.Single(trains, p => p.Environment == "tdd");
+        Assert.Equal((Promoter.Pipeline, false, "cmdemo1-ui"), (tdd.Promoter, tdd.Acts, tdd.Project));
+        Assert.True(RollbackRules.Automatic(tdd));
+        Assert.Contains("scripts/Update/", tdd.Migrations);
+        Assert.All(trains.Where(p => p.Environment is "uat" or "prod"), p => Assert.False(p.Enabled));
+        Assert.All(trains.Where(p => p.Environment is "uat" or "prod"), p => Assert.False(p.Acts));
     }
 
     // ---- the reads -----------------------------------------------------------------------------------------------------------------------------------------

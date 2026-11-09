@@ -317,7 +317,14 @@ public sealed class DeliverStep : WorkStep
     /// </summary>
     static StepAnswer SettleEnded(StepContext c)
     {
-        if (!c.Policy.HoldsForProd || c.State.Delivered.ContainsKey(Prod)) { c.Complete(c.Policy.HoldsForProd ? "the settle window ended and the release is in prod" : "the settle window ended"); return StepAnswer.Applied; }
+        if (!c.Policy.HoldsForProd || c.State.Delivered.ContainsKey(Prod))
+        {
+            // an item already held for prod, read by a gateway that no longer promotes it: the hold ends here, and the issue closes (the cap's reason does not)
+            var why = c.State.SettleHeld && !c.Policy.HoldsForProd ? "this gateway no longer promotes to prod, so the settle hold ends"
+                : c.Policy.HoldsForProd ? "the settle window ended and the release is in prod" : "the settle window ended";
+            c.Complete(why);
+            return StepAnswer.Applied;
+        }
         if (c.State.SettleHeld)
         {
             // the end is not silent: a decision of its own (the history, the status and the digest show it; the gateway logs a warning), then the completion

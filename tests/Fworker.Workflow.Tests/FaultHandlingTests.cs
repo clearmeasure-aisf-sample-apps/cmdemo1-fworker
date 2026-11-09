@@ -287,6 +287,30 @@ public sealed class WorkItemRearmTests
     }
 
     [Fact]
+    public async Task ASettleHoldForProd_IsReleasedAtOnce_WhenThisGatewayNoLongerPromotesProd_AndLeft_WhileItDoes()
+    {
+        var holding = WorkItemPolicy.Default with { FinalEnvironment = "tdd", V1PromotesProd = true };
+        var fx = new SagaFixture(holding);
+        fx.Store.Clock = () => fx.Now;
+        await fx.Start(); await fx.Merged();
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
+        fx.Now = SagaFixture.T0.AddHours(25);
+        await fx.Send(window);
+        Assert.Equal(SagaFixture.T0.AddDays(14), fx.State.SettleUntil);   // the cap, still days away
+
+        var sent = new List<object>();
+        var stillHolding = new WorkItemRearm(fx.Store, holding, m => { sent.Add(m); return Task.FromResult(true); }, () => fx.Now);
+        await stillHolding.Run(default);
+        Assert.Empty(sent);
+
+        var released = new WorkItemRearm(fx.Store, WorkItemPolicy.Default with { FinalEnvironment = "tdd" }, m => { sent.Add(m); return Task.FromResult(true); }, () => fx.Now);
+        var report = await released.Run(default);
+        var timer = Assert.IsType<SettleWindowElapsed>(Assert.Single(sent));
+        Assert.Equal(fx.Arm, timer.ArmId);
+        Assert.Equal(1, report.Timers);
+    }
+
+    [Fact]
     public async Task AHostThatIsNotUp_IsCountedAsFailed_AndTheNextRunTriesAgain()
     {
         var fx = new SagaFixture(); fx.Store.Clock = () => fx.Now;
